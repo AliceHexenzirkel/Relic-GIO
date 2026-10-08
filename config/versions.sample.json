@@ -92,7 +92,7 @@
       "desc": "Relive the summer of '22. Uncover the past of your closest friends, and be Fischl's faithful retainers in search of Immernachtreich's revival on the Mysterious Archipelago.",
       "server": "2.8",
       "account": "Aetherr",
-      "navmesh": { "url": "https://github.com/AliceHexenzirkel/Relic-GIO/releases/download/v0.1/relic-navmesh-2.8-v5.zip", "sha256": "sha256:c8f3c607d6406758bb19df61b13e5636abbde5efa793c6699bc6037941661a8c", "size": 127650863 },
+      "navmesh": { "url": "https://github.com/AliceHexenzirkel/Relic-GIO/releases/download/v0.1/relic-navmesh-2.8-v5.zip", "sha256": "c8f3c607d6406758bb19df61b13e5636abbde5efa793c6699bc6037941661a8c", "size": 127650863 },
       "client": {
         "cdnUrl": "https://autopatchhk.yuanshen.com/client_app/download/pc_zip/20220625012443_r2qBGYstD0u3Q9xK/GenshinImpact_2.8.0.zip",
         "driveId": "",
