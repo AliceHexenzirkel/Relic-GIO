@@ -1,0 +1,94 @@
+# ─────────────────────────────────────────────────────────────
+#  SECRETS / SENSITIVE  (never commit)
+# ─────────────────────────────────────────────────────────────
+# Local reference material (vendor docs, mockups, reference saves…) is never committed.
+*_ref/
+# Real version catalog (contains private Drive ids); the .sample is committed
+config/versions.json
+# Agent bearer token baked into ship builds (fetched by agent/get_token.bat)
+config/agent.token
+agent/config/agent.token
+# Local copy of get_token.bat with real credentials filled in
+agent/get_token.local.bat
+# GitHub API tree dump used once as a reference
+tree.json
+# App runtime secrets (server address, sign key, drive links, agent token)
+secrets/
+**/appsettings.Local.json
+**/appsettings.*.local.json
+*.secret.json
+.env
+.env.*
+
+# ─────────────────────────────────────────────────────────────
+#  .NET / C#
+# ─────────────────────────────────────────────────────────────
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Pp]ublish/
+publish*/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.dll.config
+project.lock.json
+artifacts/
+
+# ─────────────────────────────────────────────────────────────
+#  Node / tooling (if any front-end build tooling is added)
+# ─────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+dist/
+.parcel-cache/
+
+# ─────────────────────────────────────────────────────────────
+#  Go (Linux REST agent build outputs)
+# ─────────────────────────────────────────────────────────────
+agent/**/bin/
+*.exe~
+*.test
+__pycache__/
+*.pyc
+
+# ─────────────────────────────────────────────────────────────
+#  Downloaded game payloads / large binaries (never commit)
+# ─────────────────────────────────────────────────────────────
+downloads/
+game_cache/
+# ExcelBinOutput + TextMap snapshots make_catalog.py caches (~41 MB); re-downloadable by rerunning it
+build/_gamedata_cache/
+# Verification output of build/make_catalog.py — the SHIPPED catalogue is config/gamedata.json
+config/gamedata.generated.json
+*.zip
+*.7z
+Audio_*/
+
+# ─────────────────────────────────────────────────────────────
+#  Installer / packaging outputs
+# ─────────────────────────────────────────────────────────────
+*.msi
+*.msix
+setup-*.exe
+Output/
+installer/Output/
+installer/redist/
+
+# ─────────────────────────────────────────────────────────────
+#  Misc
+# ─────────────────────────────────────────────────────────────
+*.log
+Thumbs.db
+desktop.ini
+.DS_Store
+scratch/
+tmp/
+
+# Native injector build output (the source is the injector/mhynot2 submodule)
+injector/build/

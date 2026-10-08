@@ -1,0 +1,18 @@
+[Unit]
+Description=GIO agent (Relic launcher control service)
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/gio-agent/gio_agent.py
+EnvironmentFile=/etc/gio-agent/config
+Restart=always
+RestartSec=2
+User=root
+# Hardening: the agent only needs to reach docker + localhost.
+NoNewPrivileges=true
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target

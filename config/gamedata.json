@@ -1,0 +1,2616 @@
+{
+  "_comment": "The content catalogue for the GM commands, extracted from the real ExcelBinOutput of versions 1.6 and 2.8 (not from memory). It holds the characters, the 4★ and 5★ weapons and the 4★ and 5★ artifact sets. \"since\" = the first supported version in which the item exists in the game data; the UI shows only what is available for the selected version, and the \"NEW\" badge marks what was added in that very version. Names and aliases are normalised (lower case) when searching, but you can always type the numeric id directly — it passes through untouched, whatever the version. The pieces of a set are exactly in the order flower, plume, sands, goblet, circlet, and the chosen id is the variant that drops with the maximum number of sub-stats. Artifacts are sent either as \"item add <piece> 1\" (they land in the inventory, unequipped) or as \"equip add <piece> <level>\" (equipped directly on the character controlled in game) — the server has no command for a whole set.",
+  "versionOrder": [
+    "1.6",
+    "2.8"
+  ],
+  "avatars": [
+    {
+      "id": 10000002,
+      "name": "Kamisato Ayaka",
+      "aliases": [
+        "ayaka"
+      ],
+      "rarity": 5,
+      "element": "Cryo",
+      "weapon": "Sword",
+      "since": "1.6",
+      "splash": "10000002.webp"
+    },
+    {
+      "id": 10000003,
+      "name": "Jean",
+      "rarity": 5,
+      "element": "Anemo",
+      "weapon": "Sword",
+      "since": "1.6",
+      "splash": "10000003.webp"
+    },
+    {
+      "id": 10000005,
+      "name": "Traveler (Aether)",
+      "aliases": [
+        "aether",
+        "traveler",
+        "calator"
+      ],
+      "rarity": 5,
+      "weapon": "Sword",
+      "since": "1.6",
+      "splash": "10000005.webp"
+    },
+    {
+      "id": 10000006,
+      "name": "Lisa",
+      "rarity": 4,
+      "element": "Electro",
+      "weapon": "Catalyst",
+      "since": "1.6",
+      "splash": "10000006.webp"
+    },
+    {
+      "id": 10000007,
+      "name": "Traveler (Lumine)",
+      "aliases": [
+        "lumine",
+        "calatoare"
+      ],
+      "rarity": 5,
+      "weapon": "Sword",
+      "since": "1.6",
+      "splash": "10000007.webp"
+    },
+    {
+      "id": 10000014,
+      "name": "Barbara",
+      "rarity": 4,
+      "element": "Hydro",
+      "weapon": "Catalyst",
+      "since": "1.6",
+      "splash": "10000014.webp"
+    },
+    {
+      "id": 10000015,
+      "name": "Kaeya",
+      "rarity": 4,
+      "element": "Cryo",
+      "weapon": "Sword",
+      "since": "1.6",
+      "splash": "10000015.webp"
+    },
+    {
+      "id": 10000016,
+      "name": "Diluc",
+      "rarity": 5,
+      "element": "Pyro",
+      "weapon": "Claymore",
+      "since": "1.6",
+      "splash": "10000016.webp"
+    },
+    {
+      "id": 10000020,
+      "name": "Razor",
+      "rarity": 4,
+      "element": "Electro",
+      "weapon": "Claymore",
+      "since": "1.6",
+      "splash": "10000020.webp"
+    },
+    {
+      "id": 10000021,
+      "name": "Amber",
+      "rarity": 4,
+      "element": "Pyro",
+      "weapon": "Bow",
+      "since": "1.6",
+      "splash": "10000021.webp"
+    },
+    {
+      "id": 10000022,
+      "name": "Venti",
+      "rarity": 5,
+      "element": "Anemo",
+      "weapon": "Bow",
+      "since": "1.6",
+      "splash": "10000022.webp"
+    },
+    {
+      "id": 10000023,
+      "name": "Xiangling",
+      "rarity": 4,
+      "element": "Pyro",
+      "weapon": "Polearm",
+      "since": "1.6",
+      "splash": "10000023.webp"
+    },
+    {
+      "id": 10000024,
+      "name": "Beidou",
+      "rarity": 4,
+      "element": "Electro",
+      "weapon": "Claymore",
+      "since": "1.6",
+      "splash": "10000024.webp"
+    },
+    {
+      "id": 10000025,
+      "name": "Xingqiu",
+      "rarity": 4,
+      "element": "Hydro",
+      "weapon": "Sword",
+      "since": "1.6",
+      "splash": "10000025.webp"
+    },
+    {
+      "id": 10000026,
+      "name": "Xiao",
+      "rarity": 5,
+      "element": "Anemo",
+      "weapon": "Polearm",
+      "since": "1.6",
+      "splash": "10000026.webp"
+    },
+    {
+      "id": 10000027,
+      "name": "Ningguang",
+      "rarity": 4,
+      "element": "Geo",
+      "weapon": "Catalyst",
+      "since": "1.6",
+      "splash": "10000027.webp"
+    },
+    {
+      "id": 10000029,
+      "name": "Klee",
+      "rarity": 5,
+      "element": "Pyro",
+      "weapon": "Catalyst",
+      "since": "1.6",
+      "splash": "10000029.webp"
+    },
+    {
+      "id": 10000030,
+      "name": "Zhongli",
+      "rarity": 5,
+      "element": "Geo",
+      "weapon": "Polearm",
+      "since": "1.6",
+      "splash": "10000030.webp"
+    },
+    {
+      "id": 10000031,
+      "name": "Fischl",
+      "rarity": 4,
+      "element": "Electro",
+      "weapon": "Bow",
+      "since": "1.6",
+      "splash": "10000031.webp"
+    },
+    {
+      "id": 10000032,
+      "name": "Bennett",
+      "rarity": 4,
+      "element": "Pyro",
+      "weapon": "Sword",
+      "since": "1.6",
+      "splash": "10000032.webp"
+    },
+    {
+      "id": 10000033,
+      "name": "Tartaglia",
+      "aliases": [
+        "childe"
+      ],
+      "rarity": 5,
+      "element": "Hydro",
+      "weapon": "Bow",
+      "since": "1.6",
+      "splash": "10000033.webp"
+    },
+    {
+      "id": 10000034,
+      "name": "Noelle",
+      "rarity": 4,
+      "element": "Geo",
+      "weapon": "Claymore",
+      "since": "1.6",
+      "splash": "10000034.webp"
+    },
+    {
+      "id": 10000035,
+      "name": "Qiqi",
+      "rarity": 5,
+      "element": "Cryo",
+      "weapon": "Sword",
+      "since": "1.6",
+      "splash": "10000035.webp"
+    },
+    {
+      "id": 10000036,
+      "name": "Chongyun",
+      "rarity": 4,
+      "element": "Cryo",
+      "weapon": "Claymore",
+      "since": "1.6",
+      "splash": "10000036.webp"
+    },
+    {
+      "id": 10000037,
+      "name": "Ganyu",
+      "rarity": 5,
+      "element": "Cryo",
+      "weapon": "Bow",
+      "since": "1.6",
+      "splash": "10000037.webp"
+    },
+    {
+      "id": 10000038,
+      "name": "Albedo",
+      "rarity": 5,
+      "element": "Geo",
+      "weapon": "Sword",
+      "since": "1.6",
+      "splash": "10000038.webp"
+    },
+    {
+      "id": 10000039,
+      "name": "Diona",
+      "rarity": 4,
+      "element": "Cryo",
+      "weapon": "Bow",
+      "since": "1.6",
+      "splash": "10000039.webp"
+    },
+    {
+      "id": 10000041,
+      "name": "Mona",
+      "rarity": 5,
+      "element": "Hydro",
+      "weapon": "Catalyst",
+      "since": "1.6",
+      "splash": "10000041.webp"
+    },
+    {
+      "id": 10000042,
+      "name": "Keqing",
+      "rarity": 5,
+      "element": "Electro",
+      "weapon": "Sword",
+      "since": "1.6",
+      "splash": "10000042.webp"
+    },
+    {
+      "id": 10000043,
+      "name": "Sucrose",
+      "rarity": 4,
+      "element": "Anemo",
+      "weapon": "Catalyst",
+      "since": "1.6",
+      "splash": "10000043.webp"
+    },
+    {
+      "id": 10000044,
+      "name": "Xinyan",
+      "rarity": 4,
+      "element": "Pyro",
+      "weapon": "Claymore",
+      "since": "1.6",
+      "splash": "10000044.webp"
+    },
+    {
+      "id": 10000045,
+      "name": "Rosaria",
+      "rarity": 4,
+      "element": "Cryo",
+      "weapon": "Polearm",
+      "since": "1.6",
+      "splash": "10000045.webp"
+    },
+    {
+      "id": 10000046,
+      "name": "Hu Tao",
+      "aliases": [
+        "hutao"
+      ],
+      "rarity": 5,
+      "element": "Pyro",
+      "weapon": "Polearm",
+      "since": "1.6",
+      "splash": "10000046.webp"
+    },
+    {
+      "id": 10000047,
+      "name": "Kaedehara Kazuha",
+      "aliases": [
+        "kazuha"
+      ],
+      "rarity": 5,
+      "element": "Anemo",
+      "weapon": "Sword",
+      "since": "1.6",
+      "splash": "10000047.webp"
+    },
+    {
+      "id": 10000048,
+      "name": "Yanfei",
+      "rarity": 4,
+      "element": "Pyro",
+      "weapon": "Catalyst",
+      "since": "1.6",
+      "splash": "10000048.webp"
+    },
+    {
+      "id": 10000049,
+      "name": "Yoimiya",
+      "rarity": 5,
+      "element": "Pyro",
+      "weapon": "Bow",
+      "since": "2.8",
+      "splash": "10000049.webp"
+    },
+    {
+      "id": 10000050,
+      "name": "Thoma",
+      "rarity": 4,
+      "element": "Pyro",
+      "weapon": "Polearm",
+      "since": "2.8",
+      "splash": "10000050.webp"
+    },
+    {
+      "id": 10000051,
+      "name": "Eula",
+      "rarity": 5,
+      "element": "Cryo",
+      "weapon": "Claymore",
+      "since": "1.6",
+      "splash": "10000051.webp"
+    },
+    {
+      "id": 10000052,
+      "name": "Raiden Shogun",
+      "aliases": [
+        "raiden",
+        "ei"
+      ],
+      "rarity": 5,
+      "element": "Electro",
+      "weapon": "Polearm",
+      "since": "2.8",
+      "splash": "10000052.webp"
+    },
+    {
+      "id": 10000053,
+      "name": "Sayu",
+      "rarity": 4,
+      "element": "Anemo",
+      "weapon": "Claymore",
+      "since": "2.8",
+      "splash": "10000053.webp"
+    },
+    {
+      "id": 10000054,
+      "name": "Sangonomiya Kokomi",
+      "aliases": [
+        "kokomi"
+      ],
+      "rarity": 5,
+      "element": "Hydro",
+      "weapon": "Catalyst",
+      "since": "2.8",
+      "splash": "10000054.webp"
+    },
+    {
+      "id": 10000055,
+      "name": "Gorou",
+      "rarity": 4,
+      "element": "Geo",
+      "weapon": "Bow",
+      "since": "2.8",
+      "splash": "10000055.webp"
+    },
+    {
+      "id": 10000056,
+      "name": "Kujou Sara",
+      "aliases": [
+        "sara"
+      ],
+      "rarity": 4,
+      "element": "Electro",
+      "weapon": "Bow",
+      "since": "2.8",
+      "splash": "10000056.webp"
+    },
+    {
+      "id": 10000057,
+      "name": "Arataki Itto",
+      "aliases": [
+        "itto"
+      ],
+      "rarity": 5,
+      "element": "Geo",
+      "weapon": "Claymore",
+      "since": "2.8",
+      "splash": "10000057.webp"
+    },
+    {
+      "id": 10000058,
+      "name": "Yae Miko",
+      "aliases": [
+        "yae"
+      ],
+      "rarity": 5,
+      "element": "Electro",
+      "weapon": "Catalyst",
+      "since": "2.8",
+      "splash": "10000058.webp"
+    },
+    {
+      "id": 10000059,
+      "name": "Shikanoin Heizou",
+      "aliases": [
+        "heizou"
+      ],
+      "rarity": 4,
+      "element": "Anemo",
+      "weapon": "Catalyst",
+      "since": "2.8",
+      "splash": "10000059.webp"
+    },
+    {
+      "id": 10000060,
+      "name": "Yelan",
+      "rarity": 5,
+      "element": "Hydro",
+      "weapon": "Bow",
+      "since": "2.8",
+      "splash": "10000060.webp"
+    },
+    {
+      "id": 10000062,
+      "name": "Aloy",
+      "rarity": 5,
+      "element": "Cryo",
+      "weapon": "Bow",
+      "since": "2.8",
+      "splash": "10000062.webp"
+    },
+    {
+      "id": 10000063,
+      "name": "Shenhe",
+      "rarity": 5,
+      "element": "Cryo",
+      "weapon": "Polearm",
+      "since": "2.8",
+      "splash": "10000063.webp"
+    },
+    {
+      "id": 10000064,
+      "name": "Yun Jin",
+      "aliases": [
+        "yunjin"
+      ],
+      "rarity": 4,
+      "element": "Geo",
+      "weapon": "Polearm",
+      "since": "2.8",
+      "splash": "10000064.webp"
+    },
+    {
+      "id": 10000065,
+      "name": "Kuki Shinobu",
+      "aliases": [
+        "kuki",
+        "shinobu"
+      ],
+      "rarity": 4,
+      "element": "Electro",
+      "weapon": "Sword",
+      "since": "2.8",
+      "splash": "10000065.webp"
+    },
+    {
+      "id": 10000066,
+      "name": "Kamisato Ayato",
+      "aliases": [
+        "ayato"
+      ],
+      "rarity": 5,
+      "element": "Hydro",
+      "weapon": "Sword",
+      "since": "2.8",
+      "splash": "10000066.webp"
+    }
+  ],
+  "weapons": [
+    {
+      "id": 11401,
+      "name": "Favonius Sword",
+      "rarity": 4,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Zephyrus"
+    },
+    {
+      "id": 11402,
+      "name": "The Flute",
+      "aliases": [
+        "flute"
+      ],
+      "rarity": 4,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Troupe"
+    },
+    {
+      "id": 11403,
+      "name": "Sacrificial Sword",
+      "aliases": [
+        "sac sword"
+      ],
+      "rarity": 4,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Fossil"
+    },
+    {
+      "id": 11404,
+      "name": "Royal Longsword",
+      "rarity": 4,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Theocrat"
+    },
+    {
+      "id": 11405,
+      "name": "Lion's Roar",
+      "aliases": [
+        "lions roar"
+      ],
+      "rarity": 4,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Rockkiller"
+    },
+    {
+      "id": 11406,
+      "name": "Prototype Rancour",
+      "aliases": [
+        "proto rancour"
+      ],
+      "rarity": 4,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Proto"
+    },
+    {
+      "id": 11407,
+      "name": "Iron Sting",
+      "rarity": 4,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Exotic"
+    },
+    {
+      "id": 11408,
+      "name": "Blackcliff Longsword",
+      "rarity": 4,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Blackrock"
+    },
+    {
+      "id": 11409,
+      "name": "The Black Sword",
+      "aliases": [
+        "black sword"
+      ],
+      "rarity": 4,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Bloodstained"
+    },
+    {
+      "id": 11410,
+      "name": "The Alley Flash",
+      "aliases": [
+        "alley flash"
+      ],
+      "rarity": 4,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Outlaw"
+    },
+    {
+      "id": 11412,
+      "name": "Sword of Descension",
+      "rarity": 4,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Psalmus"
+    },
+    {
+      "id": 11413,
+      "name": "Festering Desire",
+      "rarity": 4,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Magnum"
+    },
+    {
+      "id": 11414,
+      "name": "Amenoma Kageuchi",
+      "aliases": [
+        "amenoma"
+      ],
+      "rarity": 4,
+      "type": "Sword",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Sword_Bakufu"
+    },
+    {
+      "id": 11415,
+      "name": "Cinnabar Spindle",
+      "aliases": [
+        "cinnabar"
+      ],
+      "rarity": 4,
+      "type": "Sword",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Sword_Opus"
+    },
+    {
+      "id": 11416,
+      "name": "Kagotsurube Isshin",
+      "aliases": [
+        "kagotsurube"
+      ],
+      "rarity": 4,
+      "type": "Sword",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Sword_Youtou"
+    },
+    {
+      "id": 11501,
+      "name": "Aquila Favonia",
+      "rarity": 5,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Falcon"
+    },
+    {
+      "id": 11502,
+      "name": "Skyward Blade",
+      "rarity": 5,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Dvalin"
+    },
+    {
+      "id": 11503,
+      "name": "Freedom-Sworn",
+      "aliases": [
+        "freedom sworn"
+      ],
+      "rarity": 5,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Widsith"
+    },
+    {
+      "id": 11504,
+      "name": "Summit Shaper",
+      "rarity": 5,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Kunwu"
+    },
+    {
+      "id": 11505,
+      "name": "Primordial Jade Cutter",
+      "aliases": [
+        "jade cutter"
+      ],
+      "rarity": 5,
+      "type": "Sword",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Sword_Morax"
+    },
+    {
+      "id": 11509,
+      "name": "Mistsplitter Reforged",
+      "aliases": [
+        "mistsplitter"
+      ],
+      "rarity": 5,
+      "type": "Sword",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Sword_Narukami"
+    },
+    {
+      "id": 11510,
+      "name": "Haran Geppaku Futsu",
+      "aliases": [
+        "haran"
+      ],
+      "rarity": 5,
+      "type": "Sword",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Sword_Amenoma"
+    },
+    {
+      "id": 12401,
+      "name": "Favonius Greatsword",
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Zephyrus"
+    },
+    {
+      "id": 12402,
+      "name": "The Bell",
+      "aliases": [
+        "bell"
+      ],
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Troupe"
+    },
+    {
+      "id": 12403,
+      "name": "Sacrificial Greatsword",
+      "aliases": [
+        "sac greatsword"
+      ],
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Fossil"
+    },
+    {
+      "id": 12404,
+      "name": "Royal Greatsword",
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Theocrat"
+    },
+    {
+      "id": 12405,
+      "name": "Rainslasher",
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Perdue"
+    },
+    {
+      "id": 12406,
+      "name": "Prototype Archaic",
+      "aliases": [
+        "proto archaic"
+      ],
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Proto"
+    },
+    {
+      "id": 12407,
+      "name": "Whiteblind",
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Exotic"
+    },
+    {
+      "id": 12408,
+      "name": "Blackcliff Slasher",
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Blackrock"
+    },
+    {
+      "id": 12409,
+      "name": "Serpent Spine",
+      "aliases": [
+        "serpent"
+      ],
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Kione"
+    },
+    {
+      "id": 12410,
+      "name": "Lithic Blade",
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Lapis"
+    },
+    {
+      "id": 12411,
+      "name": "Snow-Tombed Starsilver",
+      "aliases": [
+        "snow tombed"
+      ],
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Dragonfell"
+    },
+    {
+      "id": 12412,
+      "name": "Luxurious Sea-Lord",
+      "aliases": [
+        "sea lord"
+      ],
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Claymore_MillenniaTuna"
+    },
+    {
+      "id": 12414,
+      "name": "Katsuragikiri Nagamasa",
+      "aliases": [
+        "katsuragikiri"
+      ],
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Claymore_Bakufu"
+    },
+    {
+      "id": 12416,
+      "name": "Akuoumaru",
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Claymore_Maria"
+    },
+    {
+      "id": 12501,
+      "name": "Skyward Pride",
+      "rarity": 5,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Dvalin"
+    },
+    {
+      "id": 12502,
+      "name": "Wolf's Gravestone",
+      "aliases": [
+        "wolfs gravestone"
+      ],
+      "rarity": 5,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Wolfmound"
+    },
+    {
+      "id": 12503,
+      "name": "Song of Broken Pines",
+      "aliases": [
+        "broken pines"
+      ],
+      "rarity": 5,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Widsith"
+    },
+    {
+      "id": 12504,
+      "name": "The Unforged",
+      "aliases": [
+        "unforged"
+      ],
+      "rarity": 5,
+      "type": "Claymore",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Claymore_Kunwu"
+    },
+    {
+      "id": 12510,
+      "name": "Redhorn Stonethresher",
+      "aliases": [
+        "redhorn"
+      ],
+      "rarity": 5,
+      "type": "Claymore",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Claymore_Itadorimaru"
+    },
+    {
+      "id": 13401,
+      "name": "Dragon's Bane",
+      "aliases": [
+        "dragons bane"
+      ],
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Stardust"
+    },
+    {
+      "id": 13402,
+      "name": "Prototype Starglitter",
+      "aliases": [
+        "proto starglitter"
+      ],
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Proto"
+    },
+    {
+      "id": 13403,
+      "name": "Crescent Pike",
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Exotic"
+    },
+    {
+      "id": 13404,
+      "name": "Blackcliff Pole",
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Blackrock"
+    },
+    {
+      "id": 13405,
+      "name": "Deathmatch",
+      "aliases": [
+        "deathmatch"
+      ],
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Gladiator"
+    },
+    {
+      "id": 13406,
+      "name": "Lithic Spear",
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Lapis"
+    },
+    {
+      "id": 13407,
+      "name": "Favonius Lance",
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Zephyrus"
+    },
+    {
+      "id": 13408,
+      "name": "Royal Spear",
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Theocrat"
+    },
+    {
+      "id": 13409,
+      "name": "Dragonspine Spear",
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Everfrost"
+    },
+    {
+      "id": 13414,
+      "name": "Kitain Cross Spear",
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Pole_Bakufu"
+    },
+    {
+      "id": 13415,
+      "name": "\"The Catch\"",
+      "aliases": [
+        "the catch",
+        "catch"
+      ],
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Pole_Mori"
+    },
+    {
+      "id": 13416,
+      "name": "Wavebreaker's Fin",
+      "aliases": [
+        "wavebreakers fin"
+      ],
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Pole_Maria"
+    },
+    {
+      "id": 13501,
+      "name": "Staff of Homa",
+      "aliases": [
+        "homa"
+      ],
+      "rarity": 5,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Homa"
+    },
+    {
+      "id": 13502,
+      "name": "Skyward Spine",
+      "rarity": 5,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Dvalin"
+    },
+    {
+      "id": 13504,
+      "name": "Vortex Vanquisher",
+      "aliases": [
+        "vortex"
+      ],
+      "rarity": 5,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Kunwu"
+    },
+    {
+      "id": 13505,
+      "name": "Primordial Jade Winged-Spear",
+      "aliases": [
+        "jade spear"
+      ],
+      "rarity": 5,
+      "type": "Polearm",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Pole_Morax"
+    },
+    {
+      "id": 13507,
+      "name": "Calamity Queller",
+      "aliases": [
+        "calamity"
+      ],
+      "rarity": 5,
+      "type": "Polearm",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Pole_Santika"
+    },
+    {
+      "id": 13509,
+      "name": "Engulfing Lightning",
+      "rarity": 5,
+      "type": "Polearm",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Pole_Narukami"
+    },
+    {
+      "id": 14401,
+      "name": "Favonius Codex",
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Zephyrus"
+    },
+    {
+      "id": 14402,
+      "name": "The Widsith",
+      "aliases": [
+        "widsith"
+      ],
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Troupe"
+    },
+    {
+      "id": 14403,
+      "name": "Sacrificial Fragments",
+      "aliases": [
+        "sac frags",
+        "sacrificial fragments"
+      ],
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Fossil"
+    },
+    {
+      "id": 14404,
+      "name": "Royal Grimoire",
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Theocrat"
+    },
+    {
+      "id": 14405,
+      "name": "Solar Pearl",
+      "aliases": [
+        "solar pearl"
+      ],
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Resurrection"
+    },
+    {
+      "id": 14406,
+      "name": "Prototype Amber",
+      "aliases": [
+        "proto amber"
+      ],
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Proto"
+    },
+    {
+      "id": 14407,
+      "name": "Mappa Mare",
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Exotic"
+    },
+    {
+      "id": 14408,
+      "name": "Blackcliff Agate",
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Blackrock"
+    },
+    {
+      "id": 14409,
+      "name": "Eye of Perception",
+      "aliases": [
+        "eye of perception"
+      ],
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Truelens"
+    },
+    {
+      "id": 14410,
+      "name": "Wine and Song",
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Outlaw"
+    },
+    {
+      "id": 14412,
+      "name": "Frostbearer",
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Everfrost"
+    },
+    {
+      "id": 14413,
+      "name": "Dodoco Tales",
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Ludiharpastum"
+    },
+    {
+      "id": 14414,
+      "name": "Hakushin Ring",
+      "aliases": [
+        "hakushin"
+      ],
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Catalyst_Bakufu"
+    },
+    {
+      "id": 14415,
+      "name": "Oathsworn Eye",
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Catalyst_Jyanome"
+    },
+    {
+      "id": 14501,
+      "name": "Skyward Atlas",
+      "rarity": 5,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Dvalin"
+    },
+    {
+      "id": 14502,
+      "name": "Lost Prayer to the Sacred Winds",
+      "aliases": [
+        "lost prayer"
+      ],
+      "rarity": 5,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Fourwinds"
+    },
+    {
+      "id": 14504,
+      "name": "Memory of Dust",
+      "rarity": 5,
+      "type": "Catalyst",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Catalyst_Kunwu"
+    },
+    {
+      "id": 14506,
+      "name": "Everlasting Moonglow",
+      "rarity": 5,
+      "type": "Catalyst",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Catalyst_Kaleido"
+    },
+    {
+      "id": 14509,
+      "name": "Kagura's Verity",
+      "aliases": [
+        "kaguras verity"
+      ],
+      "rarity": 5,
+      "type": "Catalyst",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Catalyst_Narukami"
+    },
+    {
+      "id": 15401,
+      "name": "Favonius Warbow",
+      "rarity": 4,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Zephyrus"
+    },
+    {
+      "id": 15402,
+      "name": "The Stringless",
+      "aliases": [
+        "stringless"
+      ],
+      "rarity": 4,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Troupe"
+    },
+    {
+      "id": 15403,
+      "name": "Sacrificial Bow",
+      "aliases": [
+        "sac bow"
+      ],
+      "rarity": 4,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Fossil"
+    },
+    {
+      "id": 15404,
+      "name": "Royal Bow",
+      "rarity": 4,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Theocrat"
+    },
+    {
+      "id": 15405,
+      "name": "Rust",
+      "rarity": 4,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Recluse"
+    },
+    {
+      "id": 15406,
+      "name": "Prototype Crescent",
+      "aliases": [
+        "proto crescent"
+      ],
+      "rarity": 4,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Proto"
+    },
+    {
+      "id": 15407,
+      "name": "Compound Bow",
+      "rarity": 4,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Exotic"
+    },
+    {
+      "id": 15408,
+      "name": "Blackcliff Warbow",
+      "rarity": 4,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Blackrock"
+    },
+    {
+      "id": 15409,
+      "name": "The Viridescent Hunt",
+      "aliases": [
+        "viridescent hunt"
+      ],
+      "rarity": 4,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Viridescent"
+    },
+    {
+      "id": 15410,
+      "name": "Alley Hunter",
+      "rarity": 4,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Outlaw"
+    },
+    {
+      "id": 15411,
+      "name": "Fading Twilight",
+      "rarity": 4,
+      "type": "Bow",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Bow_Fallensun"
+    },
+    {
+      "id": 15412,
+      "name": "Mitternachts Waltz",
+      "aliases": [
+        "mitternachts"
+      ],
+      "rarity": 4,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Nachtblind"
+    },
+    {
+      "id": 15413,
+      "name": "Windblume Ode",
+      "rarity": 4,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Fleurfair"
+    },
+    {
+      "id": 15414,
+      "name": "Hamayumi",
+      "aliases": [
+        "hamayumi"
+      ],
+      "rarity": 4,
+      "type": "Bow",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Bow_Bakufu"
+    },
+    {
+      "id": 15415,
+      "name": "Predator",
+      "rarity": 4,
+      "type": "Bow",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Bow_Predator"
+    },
+    {
+      "id": 15416,
+      "name": "Mouun's Moon",
+      "aliases": [
+        "mouuns moon"
+      ],
+      "rarity": 4,
+      "type": "Bow",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Bow_Maria"
+    },
+    {
+      "id": 15501,
+      "name": "Skyward Harp",
+      "rarity": 5,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Dvalin"
+    },
+    {
+      "id": 15502,
+      "name": "Amos' Bow",
+      "aliases": [
+        "amos",
+        "amos bow"
+      ],
+      "rarity": 5,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Amos"
+    },
+    {
+      "id": 15503,
+      "name": "Elegy for the End",
+      "aliases": [
+        "elegy"
+      ],
+      "rarity": 5,
+      "type": "Bow",
+      "since": "1.6",
+      "icon": "UI_EquipIcon_Bow_Widsith"
+    },
+    {
+      "id": 15507,
+      "name": "Polar Star",
+      "aliases": [
+        "polar"
+      ],
+      "rarity": 5,
+      "type": "Bow",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Bow_Worldbane"
+    },
+    {
+      "id": 15508,
+      "name": "Aqua Simulacra",
+      "rarity": 5,
+      "type": "Bow",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Bow_Kirin"
+    },
+    {
+      "id": 15509,
+      "name": "Thundering Pulse",
+      "rarity": 5,
+      "type": "Bow",
+      "since": "2.8",
+      "icon": "UI_EquipIcon_Bow_Narukami"
+    }
+  ],
+  "artifactSets": [
+    {
+      "setId": 14001,
+      "name": "Blizzard Strayer",
+      "aliases": [
+        "blizzard"
+      ],
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 71544,
+          "icon": "UI_RelicIcon_14001_4"
+        },
+        {
+          "slot": "plume",
+          "id": 71524,
+          "icon": "UI_RelicIcon_14001_2"
+        },
+        {
+          "slot": "sands",
+          "id": 71554,
+          "icon": "UI_RelicIcon_14001_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 71514,
+          "icon": "UI_RelicIcon_14001_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 71534,
+          "icon": "UI_RelicIcon_14001_3"
+        }
+      ]
+    },
+    {
+      "setId": 14002,
+      "name": "Thundersoother",
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 72544,
+          "icon": "UI_RelicIcon_14002_4"
+        },
+        {
+          "slot": "plume",
+          "id": 72524,
+          "icon": "UI_RelicIcon_14002_2"
+        },
+        {
+          "slot": "sands",
+          "id": 72554,
+          "icon": "UI_RelicIcon_14002_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 72514,
+          "icon": "UI_RelicIcon_14002_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 72534,
+          "icon": "UI_RelicIcon_14002_3"
+        }
+      ]
+    },
+    {
+      "setId": 14003,
+      "name": "Lavawalker",
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 73544,
+          "icon": "UI_RelicIcon_14003_4"
+        },
+        {
+          "slot": "plume",
+          "id": 73524,
+          "icon": "UI_RelicIcon_14003_2"
+        },
+        {
+          "slot": "sands",
+          "id": 73554,
+          "icon": "UI_RelicIcon_14003_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 73514,
+          "icon": "UI_RelicIcon_14003_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 73534,
+          "icon": "UI_RelicIcon_14003_3"
+        }
+      ]
+    },
+    {
+      "setId": 14004,
+      "name": "Maiden Beloved",
+      "aliases": [
+        "maiden"
+      ],
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 74544,
+          "icon": "UI_RelicIcon_14004_4"
+        },
+        {
+          "slot": "plume",
+          "id": 74524,
+          "icon": "UI_RelicIcon_14004_2"
+        },
+        {
+          "slot": "sands",
+          "id": 74554,
+          "icon": "UI_RelicIcon_14004_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 74514,
+          "icon": "UI_RelicIcon_14004_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 74534,
+          "icon": "UI_RelicIcon_14004_3"
+        }
+      ]
+    },
+    {
+      "setId": 15001,
+      "name": "Gladiator's Finale",
+      "aliases": [
+        "gladiator"
+      ],
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 75544,
+          "icon": "UI_RelicIcon_15001_4"
+        },
+        {
+          "slot": "plume",
+          "id": 75524,
+          "icon": "UI_RelicIcon_15001_2"
+        },
+        {
+          "slot": "sands",
+          "id": 75554,
+          "icon": "UI_RelicIcon_15001_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 75514,
+          "icon": "UI_RelicIcon_15001_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 75534,
+          "icon": "UI_RelicIcon_15001_3"
+        }
+      ]
+    },
+    {
+      "setId": 15002,
+      "name": "Viridescent Venerer",
+      "aliases": [
+        "viridescent"
+      ],
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 76544,
+          "icon": "UI_RelicIcon_15002_4"
+        },
+        {
+          "slot": "plume",
+          "id": 76524,
+          "icon": "UI_RelicIcon_15002_2"
+        },
+        {
+          "slot": "sands",
+          "id": 76554,
+          "icon": "UI_RelicIcon_15002_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 76514,
+          "icon": "UI_RelicIcon_15002_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 76534,
+          "icon": "UI_RelicIcon_15002_3"
+        }
+      ]
+    },
+    {
+      "setId": 15003,
+      "name": "Wanderer's Troupe",
+      "aliases": [
+        "wanderers troupe"
+      ],
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 77544,
+          "icon": "UI_RelicIcon_15003_4"
+        },
+        {
+          "slot": "plume",
+          "id": 77524,
+          "icon": "UI_RelicIcon_15003_2"
+        },
+        {
+          "slot": "sands",
+          "id": 77554,
+          "icon": "UI_RelicIcon_15003_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 77514,
+          "icon": "UI_RelicIcon_15003_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 77534,
+          "icon": "UI_RelicIcon_15003_3"
+        }
+      ]
+    },
+    {
+      "setId": 15005,
+      "name": "Thundering Fury",
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 79544,
+          "icon": "UI_RelicIcon_15005_4"
+        },
+        {
+          "slot": "plume",
+          "id": 79524,
+          "icon": "UI_RelicIcon_15005_2"
+        },
+        {
+          "slot": "sands",
+          "id": 79554,
+          "icon": "UI_RelicIcon_15005_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 79514,
+          "icon": "UI_RelicIcon_15005_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 79534,
+          "icon": "UI_RelicIcon_15005_3"
+        }
+      ]
+    },
+    {
+      "setId": 15006,
+      "name": "Crimson Witch of Flames",
+      "aliases": [
+        "crimson witch"
+      ],
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 80544,
+          "icon": "UI_RelicIcon_15006_4"
+        },
+        {
+          "slot": "plume",
+          "id": 80524,
+          "icon": "UI_RelicIcon_15006_2"
+        },
+        {
+          "slot": "sands",
+          "id": 80554,
+          "icon": "UI_RelicIcon_15006_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 80514,
+          "icon": "UI_RelicIcon_15006_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 80534,
+          "icon": "UI_RelicIcon_15006_3"
+        }
+      ]
+    },
+    {
+      "setId": 15007,
+      "name": "Noblesse Oblige",
+      "aliases": [
+        "noblesse"
+      ],
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 81544,
+          "icon": "UI_RelicIcon_15007_4"
+        },
+        {
+          "slot": "plume",
+          "id": 81524,
+          "icon": "UI_RelicIcon_15007_2"
+        },
+        {
+          "slot": "sands",
+          "id": 81554,
+          "icon": "UI_RelicIcon_15007_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 81514,
+          "icon": "UI_RelicIcon_15007_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 81534,
+          "icon": "UI_RelicIcon_15007_3"
+        }
+      ]
+    },
+    {
+      "setId": 15008,
+      "name": "Bloodstained Chivalry",
+      "aliases": [
+        "bloodstained"
+      ],
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 82544,
+          "icon": "UI_RelicIcon_15008_4"
+        },
+        {
+          "slot": "plume",
+          "id": 82524,
+          "icon": "UI_RelicIcon_15008_2"
+        },
+        {
+          "slot": "sands",
+          "id": 82554,
+          "icon": "UI_RelicIcon_15008_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 82514,
+          "icon": "UI_RelicIcon_15008_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 82534,
+          "icon": "UI_RelicIcon_15008_3"
+        }
+      ]
+    },
+    {
+      "setId": 15014,
+      "name": "Archaic Petra",
+      "aliases": [
+        "petra"
+      ],
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 88544,
+          "icon": "UI_RelicIcon_15014_4"
+        },
+        {
+          "slot": "plume",
+          "id": 88524,
+          "icon": "UI_RelicIcon_15014_2"
+        },
+        {
+          "slot": "sands",
+          "id": 88554,
+          "icon": "UI_RelicIcon_15014_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 88514,
+          "icon": "UI_RelicIcon_15014_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 88534,
+          "icon": "UI_RelicIcon_15014_3"
+        }
+      ]
+    },
+    {
+      "setId": 15015,
+      "name": "Retracing Bolide",
+      "aliases": [
+        "bolide"
+      ],
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 89544,
+          "icon": "UI_RelicIcon_15015_4"
+        },
+        {
+          "slot": "plume",
+          "id": 89524,
+          "icon": "UI_RelicIcon_15015_2"
+        },
+        {
+          "slot": "sands",
+          "id": 89554,
+          "icon": "UI_RelicIcon_15015_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 89514,
+          "icon": "UI_RelicIcon_15015_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 89534,
+          "icon": "UI_RelicIcon_15015_3"
+        }
+      ]
+    },
+    {
+      "setId": 15016,
+      "name": "Heart of Depth",
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 90544,
+          "icon": "UI_RelicIcon_15016_4"
+        },
+        {
+          "slot": "plume",
+          "id": 90524,
+          "icon": "UI_RelicIcon_15016_2"
+        },
+        {
+          "slot": "sands",
+          "id": 90554,
+          "icon": "UI_RelicIcon_15016_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 90514,
+          "icon": "UI_RelicIcon_15016_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 90534,
+          "icon": "UI_RelicIcon_15016_3"
+        }
+      ]
+    },
+    {
+      "setId": 15017,
+      "name": "Tenacity of the Millelith",
+      "aliases": [
+        "millelith",
+        "tenacity"
+      ],
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 91544,
+          "icon": "UI_RelicIcon_15017_4"
+        },
+        {
+          "slot": "plume",
+          "id": 91524,
+          "icon": "UI_RelicIcon_15017_2"
+        },
+        {
+          "slot": "sands",
+          "id": 91554,
+          "icon": "UI_RelicIcon_15017_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 91514,
+          "icon": "UI_RelicIcon_15017_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 91534,
+          "icon": "UI_RelicIcon_15017_3"
+        }
+      ]
+    },
+    {
+      "setId": 15018,
+      "name": "Pale Flame",
+      "rarity": 5,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 92544,
+          "icon": "UI_RelicIcon_15018_4"
+        },
+        {
+          "slot": "plume",
+          "id": 92524,
+          "icon": "UI_RelicIcon_15018_2"
+        },
+        {
+          "slot": "sands",
+          "id": 92554,
+          "icon": "UI_RelicIcon_15018_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 92514,
+          "icon": "UI_RelicIcon_15018_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 92534,
+          "icon": "UI_RelicIcon_15018_3"
+        }
+      ]
+    },
+    {
+      "setId": 15019,
+      "name": "Shimenawa's Reminiscence",
+      "aliases": [
+        "shimenawa"
+      ],
+      "rarity": 5,
+      "since": "2.8",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 93544,
+          "icon": "UI_RelicIcon_15019_4"
+        },
+        {
+          "slot": "plume",
+          "id": 93524,
+          "icon": "UI_RelicIcon_15019_2"
+        },
+        {
+          "slot": "sands",
+          "id": 93554,
+          "icon": "UI_RelicIcon_15019_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 93514,
+          "icon": "UI_RelicIcon_15019_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 93534,
+          "icon": "UI_RelicIcon_15019_3"
+        }
+      ]
+    },
+    {
+      "setId": 15020,
+      "name": "Emblem of Severed Fate",
+      "aliases": [
+        "emblem"
+      ],
+      "rarity": 5,
+      "since": "2.8",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 94544,
+          "icon": "UI_RelicIcon_15020_4"
+        },
+        {
+          "slot": "plume",
+          "id": 94524,
+          "icon": "UI_RelicIcon_15020_2"
+        },
+        {
+          "slot": "sands",
+          "id": 94554,
+          "icon": "UI_RelicIcon_15020_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 94514,
+          "icon": "UI_RelicIcon_15020_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 94534,
+          "icon": "UI_RelicIcon_15020_3"
+        }
+      ]
+    },
+    {
+      "setId": 15021,
+      "name": "Husk of Opulent Dreams",
+      "aliases": [
+        "husk"
+      ],
+      "rarity": 5,
+      "since": "2.8",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 95544,
+          "icon": "UI_RelicIcon_15021_4"
+        },
+        {
+          "slot": "plume",
+          "id": 95524,
+          "icon": "UI_RelicIcon_15021_2"
+        },
+        {
+          "slot": "sands",
+          "id": 95554,
+          "icon": "UI_RelicIcon_15021_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 95514,
+          "icon": "UI_RelicIcon_15021_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 95534,
+          "icon": "UI_RelicIcon_15021_3"
+        }
+      ]
+    },
+    {
+      "setId": 15022,
+      "name": "Ocean-Hued Clam",
+      "aliases": [
+        "clam"
+      ],
+      "rarity": 5,
+      "since": "2.8",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 96544,
+          "icon": "UI_RelicIcon_15022_4"
+        },
+        {
+          "slot": "plume",
+          "id": 96524,
+          "icon": "UI_RelicIcon_15022_2"
+        },
+        {
+          "slot": "sands",
+          "id": 96554,
+          "icon": "UI_RelicIcon_15022_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 96514,
+          "icon": "UI_RelicIcon_15022_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 96534,
+          "icon": "UI_RelicIcon_15022_3"
+        }
+      ]
+    },
+    {
+      "setId": 15023,
+      "name": "Vermillion Hereafter",
+      "aliases": [
+        "vermillion"
+      ],
+      "rarity": 5,
+      "since": "2.8",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 97544,
+          "icon": "UI_RelicIcon_15023_4"
+        },
+        {
+          "slot": "plume",
+          "id": 97524,
+          "icon": "UI_RelicIcon_15023_2"
+        },
+        {
+          "slot": "sands",
+          "id": 97554,
+          "icon": "UI_RelicIcon_15023_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 97514,
+          "icon": "UI_RelicIcon_15023_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 97534,
+          "icon": "UI_RelicIcon_15023_3"
+        }
+      ]
+    },
+    {
+      "setId": 15024,
+      "name": "Echoes of an Offering",
+      "aliases": [
+        "echoes"
+      ],
+      "rarity": 5,
+      "since": "2.8",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 98544,
+          "icon": "UI_RelicIcon_15024_4"
+        },
+        {
+          "slot": "plume",
+          "id": 98524,
+          "icon": "UI_RelicIcon_15024_2"
+        },
+        {
+          "slot": "sands",
+          "id": 98554,
+          "icon": "UI_RelicIcon_15024_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 98514,
+          "icon": "UI_RelicIcon_15024_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 98534,
+          "icon": "UI_RelicIcon_15024_3"
+        }
+      ]
+    },
+    {
+      "setId": 10001,
+      "name": "Resolution of Sojourner",
+      "aliases": [
+        "sojourner"
+      ],
+      "rarity": 4,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 51444,
+          "icon": "UI_RelicIcon_10001_4"
+        },
+        {
+          "slot": "plume",
+          "id": 51424,
+          "icon": "UI_RelicIcon_10001_2"
+        },
+        {
+          "slot": "sands",
+          "id": 51454,
+          "icon": "UI_RelicIcon_10001_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 51414,
+          "icon": "UI_RelicIcon_10001_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 51434,
+          "icon": "UI_RelicIcon_10001_3"
+        }
+      ]
+    },
+    {
+      "setId": 10002,
+      "name": "Brave Heart",
+      "aliases": [
+        "brave"
+      ],
+      "rarity": 4,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 52444,
+          "icon": "UI_RelicIcon_10002_4"
+        },
+        {
+          "slot": "plume",
+          "id": 52424,
+          "icon": "UI_RelicIcon_10002_2"
+        },
+        {
+          "slot": "sands",
+          "id": 52454,
+          "icon": "UI_RelicIcon_10002_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 52414,
+          "icon": "UI_RelicIcon_10002_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 52434,
+          "icon": "UI_RelicIcon_10002_3"
+        }
+      ]
+    },
+    {
+      "setId": 10003,
+      "name": "Defender's Will",
+      "aliases": [
+        "defenders will",
+        "defender"
+      ],
+      "rarity": 4,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 53444,
+          "icon": "UI_RelicIcon_10003_4"
+        },
+        {
+          "slot": "plume",
+          "id": 53424,
+          "icon": "UI_RelicIcon_10003_2"
+        },
+        {
+          "slot": "sands",
+          "id": 53454,
+          "icon": "UI_RelicIcon_10003_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 53414,
+          "icon": "UI_RelicIcon_10003_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 53434,
+          "icon": "UI_RelicIcon_10003_3"
+        }
+      ]
+    },
+    {
+      "setId": 10004,
+      "name": "Tiny Miracle",
+      "aliases": [
+        "miracle"
+      ],
+      "rarity": 4,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 54444,
+          "icon": "UI_RelicIcon_10004_4"
+        },
+        {
+          "slot": "plume",
+          "id": 54424,
+          "icon": "UI_RelicIcon_10004_2"
+        },
+        {
+          "slot": "sands",
+          "id": 54454,
+          "icon": "UI_RelicIcon_10004_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 54414,
+          "icon": "UI_RelicIcon_10004_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 54434,
+          "icon": "UI_RelicIcon_10004_3"
+        }
+      ]
+    },
+    {
+      "setId": 10005,
+      "name": "Berserker",
+      "aliases": [],
+      "rarity": 4,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 55444,
+          "icon": "UI_RelicIcon_10005_4"
+        },
+        {
+          "slot": "plume",
+          "id": 55424,
+          "icon": "UI_RelicIcon_10005_2"
+        },
+        {
+          "slot": "sands",
+          "id": 55454,
+          "icon": "UI_RelicIcon_10005_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 55414,
+          "icon": "UI_RelicIcon_10005_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 55434,
+          "icon": "UI_RelicIcon_10005_3"
+        }
+      ]
+    },
+    {
+      "setId": 10006,
+      "name": "Martial Artist",
+      "aliases": [
+        "martial"
+      ],
+      "rarity": 4,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 56444,
+          "icon": "UI_RelicIcon_10006_4"
+        },
+        {
+          "slot": "plume",
+          "id": 56424,
+          "icon": "UI_RelicIcon_10006_2"
+        },
+        {
+          "slot": "sands",
+          "id": 56454,
+          "icon": "UI_RelicIcon_10006_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 56414,
+          "icon": "UI_RelicIcon_10006_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 56434,
+          "icon": "UI_RelicIcon_10006_3"
+        }
+      ]
+    },
+    {
+      "setId": 10007,
+      "name": "Instructor",
+      "aliases": [],
+      "rarity": 4,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 57444,
+          "icon": "UI_RelicIcon_10007_4"
+        },
+        {
+          "slot": "plume",
+          "id": 57424,
+          "icon": "UI_RelicIcon_10007_2"
+        },
+        {
+          "slot": "sands",
+          "id": 57454,
+          "icon": "UI_RelicIcon_10007_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 57414,
+          "icon": "UI_RelicIcon_10007_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 57434,
+          "icon": "UI_RelicIcon_10007_3"
+        }
+      ]
+    },
+    {
+      "setId": 10008,
+      "name": "Gambler",
+      "aliases": [],
+      "rarity": 4,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 58444,
+          "icon": "UI_RelicIcon_10008_4"
+        },
+        {
+          "slot": "plume",
+          "id": 58424,
+          "icon": "UI_RelicIcon_10008_2"
+        },
+        {
+          "slot": "sands",
+          "id": 58454,
+          "icon": "UI_RelicIcon_10008_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 58414,
+          "icon": "UI_RelicIcon_10008_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 58434,
+          "icon": "UI_RelicIcon_10008_3"
+        }
+      ]
+    },
+    {
+      "setId": 10009,
+      "name": "The Exile",
+      "aliases": [
+        "exile"
+      ],
+      "rarity": 4,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 59444,
+          "icon": "UI_RelicIcon_10009_4"
+        },
+        {
+          "slot": "plume",
+          "id": 59424,
+          "icon": "UI_RelicIcon_10009_2"
+        },
+        {
+          "slot": "sands",
+          "id": 59454,
+          "icon": "UI_RelicIcon_10009_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 59414,
+          "icon": "UI_RelicIcon_10009_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 59434,
+          "icon": "UI_RelicIcon_10009_3"
+        }
+      ]
+    },
+    {
+      "setId": 10012,
+      "name": "Scholar",
+      "aliases": [],
+      "rarity": 4,
+      "since": "1.6",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 62444,
+          "icon": "UI_RelicIcon_10012_4"
+        },
+        {
+          "slot": "plume",
+          "id": 62424,
+          "icon": "UI_RelicIcon_10012_2"
+        },
+        {
+          "slot": "sands",
+          "id": 62454,
+          "icon": "UI_RelicIcon_10012_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 62414,
+          "icon": "UI_RelicIcon_10012_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 62434,
+          "icon": "UI_RelicIcon_10012_3"
+        }
+      ]
+    }
+  ]
+}

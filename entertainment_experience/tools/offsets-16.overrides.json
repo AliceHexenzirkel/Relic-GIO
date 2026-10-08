@@ -1,0 +1,65 @@
+{
+  "_comment": "Game 1.6 (OS) hand decisions for symbols tools/matcher16.py left at 0x0 or matched with low confidence (see dumps_ref/1.6/unresolved.txt and REPORT-matching.md). Entries: {\"NAME\": {\"rva\": \"0x...\", \"note\": \"why / how verified\"}}. Applied by tools/apply_overrides.py --ver 16 onto appdata-16/il2cpp-functions.h, il2cpp-types-ptr.h and il2cpp-unityplayer-functions.h (only lines whose offset is 0x0). Re-run after gen_appdata16.py, which rewrites those headers from match16.json.",
+  "MoleMole_InLevelMapPageContext_UpdateView": {
+    "rva": "0x00B120F0",
+    "note": "BPDBBEDHBCP$$ODHLJNAONMH, 1.6 dump.cs:1812713 (public void, instance). 1.6 has NO UpdateView override: BaseContext's slot 26 is an empty hotfix stub, so the symbol is repurposed for the method that runs right after the view rect is written. FEIBBKAODPE @0xAEF790 is the only non-ctor writer of InLevelMapPageContext._mapViewRect @0x1D0 (it is MonoExUICamera.onViewChange, registered by BABICAFOOCO @0xAD99A0) and calls ADPLIDADADC then ODHLJNAONMH on every normal path after the write; ODHLJNAONMH has exactly one caller and no delegate reference. The hook (InteractiveMap.cpp, copies __this->fields._mapViewRect after CALL_ORIGIN) needs no change. Fallback of the same shape: ADPLIDADADC @0x00AD44B0. Note: the delegate is not invoked while MonoExUICamera.allowCameraAnimation (+0x170) is set, so the rect does not refresh during camera animations. 2.8 twin ELBPCIGIBIH$$EMBMMLLJHOM 0x034D6410."
+  },
+  "MoleMole_InLevelMainPageContext_get_miniMapScale": {
+    "rva": "0x008FC2B0",
+    "note": "KCFCJJBPLEN$$MKLHNEKDNCJ, 1.6 dump.cs:1808326 (public float, instance): IFix gate then movss xmm0,[rcx+0x4B8] - the only float() reader of _miniMapScale in the class, and the class is right (MonoMiniMap.context is typed KCFCJJBPLEN in the 1.6 dump; 'IGKEDHHIDMA' does not exist there). Every other access to 0x4B8 pairs with the 2.8 accesses to 0x500. 2.8 twin MFJCGBPOEHH$$DJGODNNFIJE 0x009E9F50."
+  },
+  "PostProcessLayer_set_innerResolutionScale": {
+    "rva": "0x06790640",
+    "note": "UnityEngine.Rendering.PostProcessing.PostProcessLayer$$set_innerResolutionScale, 1.6 dump.cs:692180 (RVA 0x6790640). Unobfuscated Unity name, matched by name - the class is PostProcessLayer in both dumps. Instance method, rcx=this / xmm1=value; no clamp, no equality guard, tail-calls SetupInnerResolution."
+  },
+  "PostProcessLayer_get_innerResolutionScale": {
+    "rva": "0x067901F0",
+    "note": "UnityEngine.Rendering.PostProcessing.PostProcessLayer$$get_innerResolutionScale, 1.6 dump.cs:692176 (RVA 0x67901F0). Instance method."
+  },
+  "SECTR_Streaming_get_CurrentProfile": {
+    "rva": "0x0362BBA0",
+    "note": "JBPNDKLFIFM$$CKNBJAPIHJE, 1.6 dump.cs:1961683 (RVA 0x362BBA0): the static getter of the live SECTR_StreamingProfile. Holder matched to 2.8's KIFKAIFDIIC by its five 'Data/LevelStreamingConfig/...' const strings and the same static field / property / method shape; the SECTR_StreamingProfile getters (GetLayerLoadRatio 0x103FD20 etc.) call it. STATIC -> __RAW + inline thunk on 1.6. Used by visuals/RenderDistance.cpp."
+  },
+  "MiHoYoGrassGlobalConfigurator_GetViewRange": { "rva": "0x05F91660", "note": "UnityEngine.MiHoYoGrassGlobalConfigurator$$GetViewRange, 1.6 dump.cs:395627. Unobfuscated Unity binding, matched by name; instance icall." },
+  "MiHoYoGrassGlobalConfigurator_SetViewRange": { "rva": "0x05F91830", "note": "UnityEngine.MiHoYoGrassGlobalConfigurator$$SetViewRange, 1.6 dump.cs:395631. Called by the quality applier FPOAEFCHAMD.AOLEKBBIEJO @0x2738830 and the grass debug dialog." },
+  "MiHoYoGrassGlobalConfigurator_GetLOD0DistanceSet": { "rva": "0x05F91520", "note": "UnityEngine.MiHoYoGrassGlobalConfigurator$$GetLOD0DistanceSet, 1.6 dump.cs:395595." },
+  "MiHoYoGrassGlobalConfigurator_SetLOD0DistanceSet": { "rva": "0x05F916B0", "note": "UnityEngine.MiHoYoGrassGlobalConfigurator$$SetLOD0DistanceSet, 1.6 dump.cs:395599." },
+  "MiHoYoGrassGlobalConfigurator_GetLOD1DistanceSet": { "rva": "0x05F91570", "note": "UnityEngine.MiHoYoGrassGlobalConfigurator$$GetLOD1DistanceSet, 1.6 dump.cs:395603." },
+  "MiHoYoGrassGlobalConfigurator_SetLOD1DistanceSet": { "rva": "0x05F91710", "note": "UnityEngine.MiHoYoGrassGlobalConfigurator$$SetLOD1DistanceSet, 1.6 dump.cs:395607." },
+  "MiHoYoGrassGlobalConfigurator_GetLOD2DistanceSet": { "rva": "0x05F915C0", "note": "UnityEngine.MiHoYoGrassGlobalConfigurator$$GetLOD2DistanceSet, 1.6 dump.cs:395611." },
+  "MiHoYoGrassGlobalConfigurator_SetLOD2DistanceSet": { "rva": "0x05F91770", "note": "UnityEngine.MiHoYoGrassGlobalConfigurator$$SetLOD2DistanceSet, 1.6 dump.cs:395615." },
+  "MiHoYoGrassGlobalConfigurator_GetLOD3DistanceSet": { "rva": "0x05F91610", "note": "UnityEngine.MiHoYoGrassGlobalConfigurator$$GetLOD3DistanceSet, 1.6 dump.cs:395619." },
+  "MiHoYoGrassGlobalConfigurator_SetLOD3DistanceSet": { "rva": "0x05F917D0", "note": "UnityEngine.MiHoYoGrassGlobalConfigurator$$SetLOD3DistanceSet, 1.6 dump.cs:395623." },
+  "SECTR_Streaming_get_SceneSplitterConfig": {
+    "rva": "0x0362D790",
+    "note": "JBPNDKLFIFM$$HAAKNBJALEP, 1.6 dump.cs:1961707 (RVA 0x362D790): the static getter of the live SECTR_SceneSplitterConfig (statics 0xA0/0xA8 of the holder), the call the grass debug dialog DAMGDLHDIMN.KLLPECJONLG @0x2966130 makes before walking layerConfigs for type == 8. Holder matched to 2.8's KIFKAIFDIIC by its 'Data/LevelStreamingConfig/...' const strings. STATIC -> __RAW + inline thunk. Used by visuals/RenderDistance.cpp (grass reach)."
+  },
+  "Singleton_1_SectrStreamingManager__get_Instance__MethodInfo": {
+    "rva": "0x09083430",
+    "note": "Metadata-usage slot of Method$MoleMole.Singleton<DKKCBPEDPHF>.get_Instance() (codexref xrefs); DKKCBPEDPHF = the SECTR streaming GlobalManager (1.6 dump.cs:1307552), matched to 2.8's DPGBNEHAGDM by shape and by PFLMLHGJBIM.NHIEHNGEPPP @0x2B6A0A0 calling its getter. Read-only job-queue probe in visuals/RenderDistance.cpp."
+  },
+  "QualitySettings_set_shadowDistance": {
+    "rva": "0x052CAAC0",
+    "note": "UnityEngine.QualitySettings$$set_shadowDistance, 1.6 dump.cs:366154 (RVA 0x52CAAC0). STATIC and HOOKED by visuals/RenderDistance.cpp (no getter survives), so the declaration keeps its name with the leading dummy `this` and the handler carries RELIC_STATIC_THIS - the same shape as Miscs_CheckTargetAttackable."
+  },
+  "SECTR_StreamingManager_get_CurrentLevel": {
+    "rva": "0x0147EC80",
+    "note": "DKKCBPEDPHF$$CJHCHHKIHMP, 1.6 dump.cs:1308030 (RVA 0x147EC80): the streaming GlobalManager's current level (Dictionary<string, OICEICPMMLN> at 0xC8 keyed by the level name at 0xE8) - the accessor the job init PFLMLHGJBIM.NHIEHNGEPPP @0x2B6A0A0 goes through (DKKCBPEDPHF.JGJBBMLAJFF @0x14895C0 -> OICEICPMMLN.JGJBBMLAJFF @0xEF3560) to resolve a job's SECTR_LayerConfig. Instance method; matched to 2.8's DPGBNEHAGDM.GECOHOBKIBI by the same role in the same job init. Used by visuals/RenderDistance.cpp."
+  },
+  "SECTR_StreamingLevel_BuildLayerTables": {
+    "rva": "0x00EF44B0",
+    "note": "OICEICPMMLN$$OAFMCJKHPCK, 1.6 dump.cs:1962790 (RVA 0xEF44B0): builds the level's layer tables from get_SceneSplitterConfig - Dictionary<string, SECTR_LayerConfig> 0x68, name -> index 0x70, the cached per-layer load radii 0x78-0x90 (max of stored and config) - the body of the public BGJLCFNOJFK @0xEF2050 (a plain jump), run by the game when the level is created. RenderDistance.cpp re-runs it after every loadSize write: the level had been built from an earlier splitter-config instance than the one the getter hands out later (the job probe showed jobs copying the stock 80 m while the getter's config held ours). Matched to 2.8's NJPNGIPLALM.PLDOADEOPIG @0x34A33C0 (the same List<SECTR_LayerConfig> sort + FindIndex + dictionary fills)."
+  },
+  "QualitySettings_set_shadowCascade4Split": {
+    "rva": "0x052CAA20",
+    "note": "UnityEngine.QualitySettings$$set_shadowCascade4Split, 1.6 dump.cs:366036 (RVA 0x52CAA20). STATIC and HOOKED by visuals/RenderDistance.cpp (the split is divided by the multiplier whenever the distance is multiplied), so like set_shadowDistance it keeps its name with the leading dummy `this` and the handler carries RELIC_STATIC_THIS. Vector3 by value = hidden reference in rdx (the quality applier FPOAEFCHAMD.AKJJJLAOBDG @0x2738660 passes rcx = 0, rdx = &split, r8 = 0)."
+  },
+  "QualitySettings_get_shadowCascade4Split": {
+    "rva": "0x052CA400",
+    "note": "UnityEngine.QualitySettings$$get_shadowCascade4Split, 1.6 dump.cs:366033 (RVA 0x52CA400). STATIC -> __RAW + inline thunk. Returns Vector3 through the hidden pointer in rcx with the dummy this in rdx (its caller LJODCBINFMP.BDEJJPNHDDN @0x2A72280 passes rcx = &out, edx = 0, r8 = 0). Read once by visuals/RenderDistance.cpp so the cascade split can be divided before the game writes it again."
+  },
+  "SECTR_Streaming_LoadSplitterConfig": {
+    "rva": "0x0362E9C0",
+    "note": "JBPNDKLFIFM$$KJLFHILAMPB(string path), 1.6 dump.cs:1961711 (RVA 0x362E9C0): loads the SECTR_SceneSplitterConfig asset by path into the holder's static (String.op_Equality reuse, DismissExternal of the old one, SortConfigs) - called by the level creation DKKCBPEDPHF.IDMAGIJGNOP @0x1487220 right before the level and its sector tree are built. The per-sector streaming jobs copy their layer's loadSize from the config at that build and never re-read it, so visuals/RenderDistance.cpp HOOKS this call and writes the radii into the freshly loaded config before returning. STATIC and HOOKED -> keeps its name with the dummy `this`; matched to 2.8's KIFKAIFDIIC.FOEPCDHKLJB by the same ConcatString('Data/LevelStreamingConfig/SplitterConfig/') caller shape."
+  }
+}

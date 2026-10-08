@@ -1,0 +1,170 @@
+{
+  "_comment": "Copy to versions.json (gitignored) and adjust. The app loads versions.json; if absent it falls back to this sample. Every host carries its own byte count: a mirror is not necessarily the same build, and the length check runs against the host actually used.",
+  "_comment_account": "\"account\" = the account name used to log in IN GAME (the server does not verify the password unless the admin enabled it). OPTIONAL: the app reads it from agent/payloads/<server>/manifest.json (the file describing the save actually imported on the server) and uses this value only when the payloads are missing from the build.",
+  "_comment_mirrors": "\"mirrors\" = alternative hosts for the SAME archive, each with ITS OWN \"size\". \"id\" is the key saved in Settings (download source) and must be identical across versions that carry that mirror; a version without it falls back to the CDN.",
+  "_comment_drive": "\"driveId\" = the Google Drive file id (from https://drive.google.com/file/d/<ID>/view). Leave it empty to hide the Drive source entirely (the card is not shown and the download chain skips it). Drive ids belong in your private versions.json — publish.ps1 strips them from the shipped build unless you pass --drive.",
+  "_comment_voices": "\"voices\" = one archive per spoken language, keyed exactly as the game names the folder (English(US), Chinese, Japanese, Korean). An 'audio' key is read as voices.English(US). Every pack carries its own size per host.",
+  "_comment_navmesh": "\"navmesh\" = the navmesh archive of the version for the server's pathfindingserver (the release asset relic-navmesh-2.8.zip: a zip whose root holds <ver>/navmesh.json + <ver>/NavMesh/*.navmesh). Fill in the download \"url\" (https), the \"sha256\" of the zip (64 hex) and its \"size\" in bytes; the Pathfinding server card then offers the download to an agent that ships no navmesh, and the agent verifies the file against the digest and size. All three must be filled or the entry is ignored. THIS COMMITTED FILE IS THE ONE PLACE TO FILL IT (public values, nothing private): a version whose entry is empty in the private versions.json inherits the sample's at load, both on the dev PC and in a shipped build (every config/*.json ships next to the exe), and CI reads the same three values from this file to attach the archive to a release and build the installer that bundles it. A filled-in entry in the private file wins over the sample's.",
+  "versions": [
+    {
+      "id": "1.6",
+      "title": "Version 1.6",
+      "desc": "A time-travel trip back to the first summer vacation of your Journey. Will you be able to reach the mysterious islands again and be arbitrate by the mighty Dodo-King?",
+      "server": "1.6",
+      "account": "aether",
+      "navmesh": { "url": "", "sha256": "", "size": 0 },
+      "client": {
+        "cdnUrl": "https://autopatchhk.yuanshen.com/client_app/pc_mihoyo/20210609_eea40505c6337fd1/GenshinImpact_1.6.1.zip",
+        "driveId": "",
+        "size": 14960991320,
+        "mirrors": [
+          {
+            "id": "archive",
+            "label": "Internet Archive",
+            "note": "Lower download speeds.",
+            "url": "https://archive.org/download/GenshinImpact_1.6.1/GenshinImpact_1.6.1.zip",
+            "size": 14960991320
+          }
+        ]
+      },
+      "voices": {
+        "English(US)": {
+          "cdnUrl": "https://autopatchhk.yuanshen.com/client_app/pc_mihoyo/20210609_eea40505c6337fd1/Audio_English(US)_1.6.1.zip",
+          "driveId": "",
+          "size": 3708267740,
+          "mirrors": [
+            {
+              "id": "archive",
+              "label": "Internet Archive",
+              "note": "Lower download speeds.",
+              "url": "https://archive.org/download/GenshinImpact_1.6.1/Audio_English%28US%29_1.6.1.zip",
+              "size": 3708267740
+            }
+          ]
+        },
+        "Chinese": {
+          "cdnUrl": "https://autopatchhk.yuanshen.com/client_app/pc_mihoyo/20210609_eea40505c6337fd1/Audio_Chinese_1.6.1.zip",
+          "driveId": "",
+          "size": 3463112481,
+          "mirrors": [
+            {
+              "id": "archive",
+              "label": "Internet Archive",
+              "note": "Lower download speeds.",
+              "url": "https://archive.org/download/GenshinImpact_1.6.1/Audio_Chinese_1.6.1.zip",
+              "size": 3463112481
+            }
+          ]
+        },
+        "Japanese": {
+          "cdnUrl": "https://autopatchhk.yuanshen.com/client_app/pc_mihoyo/20210609_eea40505c6337fd1/Audio_Japanese_1.6.1.zip",
+          "driveId": "",
+          "size": 3939900622,
+          "mirrors": [
+            {
+              "id": "archive",
+              "label": "Internet Archive",
+              "note": "Lower download speeds.",
+              "url": "https://archive.org/download/GenshinImpact_1.6.1/Audio_Japanese_1.6.1.zip",
+              "size": 3939900622
+            }
+          ]
+        },
+        "Korean": {
+          "cdnUrl": "https://autopatchhk.yuanshen.com/client_app/pc_mihoyo/20210609_eea40505c6337fd1/Audio_Korean_1.6.1.zip",
+          "driveId": "",
+          "size": 3246209458,
+          "mirrors": [
+            {
+              "id": "archive",
+              "label": "Internet Archive",
+              "note": "Lower download speeds.",
+              "url": "https://archive.org/download/GenshinImpact_1.6.1/Audio_Korean_1.6.1.zip",
+              "size": 3246209458
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "2.8",
+      "title": "Version 2.8",
+      "desc": "Relive the summer of '22. Uncover the past of your closest friends, and be Fischl's faithful retainers in search of Immernachtreich's revival on the Mysterious Archipelago.",
+      "server": "2.8",
+      "account": "Aetherr",
+      "navmesh": { "url": "", "sha256": "", "size": 0 },
+      "client": {
+        "cdnUrl": "https://autopatchhk.yuanshen.com/client_app/download/pc_zip/20220625012443_r2qBGYstD0u3Q9xK/GenshinImpact_2.8.0.zip",
+        "driveId": "",
+        "size": 31800020923,
+        "mirrors": [
+          {
+            "id": "archive",
+            "label": "Internet Archive",
+            "note": "Lower download speeds.",
+            "url": "https://archive.org/download/GenshinImpact2.8.0/GenshinImpact_2.8.0.zip",
+            "size": 31800020923
+          }
+        ]
+      },
+      "voices": {
+        "English(US)": {
+          "cdnUrl": "https://autopatchhk.yuanshen.com/client_app/download/pc_zip/20220625012443_r2qBGYstD0u3Q9xK/Audio_English(US)_2.8.0.zip",
+          "driveId": "",
+          "size": 8575243551,
+          "mirrors": [
+            {
+              "id": "archive",
+              "label": "Internet Archive",
+              "note": "Lower download speeds.",
+              "url": "https://archive.org/download/GenshinImpact2.8.0/Audio_English%28US%29_2.8.0.zip",
+              "size": 8575243551
+            }
+          ]
+        },
+        "Chinese": {
+          "cdnUrl": "https://autopatchhk.yuanshen.com/client_app/download/pc_zip/20220625012443_r2qBGYstD0u3Q9xK/Audio_Chinese_2.8.0.zip",
+          "driveId": "",
+          "size": 7441982887,
+          "mirrors": [
+            {
+              "id": "archive",
+              "label": "Internet Archive",
+              "note": "Lower download speeds.",
+              "url": "https://archive.org/download/GenshinImpact2.8.0/Audio_Chinese_2.8.0.zip",
+              "size": 7441982887
+            }
+          ]
+        },
+        "Japanese": {
+          "cdnUrl": "https://autopatchhk.yuanshen.com/client_app/download/pc_zip/20220625012443_r2qBGYstD0u3Q9xK/Audio_Japanese_2.8.0.zip",
+          "driveId": "",
+          "size": 9363410719,
+          "mirrors": [
+            {
+              "id": "archive",
+              "label": "Internet Archive",
+              "note": "Lower download speeds.",
+              "url": "https://archive.org/download/GenshinImpact2.8.0/Audio_Japanese_2.8.0.zip",
+              "size": 9363410719
+            }
+          ]
+        },
+        "Korean": {
+          "cdnUrl": "https://autopatchhk.yuanshen.com/client_app/download/pc_zip/20220625012443_r2qBGYstD0u3Q9xK/Audio_Korean_2.8.0.zip",
+          "driveId": "",
+          "size": 7279819313,
+          "mirrors": [
+            {
+              "id": "archive",
+              "label": "Internet Archive",
+              "note": "Lower download speeds.",
+              "url": "https://archive.org/download/GenshinImpact2.8.0/Audio_Korean_2.8.0.zip",
+              "size": 7279819313
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

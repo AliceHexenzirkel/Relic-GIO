@@ -1,0 +1,4 @@
+# Fields whose generated C++ offset does not match the offset the game's metadata dump reports.
+# Features that read them are unreliable on this game version. Collected by tools/collect_known_bad.ps1;
+# the list may only shrink - a NEW mismatch is a build error, not a line added here.
+# (empty since 2026-08-23: tools/fix_layout_pads.py + the Color32 fix put every member on its dump offset)

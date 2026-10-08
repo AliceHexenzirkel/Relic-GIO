@@ -1,0 +1,13 @@
+{
+ "version": "2.8",
+ "_note": "Ready-made 2.8_live docker stack on the Internet Archive (the vendor's all-in-one server package). Same mechanism as 1.6 (download next to GIO_DIR_28, size + md5 verified, extracted, top folder renamed onto GIO_DIR_28). This archive ships a stray top-level data.txt beside 2.8_live/ (dropped with the temp folder) and its server/data nested one level deeper (server/data/2.8_live-output_<n>-server-data/{txt,json,lua,server_data_version*.txt}) -- without the hoist gameserver/multiserver/pathfinding exit in 3 s (ConstValueData.txt missing); healed by ensure_data_layout after the extraction and before every setup/provision/start.",
+ "label": "Internet Archive",
+ "url": "https://archive.org/download/GenshinImpact2.8.0/gio_2.8.7z",
+ "size": 2453575625,
+ "md5": "ad2b4edff0f093e1ab1bc4e400172081",
+ "extractedSize": 17005784206,
+ "topDir": "2.8_live",
+ "strays": [
+  "data.txt"
+ ]
+}

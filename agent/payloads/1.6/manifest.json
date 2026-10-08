@@ -1,0 +1,52 @@
+{
+  "version": "1.6",
+  "title": "Golden Apple Archipelago (Midsummer Island Adventure)",
+  "account": "aether",
+  "password": "123123123",
+  "note": "Save positioned right before the start of the GAA quest. Source: the community GAA 1.6 fixes (thanks @AZ#7011). NewActivityCondData.txt here is NO LONGER the modder's copy: the 22 OR rows of the 5033 family (the islands' state switch, 57 4,108 -> 4,109) were repaired from (12,0)='always true' to (12,7777)='never by time', so that ONLY the quest condition remains (4001103 / 4001217 / 4001015), and 5033034/35 got the quest gate 4001103 instead of the purely time-based day 21..45 window. This way chapter 1 is played with the water up (state A) and the islands transform per player when that player reaches the respective quest -- which is why the files are applied FROM THE START, and the 'replace the txt files after chapter 1' step from the original readme no longer exists. txt_fixes=later remains only as a safety net.",
+
+  "_stages_note": "files[].stage: 'save' = the progress (sdk.db, dump.rdb) -- installed only by a provision with progress 'default'; 'config' = server data files installed in every progress mode (default / keep / fixes) and never reverted (1.6 ships none); 'txt_fix' = the reversible fixes /server/txtfixes applies and reverts (.orig kept). A 'save' entry flagged tsv is treated as 'config' by the agent (effective_stage).",
+  "files": [
+    { "src": "sdk/data/sdk.db",   "dst": "sdk/data/sdk.db",   "stage": "save" },
+    { "src": "redis/dump.rdb",    "dst": "redis/dump.rdb",    "stage": "save" },
+
+    { "src": "txt/NewActivityCondData.txt",        "dst": "server/data/txt/NewActivityCondData.txt",        "stage": "txt_fix", "tsv": true },
+    { "src": "txt/SummerTimeData.txt",             "dst": "server/data/txt/SummerTimeData.txt",             "stage": "txt_fix", "tsv": true },
+    { "src": "txt/BounceConjuringChapterData.txt", "dst": "server/data/txt/BounceConjuringChapterData.txt", "stage": "txt_fix", "tsv": true },
+    { "src": "txt/BounceConjuringPreviewData.txt", "dst": "server/data/txt/BounceConjuringPreviewData.txt", "stage": "txt_fix", "tsv": true }
+  ],
+
+  "mysql": [
+    { "src": "mysql/hk4e_db_user.sql", "db": "hk4e_db_user", "recreate": true }
+  ],
+
+  "templates": [
+    { "id": "pre-gaa",  "label": "Before the GAA quest", "sql": "mysql/hk4e_db_user.sql",              "md5": "4ebde69afeae693a44caa33b30c3d717" },
+    { "id": "post-gaa", "label": "After the GAA quest",  "sql": "templates/post-gaa/hk4e_db_user.sql", "md5": "7cf755dce175b23594d83dfcacf360ee" }
+  ],
+  "_templates_note": "Progress templates players may start from (policy-gated). Each dump holds exactly one player (uid 1); the agent imports it into relic_tpl_<id> at provision time and copies it onto a new account with copy_save (guids rewritten). 'fresh' (no progress) is implicit. post-gaa is the same account after finishing the GAA quest.",
+
+  "events": {
+    "_note": "Only the GAA events stay open. bootstrap.sh (adjust.sql) rebases ALL events to start now, so without the list below events that do not belong here would run too. Any id that appears in neither list is closed and flagged in the log.",
+    "openUntil": "2050-01-01 00:00:00",
+    "closedWindow": ["1998-06-09 10:00:00", "1998-06-28 03:59:59"],
+
+    "gaa": {
+      "2005001": "Midsummer Island Adventure -- the GAA event itself",
+      "5030001": "Never-Ending Battle -- archipelago activity",
+      "5032001": "Kaboomball Kombat -- archipelago minigame",
+      "5033001": "Echoing Tales -- archipelago activity"
+    },
+
+    "others": {
+      "2003001": "Invitation of Windblume -- a 1.4 event, not from this version",
+      "5031001": "Legend of the Vagabond Sword -- a 1.6 event, but not part of the archipelago"
+    }
+  },
+
+  "sql_events": [
+    "USE hk4e_db_config",
+
+    "UPDATE t_op_activity_schedule_config SET end_time = '2050-01-01 00:00:00'"
+  ]
+}

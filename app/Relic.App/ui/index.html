@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Relic</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700;800&family=Mulish:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="relic.css" />
+</head>
+<body>
+  <script>
+    // The theme is applied to <body> before #app exists - no flash at startup.
+    // "var def" is the default baked in at build time: publish.ps1 --theme=summer|classic rewrites it here.
+    (function () {
+      var def = 'summer'; /*RELIC-DEFAULT-THEME*/
+      var t = null;
+      try { t = localStorage.getItem('relic-theme'); } catch (e) { }
+      if (t !== 'classic' && t !== 'summer') t = def;
+      document.body.className = 'theme-' + t;
+    })();
+  </script>
+  <div id="app"></div>
+  <!-- Start-screen media: STATIC siblings of #app (render() rewrites #app; a media element inside
+       it would restart on every state change). app.js toggles .hidden + play/pause only. -->
+  <div id="login-media" class="hidden">
+    <video id="login-bg" src="assets/login.webm" autoplay muted loop playsinline preload="auto"></video>
+    <audio id="login-audio" src="assets/audio_login.mp3" loop preload="auto"></audio>
+  </div>
+  <script src="lang/en.js"></script>
+  <script src="i18n.js"></script>
+  <script src="bridge.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

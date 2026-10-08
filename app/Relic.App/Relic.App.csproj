@@ -1,0 +1,79 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Relic.App</RootNamespace>
+    <AssemblyName>Relic</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>assets\relic.ico</ApplicationIcon>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>1.0.0</Version>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- Self-contained single-file publish is driven from the CLI (see docs/BUILD.md):
+         dotnet publish -c Release -r win-x64 with SelfContained + PublishSingleFile. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- *.bak under ui/ are NOT shipped: ui/lang/ro.json.bak is the archived Romanian translation,
+         kept in the repo for contributors but never loaded (lang/index.json does not list it and
+         publish.ps1 fails if any .bak reaches the output). -->
+    <None Include="ui\**\*" Exclude="ui\**\*.bak;ui\lang\fragments\**" CopyToOutputDirectory="PreserveNewest" />
+    <!-- relic.ico is embedded in Relic.exe as its Win32 icon resource by <ApplicationIcon> above —
+         that is what the window, the taskbar and every shortcut actually read.
+         NOTHING MAY DEPEND ON THE LOOSE COPY: MSBuild consumes the <ApplicationIcon> file as a
+         resource and drops it from the publish output, so it lands in a Debug build but NOT in a
+         ship build (CopyToPublishDirectory does
+         not override this). MainForm.LoadAppIcon therefore reads the icon out of the exe first, and
+         installer\relic.iss points its shortcuts at the exe rather than at a .ico path. -->
+    <None Include="assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Bundle the version catalog and ONLY the two agent files DeployAgent needs (gio_agent.py +
+       the systemd unit). Never ship the whole agent/ folder: it holds admin-only deploy scripts and
+       the gitignored get_token.local.bat, which carries the server's ROOT SSH password — that must
+       not end up in every user's install. -->
+  <ItemGroup>
+    <!-- gamedata.generated.json is make_catalog.py's verification output, not a runtime input —
+         shipping it would put a second, subtly different catalogue next to the real one. -->
+    <None Include="..\..\config\**\*.json" Exclude="..\..\config\gamedata.generated.json"
+          CopyToOutputDirectory="PreserveNewest" LinkBase="config" />
+    <None Include="..\..\agent\gio_agent.py" CopyToOutputDirectory="PreserveNewest" LinkBase="agent" />
+    <None Include="..\..\agent\gio-agent.service" CopyToOutputDirectory="PreserveNewest" LinkBase="agent" />
+    <!-- The in-app "install the agent on a new server" flow uploads and runs the SAME installer
+         script an admin would run by hand (sudo-aware, selftest, firewall, systemd). -->
+    <None Include="..\..\agent\install_agent.sh" CopyToOutputDirectory="PreserveNewest" LinkBase="agent" />
+    <None Include="..\..\agent\uninstall_agent.sh" CopyToOutputDirectory="PreserveNewest" LinkBase="agent" />
+    <!-- ...plus the GAA provisioning payloads AgentDeployer mirrors to the box. Player saves and
+         server config, no credentials — the exclusion above is about the deploy scripts. -->
+    <None Include="..\..\agent\payloads\**\*" CopyToOutputDirectory="PreserveNewest" LinkBase="agent\payloads" />
+    <!-- Files GamePatcher copies into the game folder after an install/import and re-checks before
+         every launch (2.8's global-metadata.dat, the Win11 injector pair) + their manifest. Loose
+         next to the exe like ui/ and config/, NOT embedded: they are read by path, and the installer
+         ships the whole publish dir. -->
+    <None Include="..\..\payload\**\*" CopyToOutputDirectory="PreserveNewest" LinkBase="payload" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Relic.Core\Relic.Core.csproj" />
+  </ItemGroup>
+
+  <!-- The WebView2 package references its WPF control for every .NET 5+ app (build\Common.targets,
+       no condition). Relic is WinForms only: that DLL is never loaded, and its reference to WPF's
+       WindowsBase 5.0.0.0 is the MSB3277 conflict warning. Dropped before references are resolved,
+       so it is neither reported nor copied into the bundle. -->
+  <Target Name="DropUnusedWebView2Wpf" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
+
+</Project>

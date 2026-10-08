@@ -1,0 +1,829 @@
+/* ── themes ──
+   The tokens live on body.theme-*; the inline script in index.html sets the class before the first
+   paint (the default is baked at build time — see publish.ps1 --theme). :root keeps the classic
+   fallback for anything drawn before the class exists. Derived gold/teal tints are expressed through
+   color-mix(var(--gold|--goldD|--gold2)) so they follow the theme instead of a frozen rgba(). */
+:root, body.theme-classic{
+  --gold:#c8a04f; --gold2:#e6cf93; --goldD:#9b7d3a;
+  --accHi:#f0dca2; --btnInk:#3a2d0c;
+  --ink:#3c4152; --ink2:#5a6172; --muted:#8a8163;
+  --inkSoft:#7a7050; --inkLbl:#6d6242; --inkFnt:#a59a78;
+  --cream:#efe6d2; --cream2:#e6dbc2; --panel:#f8f2e4;
+  --dark:#141926; --dark2:#0f1320;
+  --side1:#1b2133; --sideMut:#6b7488; --tb1:#171d2e; --tb2:#10131f;
+  --ttl1:#fff6df; --ttl2:#dcbd7a; --ttl3:#b8923f; --ttlGlow:none; --logoGlow:none;
+  --loginSub:#cdd3e2; --loginSubSh:none;
+  --ok:#67b86a; --warn:#e0a94a; --bad:#d06a5e;
+  --logInk:#9fb2c9; --logHi:#f2f7fd; --logMut:#8aa0c8;
+}
+body.theme-summer{
+  --gold:#22a7cc;   /* main accent (ocean teal) */
+  --gold2:#93e2f2;  /* light accent (aqua) */
+  --goldD:#0f7d9d;  /* dark accent */
+  --accHi:#cdf3fa;  /* light end of the button gradient */
+  --btnInk:#053644; /* text on teal buttons */
+  --ink:#1b4456; --ink2:#3f6c7a; --muted:#5f8791;
+  --inkSoft:#48737f; --inkLbl:#2f6473; --inkFnt:#7fa3ab;
+  --cream:#e9f4f0; --cream2:#f0e7cb; --panel:#fbfefd; /* foam -> sand */
+  --dark:#0a3652; --dark2:#08304c; /* deep ocean (sidebar/console/titlebar) */
+  --side1:#0f4a6d; --sideMut:#8ab8cd; --tb1:#0e486a; --tb2:#093350;
+  --ttl1:#ffffff; --ttl2:#c3ecfa; --ttl3:#7cc5e8;
+  --ttlGlow:drop-shadow(0 2px 4px rgba(4,34,52,.9)) drop-shadow(0 6px 16px rgba(4,34,52,.6));
+  --logoGlow:drop-shadow(0 2px 5px rgba(4,34,52,.9)) drop-shadow(0 6px 16px rgba(4,34,52,.5));
+  --loginSub:#f0fafd; --loginSubSh:0 1px 3px rgba(4,34,52,.9), 0 2px 10px rgba(4,34,52,.7);
+  --logInk:#9dc4d6; --logHi:#f4fbfe; --logMut:#7fb6d0; /* console ink (ocean) */
+}
+*{box-sizing:border-box;}
+html,body{margin:0;height:100%;overflow:hidden;}
+body{
+  font-family:'Mulish',system-ui,'Segoe UI',sans-serif;
+  background:var(--dark2); color:var(--ink);
+  -webkit-user-select:none; user-select:none;
+}
+::selection{background:color-mix(in srgb, var(--gold) 35%, transparent);}
+::-webkit-scrollbar{width:10px;height:10px;}
+::-webkit-scrollbar-thumb{background:color-mix(in srgb, var(--goldD) 45%, transparent);border-radius:8px;border:2px solid transparent;background-clip:padding-box;}
+::-webkit-scrollbar-track{background:transparent;}
+input,select,button,textarea{font-family:inherit;}
+input:focus,select:focus{outline:none;border-color:var(--gold)!important;box-shadow:0 0 0 3px color-mix(in srgb, var(--gold) 18%, transparent);}
+button{cursor:pointer;}
+.serif{font-family:'Cinzel',serif;}
+.mono{font-family:'JetBrains Mono',monospace;}
+
+@keyframes rl-pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes rl-spin{to{transform:rotate(360deg)}}
+@keyframes rl-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+@keyframes rl-glow{0%,100%{box-shadow:0 10px 24px rgba(60,40,0,.3),0 0 16px color-mix(in srgb, var(--gold2) 55%, transparent)}50%{box-shadow:0 10px 24px rgba(60,40,0,.3),0 0 32px color-mix(in srgb, var(--gold2) 90%, transparent)}}
+@keyframes rl-wave{from{background-position-x:0}to{background-position-x:96px}}
+@keyframes rl-bob{0%,100%{transform:translate(-50%,1px) rotate(-10deg)}50%{transform:translate(-50%,-3px) rotate(10deg)}}
+/* water "swell": every wave layer rises/falls on a different beat than it moves horizontally, so the
+   96px loop does not read as a loop. */
+@keyframes rl-swell{0%,100%{transform:translateY(0)}50%{transform:translateY(3px)}}
+@keyframes rl-sheen{0%{transform:translateX(-150%) skewX(-16deg)}45%,100%{transform:translateX(420%) skewX(-16deg)}}
+@keyframes rl-fade{from{opacity:0}to{opacity:1}}
+@keyframes rl-fadein{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+@keyframes rl-boxin{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
+
+#app{width:1188px;height:752px;position:relative;overflow:hidden;background:transparent;} /* transparent so #login-media shows through on the start screen; every screen paints its own ground */
+
+/* ── title bar ── */
+.titlebar{height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 6px 0 14px;
+  background:linear-gradient(180deg,var(--tb1),var(--tb2));border-bottom:1px solid color-mix(in srgb, var(--gold) 16%, transparent);-webkit-app-region:drag;}
+.titlebar .brand{display:flex;align-items:center;gap:10px;}
+.titlebar .brand b{font-family:'Cinzel',serif;font-weight:700;letter-spacing:3px;color:var(--gold2);font-size:13.5px;}
+.titlebar .brand span{color:#5c667f;font-size:12px;font-weight:600;}
+.winbtns{display:flex;gap:1px;}
+.winbtns button{width:44px;height:32px;border:0;background:transparent;border-radius:7px;color:#8b93a7;display:flex;align-items:center;justify-content:center;}
+.winbtns button:hover{background:rgba(255,255,255,.06);color:#c7cdda;}
+.winbtns button.close:hover{background:#c0392b;color:#fff;}
+
+/* ── login / start screen ──
+   The animated background (<video id="login-bg">) and the music (<audio id="login-audio">) are
+   STATIC nodes in index.html, siblings of #app: render() rewrites #app on every state change and a
+   media element inside it would restart each time. #login-media sits under the login area; #app is
+   transparent there so it shows through; app.js only toggles its visibility / play state. */
+#login-media{position:absolute;left:0;top:44px;width:1188px;height:708px;overflow:hidden;z-index:0;background:var(--dark2);}
+#login-media.hidden{display:none;}
+#login-media video{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;object-position:center 40%;}
+#app{z-index:1;}
+.login{position:relative;height:708px;overflow:hidden;background:transparent;}
+/* theme wash over the video, same tones as the design reference */
+.login::before{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(180deg, rgba(11,14,24,.34), rgba(11,14,24,.80)), radial-gradient(760px 420px at 50% 22%, rgba(120,150,220,.16), transparent 70%);}
+body.theme-summer .login::before{
+  background:linear-gradient(180deg, rgba(7,48,74,.24), rgba(6,40,64,.76)), radial-gradient(900px 480px at 50% 18%, rgba(255,255,255,.10), transparent 62%);}
+.login > *{position:relative;}
+/* the install-agent form opens on the start screen too: keep it an overlay there (the rule above would pin it in flow) */
+.login > .overlay{position:absolute;}
+/* the two media pills (animation, music), top right */
+.login > .lg-pills{position:absolute;top:16px;right:18px;z-index:5;display:flex;gap:8px;}
+.lg-mute{display:flex;align-items:center;gap:8px;padding:8px 14px 8px 11px;border-radius:20px;
+  border:1px solid color-mix(in srgb, var(--gold) 30%, transparent);background:rgba(11,14,24,.52);backdrop-filter:blur(6px);color:#dfe4ef;
+  font-weight:800;font-size:10.5px;letter-spacing:1.3px;}
+.lg-mute:hover{background:rgba(11,14,24,.74);border-color:var(--gold);}
+.lg-head{position:absolute;left:0;right:0;top:58px;display:flex;flex-direction:column;align-items:center;gap:15px;text-align:center;pointer-events:none;}
+.lg-head .float{color:var(--gold2);animation:rl-float 5s ease-in-out infinite;filter:var(--logoGlow);}
+.lg-head img.dodoco{width:84px;height:84px;object-fit:contain;display:block;margin:-10px 0 -12px;animation:rl-float 5s ease-in-out infinite;filter:var(--logoGlow);}
+.lg-head .logo{font-family:'Cinzel',serif;font-weight:800;font-size:48px;letter-spacing:12px;line-height:1;padding-left:12px;
+  background:linear-gradient(180deg,var(--ttl1),var(--ttl2) 60%,var(--ttl3));-webkit-background-clip:text;background-clip:text;color:transparent;filter:var(--ttlGlow);}
+.lg-head .tagline{margin-top:10px;color:var(--loginSub);font-size:14px;font-weight:600;letter-spacing:1px;text-shadow:var(--loginSubSh);}
+.lg-which{position:absolute;left:0;right:0;top:236px;display:flex;align-items:center;justify-content:center;gap:16px;pointer-events:none;}
+.lg-which i{width:70px;height:1px;background:linear-gradient(90deg,transparent,color-mix(in srgb, var(--gold2) 70%, transparent));}
+.lg-which i.r{background:linear-gradient(90deg,color-mix(in srgb, var(--gold2) 70%, transparent),transparent);}
+.lg-which span{font-family:'Cinzel',serif;font-weight:600;font-size:17px;letter-spacing:3.5px;color:var(--loginSub);text-shadow:0 2px 10px rgba(0,0,0,.75);}
+/* Centres at x=272 and x=916 of the 1188 canvas. The entry animation (rl-boxin) is set inline by
+   app.js through once(), on the button, not on the positioned wrapper (rl-boxin ends with
+   transform:none, which would cancel a translateX on it) — and only on the first appearance: a CSS
+   animation on the class would replay on every render() of the start screen. */
+.lg-mode{position:absolute;top:372px;width:308px;}
+.lg-mode.player{left:118px;} .lg-mode.admin{left:762px;}
+.lg-mode::before{content:"";position:absolute;left:50%;top:-36px;width:1px;height:36px;pointer-events:none;background:linear-gradient(180deg,transparent,color-mix(in srgb, var(--gold2) 80%, transparent));}
+.lg-mode button{width:100%;display:flex;align-items:center;gap:13px;padding:15px 18px;border-radius:13px;text-align:left;cursor:pointer;}
+.lg-mode.player button{border:1px solid var(--goldD);background:linear-gradient(180deg,var(--accHi),var(--gold));color:var(--btnInk);animation:rl-glow 3.4s ease-in-out infinite;}
+.lg-mode.player button:hover{filter:brightness(1.07);}
+.lg-mode.admin button{border:1px solid color-mix(in srgb, var(--gold) 45%, transparent);background:rgba(11,14,24,.52);backdrop-filter:blur(7px);color:#e9edf6;box-shadow:0 14px 32px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.10);}
+.lg-mode.admin button:hover{background:rgba(11,14,24,.72);border-color:var(--gold);}
+.lg-mode .t{display:flex;flex-direction:column;gap:3px;}
+.lg-mode .t b{font-family:'Cinzel',serif;font-weight:700;font-size:15px;letter-spacing:1.8px;}
+.lg-mode.admin .t b{color:var(--gold2);}
+.lg-mode .t small{font-size:11.5px;font-weight:700;opacity:.72;}
+.lg-mode.admin .t small{color:#b9c1d2;opacity:1;}
+.lg-panel{position:absolute;left:calc(50% - 235px);top:200px;width:470px;max-height:494px;overflow-y:auto;
+  background:linear-gradient(180deg,var(--panel),var(--cream));border:1px solid color-mix(in srgb, var(--goldD) 42%, transparent);border-radius:16px;
+  padding:20px 22px 18px;box-shadow:0 28px 66px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.6);} /* entry animation: inline via once() in app.js */
+.lg-panel .corner{position:absolute;width:15px;height:15px;opacity:.6;pointer-events:none;}
+.lg-panel .corner.tl{top:9px;left:9px;border-top:2px solid var(--gold);border-left:2px solid var(--gold);}
+.lg-panel .corner.tr{top:9px;right:9px;border-top:2px solid var(--gold);border-right:2px solid var(--gold);}
+.lg-panel .corner.bl{bottom:9px;left:9px;border-bottom:2px solid var(--gold);border-left:2px solid var(--gold);}
+.lg-panel .corner.br{bottom:9px;right:9px;border-bottom:2px solid var(--gold);border-right:2px solid var(--gold);}
+.lg-panel .ph{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.lg-panel .ph h2{font-family:'Cinzel',serif;font-weight:700;font-size:18px;color:var(--ink);margin:0;}
+.lg-panel .x{width:28px;height:28px;flex:0 0 auto;border-radius:8px;border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);background:rgba(255,255,255,.65);color:var(--ink2);display:flex;align-items:center;justify-content:center;}
+.lg-panel .x:hover{background:#fff;}
+.lg-tabs{display:flex;gap:6px;padding:4px;margin-top:14px;border-radius:11px;background:rgba(60,65,82,.07);border:1px solid color-mix(in srgb, var(--goldD) 20%, transparent);}
+.lg-tabs button{position:relative;flex:1;padding:9px;border:0;border-radius:8px;background:transparent;color:var(--ink2);font-weight:800;font-size:11px;letter-spacing:1px;}
+.lg-tabs button.on{background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 34%, transparent);box-shadow:0 2px 6px rgba(0,0,0,.08);color:var(--ink);}
+.lg-label{display:block;color:var(--inkLbl);font-size:10.5px;font-weight:800;letter-spacing:.7px;margin:13px 0 7px;}
+.lg-label:first-of-type{margin-top:14px;}
+.lg-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+.lg-chip{padding:6px 11px;border-radius:16px;background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);color:var(--ink2);font-size:11.5px;font-weight:800;}
+.lg-chip:hover{border-color:var(--gold);}
+.lg-chip.on{border:2px solid var(--gold);color:var(--ink);box-shadow:0 0 0 3px color-mix(in srgb, var(--gold) 15%, transparent);}
+.lg-row{display:flex;gap:8px;align-items:center;}
+.lg-row input.txt{flex:1;min-width:0;}
+.lg-test{flex:0 0 auto;padding:11px 14px;border-radius:10px;border:1px solid color-mix(in srgb, var(--goldD) 40%, transparent);background:rgba(255,255,255,.7);color:var(--ink2);font-weight:800;font-size:12px;}
+.lg-test:hover{border-color:var(--gold);color:var(--ink);}
+.lg-status{margin-top:8px;display:flex;align-items:center;gap:7px;color:var(--inkMut,#8a8163);font-size:11.5px;font-weight:700;line-height:1.45;}
+.lg-status .dot{flex:0 0 auto;}
+.lg-status.ok{color:#3f7a42;} .lg-status.bad{color:#a03a2e;} .lg-status.warn{color:#9a6a2a;}
+.lg-hint{margin-top:8px;display:flex;align-items:flex-start;gap:7px;color:var(--muted);font-size:10.5px;font-weight:700;line-height:1.45;}
+.lg-hint svg{flex:0 0 auto;margin-top:1px;}
+.lg-cta{width:100%;margin-top:14px;padding:13px;border:1px solid var(--goldD);border-radius:11px;background:linear-gradient(180deg,var(--accHi),var(--gold));color:var(--btnInk);
+  font-family:'Cinzel',serif;font-weight:700;font-size:14px;letter-spacing:2px;animation:rl-glow 3.4s ease-in-out infinite;}
+.lg-cta:disabled{border:1px dashed color-mix(in srgb, var(--goldD) 48%, transparent);background:rgba(60,65,82,.06);color:var(--muted);cursor:not-allowed;animation:none;opacity:1;}
+.lg-link{display:inline-block;margin-top:12px;color:var(--goldD);font-size:11.5px;font-weight:800;background:none;border:0;padding:0;text-decoration:underline;cursor:pointer;}
+.lg-link:hover{color:var(--ink);}
+.lg-link:disabled{color:var(--muted);cursor:not-allowed;text-decoration:none;}
+/* Secondary CTA of the admin panel ("Use the agent on this PC"): the main button's shape in quiet
+   colours, no glow — it must not compete with AUTHENTICATE & ENTER. */
+.lg-cta.lg-cta-alt{margin-top:10px;background:none;color:var(--goldD);animation:none;}
+.lg-cta.lg-cta-alt:hover:not(:disabled){background:rgba(255,255,255,.45);}
+.lg-local{margin-top:2px;}
+/* "Agent update available" under the hint of that button: a note in the hint's size with its one action
+   at the end — seen, and never louder than AUTHENTICATE & ENTER (no glow, the small type). */
+.lg-update{margin-top:10px;display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:10px;border:1px solid color-mix(in srgb, var(--goldD) 45%, transparent);
+  background:rgba(255,255,255,.55);color:var(--ink2);font-size:11px;font-weight:700;line-height:1.4;}
+.lg-update svg{flex:0 0 auto;}
+.lg-update span{flex:1 1 auto;min-width:0;}
+.lg-update button{flex:0 0 auto;padding:6px 11px;border-radius:8px;border:1px solid var(--goldD);background:linear-gradient(180deg,var(--accHi),var(--gold));color:var(--btnInk);
+  font-weight:800;font-size:11px;white-space:nowrap;}
+.lg-update button:disabled{border:1px dashed color-mix(in srgb, var(--goldD) 48%, transparent);background:rgba(60,65,82,.06);color:var(--muted);cursor:not-allowed;}
+.lg-foot{position:absolute;left:50%;bottom:26px;transform:translateX(-50%);white-space:nowrap;}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:7px 15px;border-radius:20px;background:rgba(11,14,24,.55);border:1px solid color-mix(in srgb, var(--gold) 22%, transparent);color:#c9cfdd;font-size:12px;font-weight:600;}
+.dot{width:8px;height:8px;border-radius:50%;}
+.dot.live{background:var(--ok);animation:rl-pulse 1.8s ease-in-out infinite;}
+.dot.down{background:var(--bad);} .dot.unknown{background:#8b93a7;} .dot.warn{background:var(--warn);}
+
+/* ── shell ── */
+.shell{height:708px;display:flex;position:relative;} /* positioning context for the install overlay (must cover the sidebar too) */
+.sidebar{width:238px;background:linear-gradient(180deg,var(--side1),var(--dark));border-right:1px solid color-mix(in srgb, var(--gold) 14%, transparent);display:flex;flex-direction:column;padding:18px 12px 14px;}
+.sidebar .head{display:flex;align-items:center;gap:10px;padding:4px 8px 16px;}
+.sidebar .head b{font-family:'Cinzel',serif;font-weight:700;letter-spacing:2px;color:var(--gold2);font-size:15px;line-height:1;}
+.sidebar .head small{color:var(--sideMut);font-size:10.5px;font-weight:700;letter-spacing:1px;display:block;margin-top:3px;}
+.divider{height:1px;background:linear-gradient(90deg,transparent,color-mix(in srgb, var(--gold) 35%, transparent),transparent);margin:0 6px 12px;}
+.nav{position:relative;display:flex;align-items:center;gap:12px;width:100%;padding:11px 14px;margin-bottom:3px;background:transparent;border:0;border-radius:10px;color:#c7cdda;font-weight:700;font-size:13.5px;text-align:left;}
+.nav:hover{background:rgba(255,255,255,.04);}
+.nav.active{background:linear-gradient(90deg,color-mix(in srgb, var(--gold) 20%, transparent),color-mix(in srgb, var(--gold) 3%, transparent));border:1px solid color-mix(in srgb, var(--gold) 32%, transparent);}
+.nav.active::before{content:"";position:absolute;left:0;top:10px;bottom:10px;width:3px;border-radius:0 3px 3px 0;background:var(--gold);box-shadow:0 0 10px var(--gold);}
+.nav svg{flex:0 0 auto;}
+.spacer{flex:1;}
+.userchip{display:flex;align-items:center;gap:10px;padding:10px;border-radius:11px;background:rgba(255,255,255,.03);border:1px solid color-mix(in srgb, var(--gold) 14%, transparent);}
+.userchip .av{width:34px;height:34px;border-radius:9px;background:linear-gradient(180deg,var(--gold2),var(--gold));display:flex;align-items:center;justify-content:center;color:var(--btnInk);font-family:'Cinzel',serif;font-weight:700;font-size:16px;}
+.userchip b{color:#e7ebf3;font-size:12.5px;font-weight:800;display:block;}
+.userchip small{color:#6f7890;font-size:10.5px;font-weight:700;}
+
+.main{flex:1;height:100%;overflow-y:auto;position:relative;background:linear-gradient(180deg,var(--cream),var(--cream2));color:var(--ink);}
+.pad{padding:28px 34px 34px;}
+h1.title{font-family:'Cinzel',serif;font-weight:700;font-size:26px;color:var(--ink);margin:0;}
+.sub{margin:6px 0 22px;color:var(--inkSoft);font-size:13.5px;font-weight:600;}
+
+/* buttons */
+.btn{padding:12px 22px;border:1px solid var(--goldD);border-radius:11px;background:linear-gradient(180deg,var(--accHi),var(--gold));color:var(--btnInk);font-weight:800;font-size:13.5px;}
+.btn.big{padding:15px 40px;font-family:'Cinzel',serif;font-weight:800;font-size:19px;letter-spacing:3px;animation:rl-glow 3.4s ease-in-out infinite;display:inline-flex;align-items:center;gap:12px;}
+.btn.glow{animation:rl-glow 3.4s ease-in-out infinite;}
+.btn.ghost{background:rgba(255,255,255,.55);border:1px solid color-mix(in srgb, var(--goldD) 40%, transparent);color:var(--ink2);}
+.btn.dark{background:rgba(11,14,24,.42);border:1px solid rgba(255,255,255,.28);color:#eef1f7;}
+/* irreversible actions (progress reset): red whatever the theme */
+.btn.danger{background:linear-gradient(180deg,#eba99e,#d06a5e);border:1px solid #a84a3e;color:#fff;}
+.btn.ghost.danger{background:rgba(208,106,94,.10);border:1px solid rgba(176,74,62,.5);color:#a03a2e;}
+.btn:disabled{opacity:.55;cursor:default;animation:none;}
+
+/* library */
+.hero{position:relative;height:294px;overflow:hidden;background:linear-gradient(120deg,#2b3350,#59496f 60%,#8a6f4e);background-size:cover;background-position:center 30%;}
+.hero::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,rgba(20,16,10,.82),rgba(20,16,10,.35) 46%,transparent 72%),linear-gradient(0deg,rgba(20,16,10,.6),transparent 55%);}
+body.theme-summer .hero{background-position:center 32%;}
+body.theme-summer .hero::after{background:linear-gradient(90deg,rgba(5,38,58,.82),rgba(5,38,58,.32) 46%,transparent 72%),linear-gradient(0deg,rgba(5,38,58,.62),transparent 55%);}
+.hero .inner{position:relative;z-index:2;height:100%;display:flex;flex-direction:column;justify-content:flex-end;padding:30px 34px;gap:12px;}
+.hero .kicker{color:var(--gold2);font-size:11px;font-weight:800;letter-spacing:3px;}
+.hero h2{font-family:'Cinzel',serif;font-weight:800;font-size:42px;color:#fff;line-height:.95;margin:0;text-shadow:0 4px 20px rgba(0,0,0,.6);}
+.badge{display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:20px;background:rgba(11,14,24,.5);border:1px solid rgba(255,255,255,.18);color:#eef1f7;font-size:12px;font-weight:700;}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;}
+.vcard{position:relative;border-radius:14px;overflow:hidden;background:var(--panel);border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);box-shadow:0 8px 22px rgba(40,30,10,.1);}
+.vcard.sel{outline:2px solid var(--gold);outline-offset:-2px;box-shadow:0 0 0 3px color-mix(in srgb, var(--gold) 22%, transparent),inset 0 0 24px color-mix(in srgb, var(--gold) 14%, transparent);}
+.vcard .thumb{position:relative;height:118px;background:linear-gradient(120deg,#37507a,#6b5a86);background-size:cover;background-position:center;}
+.vcard .thumb::after{content:"";position:absolute;inset:0;background:linear-gradient(0deg,rgba(20,16,10,.55),transparent 60%);}
+.vcard .thumb .vid{position:absolute;left:12px;bottom:9px;font-family:'Cinzel',serif;font-weight:700;font-size:22px;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,.6);}
+.vcard .thumb .st{position:absolute;top:9px;right:9px;display:flex;align-items:center;gap:5px;padding:4px 9px;border-radius:14px;background:rgba(11,14,24,.6);color:#eef1f7;font-size:10.5px;font-weight:700;}
+/* "Enhancements" pill: the same shape as the install-state pill, mirrored to the top-left, gold tint */
+.vcard .thumb .st.ee{right:auto;left:9px;background:rgba(181,123,42,.78);color:#fff7e6;letter-spacing:.3px;}
+.vcard .body{padding:12px 14px 14px;}
+.vcard .body b{font-weight:800;font-size:13.5px;color:var(--ink);}
+.vcard .body small{color:var(--muted);font-size:11.5px;font-weight:700;display:block;margin-top:2px;}
+.vcard .body small.sz{color:var(--ink2);font-weight:800;}
+.vcard .cta{margin-top:12px;text-align:center;padding:8px;border-radius:9px;font-size:12px;font-weight:800;}
+.cta.install{background:linear-gradient(180deg,var(--accHi),var(--gold));color:var(--btnInk);border:1px solid var(--goldD);}
+.cta.sel{background:color-mix(in srgb, var(--gold) 16%, transparent);color:var(--goldD);border:1px solid color-mix(in srgb, var(--gold) 40%, transparent);}
+.cta.pick{background:rgba(60,65,82,.05);color:var(--ink2);border:1px solid color-mix(in srgb, var(--goldD) 25%, transparent);}
+.vcard .body .accline{color:var(--goldD);font-weight:800;margin-top:6px;display:flex;align-items:center;gap:5px;}
+.vcard .body .accline b{font-size:12px;color:var(--ink);}
+.addcard{min-height:236px;border-radius:14px;border:2px dashed color-mix(in srgb, var(--goldD) 42%, transparent);background:rgba(255,255,255,.28);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--muted);font-weight:800;font-size:13.5px;}
+
+/* wizard */
+.stepper{display:flex;align-items:center;margin-bottom:24px;}
+.stepper .step{display:flex;align-items:center;flex:1;}
+.stepper .num{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;}
+.num.done{background:linear-gradient(180deg,var(--accHi),var(--gold));color:var(--btnInk);border:1px solid var(--goldD);}
+.num.active{background:#fff;color:var(--goldD);border:2px solid var(--gold);box-shadow:0 0 0 3px color-mix(in srgb, var(--gold) 20%, transparent);}
+.num.todo{background:rgba(60,65,82,.07);color:#9098aa;border:1px solid color-mix(in srgb, var(--goldD) 25%, transparent);}
+.stepper .lbl{font-size:12.5px;font-weight:800;color:var(--ink2);margin-left:9px;}
+.stepper .bar{flex:1;height:2px;margin:0 12px;background:color-mix(in srgb, var(--goldD) 28%, transparent);border-radius:2px;}
+.panel{position:relative;background:linear-gradient(180deg,var(--panel),var(--cream));border:1px solid color-mix(in srgb, var(--goldD) 34%, transparent);border-radius:16px;padding:26px 28px;box-shadow:0 12px 30px rgba(40,30,10,.1);min-height:298px;}
+.panel h3{font-family:'Cinzel',serif;font-weight:700;font-size:17px;color:var(--ink);margin:0 0 4px;}
+.panel .hint{color:var(--inkSoft);font-size:12.5px;font-weight:600;margin:0 0 18px;}
+.opt{position:relative;border-radius:12px;padding:18px 16px;background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 28%, transparent);cursor:pointer;}
+.opt.sel{border:2px solid var(--gold);box-shadow:inset 0 0 20px color-mix(in srgb, var(--gold) 14%, transparent);}
+.opt .h{display:flex;align-items:center;gap:10px;font-weight:800;font-size:13.5px;color:var(--ink);}
+.opt p{color:var(--muted);font-size:11.5px;font-weight:600;margin:8px 0 0;}
+.opt.center{text-align:center;}
+.opt .vbig{font-family:'Cinzel',serif;font-weight:800;font-size:28px;color:var(--ink);}
+label.fld{display:block;color:var(--inkLbl);font-size:11.5px;font-weight:800;letter-spacing:.5px;margin:14px 0 7px;}
+input.txt{width:100%;padding:12px 14px;border-radius:10px;border:1px solid color-mix(in srgb, var(--goldD) 40%, transparent);background:#fff;color:var(--ink);font-size:14px;font-weight:700;}
+input.txt.mono{font-family:'JetBrains Mono',monospace;font-weight:500;font-size:13.5px;}
+.row{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 28%, transparent);border-radius:11px;}
+.row b{font-weight:800;font-size:13px;color:var(--ink);}
+.row small{color:var(--muted);font-size:11.5px;font-weight:600;display:block;margin-top:2px;}
+/* flex:none — the switch is always a flex item next to a text of variable length, and with the
+   default flex-shrink (1) a row with a long description squashes it under its 48px: the track
+   narrows, the 21px knob sticks out, and every row looks different. The width is fixed by
+   definition, so it has nothing to negotiate with the text. */
+.toggle{position:relative;flex:none;width:48px;height:27px;border-radius:20px;border:0;padding:0;background:rgba(60,65,82,.18);}
+.toggle .knob{position:absolute;top:2px;left:2px;width:21px;height:21px;border-radius:50%;background:#fff;box-shadow:0 2px 5px rgba(0,0,0,.25);transition:left .15s;}
+.toggle.on{background:linear-gradient(180deg,var(--gold2),var(--gold));}
+.toggle.on .knob{left:23px;}
+.wizfoot{display:flex;align-items:center;justify-content:space-between;margin-top:20px;}
+.summary{background:color-mix(in srgb, var(--gold) 10%, transparent);border:1px solid color-mix(in srgb, var(--gold) 30%, transparent);border-radius:11px;padding:14px 16px;}
+.summary .k{color:var(--inkLbl);font-size:11px;font-weight:800;letter-spacing:.5px;margin-bottom:8px;}
+.summary .g{display:grid;grid-template-columns:1fr 1fr;gap:7px 18px;font-size:12px;font-weight:700;color:var(--ink2);}
+.summary .g b{color:var(--ink);}
+
+/* overlay */
+.overlay{position:absolute;inset:0;z-index:20;background:rgba(20,16,10,.5);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:34px;}
+.overlay .box{width:460px;background:linear-gradient(180deg,var(--panel),var(--cream));border:1px solid color-mix(in srgb, var(--goldD) 40%, transparent);border-radius:16px;padding:28px;box-shadow:0 30px 70px rgba(0,0,0,.5);}
+/* A chooser dialog (Prepare the server): three option cards stacked above the body, a toggle row and
+   long texts — the 460px box would wrap them into a column of prose. 640px = the overlay's height
+   minus its padding, so a tall dialog scrolls inside the box instead of clipping its buttons. */
+.overlay .box.wide{width:600px;max-height:640px;overflow-y:auto;}
+.copts{display:grid;gap:8px;margin:14px 0 4px;text-align:left;}
+.copts .opt{padding:11px 14px;}
+.copts .opt p{margin-top:4px;}
+/* A switch that asserts nothing (an older agent, an absent stack) is drawn faded, like .btn:disabled. */
+.toggle:disabled{opacity:.45;cursor:default;}
+/* The width has NO transition here nor on the wave bar: the rAF loop in app.js (progTick) moves it
+   frame by frame. A transition on top would smooth the same motion twice and the bar would visibly
+   lag behind the percentage written next to it. */
+.pbar{height:12px;border-radius:8px;background:rgba(60,65,82,.12);overflow:hidden;border:1px solid color-mix(in srgb, var(--goldD) 25%, transparent);}
+.pbar > i{position:relative;display:block;height:100%;overflow:hidden;background:linear-gradient(90deg,var(--goldD),var(--gold2));border-radius:8px;}
+.pbar > i > .sheen{position:absolute;top:0;bottom:0;left:0;width:34%;animation:rl-sheen 5.4s ease-in-out infinite;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.5),transparent);}
+
+/* "lifebuoy" spinner + "sea waves" bar (summer theme only — JS picks the markup by theme).
+   The animation phases (animation-delay) come INLINE from app.js: every render() rebuilds the
+   nodes, and a CSS animation on a new element starts from zero — the buoy would restart at every
+   percent. See phaseOf() in app.js: a negative delay = continue from the current phase. */
+.lifebuoy{
+  display:block;width:36px;height:36px;flex:0 0 auto;border-radius:50%;
+  background:conic-gradient(#ff6f5e 0 45deg,#fff6ec 45deg 90deg,#ff6f5e 90deg 135deg,#fff6ec 135deg 180deg,#ff6f5e 180deg 225deg,#fff6ec 225deg 270deg,#ff6f5e 270deg 315deg,#fff6ec 315deg 360deg);
+  -webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 12px),#000 calc(100% - 11px));
+  mask:radial-gradient(farthest-side,transparent calc(100% - 12px),#000 calc(100% - 11px));
+  animation:rl-spin 2.2s linear infinite;
+  filter:drop-shadow(0 3px 6px rgba(6,60,80,.35));
+}
+.wavewrap{position:relative;margin-top:14px;}
+.wavewrap .buoy{
+  position:absolute;top:-11px;z-index:2;display:block;width:21px;height:21px;border-radius:50%;
+  background:conic-gradient(#ff6f5e 0 45deg,#fff6ec 45deg 90deg,#ff6f5e 90deg 135deg,#fff6ec 135deg 180deg,#ff6f5e 180deg 225deg,#fff6ec 225deg 270deg,#ff6f5e 270deg 315deg,#fff6ec 315deg 360deg);
+  -webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 7px),#000 calc(100% - 6px));
+  mask:radial-gradient(farthest-side,transparent calc(100% - 7px),#000 calc(100% - 6px));
+  animation:rl-bob 1.3s ease-in-out infinite;
+  filter:drop-shadow(0 2px 4px rgba(6,60,80,.4));
+}
+.wavebar{height:22px;border-radius:11px;background:linear-gradient(180deg,#eaf7fb,#d3ecf3);overflow:hidden;
+  border:1px solid rgba(34,167,204,.42);position:relative;box-shadow:inset 0 1px 3px rgba(6,60,80,.13);}
+.wavebar .fill{position:absolute;top:0;bottom:0;left:0;overflow:hidden;border-radius:0 8px 8px 0;}
+/* The layers overshoot the box vertically (top:-3px, 26px tall over a 20px fill) precisely so the
+   swell never exposes the bottom of the bar: the SVGs carry material under the crest down to y=26. */
+.wavebar .fill i{position:absolute;left:0;right:0;top:-3px;height:26px;background-repeat:repeat-x;}
+/* Three layers = parallax: at the back the short wave (24px), pale and slow (5.6s); in front the long
+   wave (96px), dark and fast (2.1s). Neither the travel beats (2.1/3.4/5.6s) nor the swell beats
+   (4.3/5.1/6.9s) are multiples of each other — so the combined pattern never visibly repeats. */
+.wavebar .fill i.back{opacity:.6;animation:rl-wave 5.6s linear infinite reverse,rl-swell 6.9s ease-in-out infinite;
+  background-image:url(data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%2796%27%20height=%2726%27%3E%3Cpath%20d=%27M0%208%20Q6%205%2012%208%20T24%208%20T36%208%20T48%208%20T60%208%20T72%208%20T84%208%20T96%208%20V26%20H0%20Z%27%20fill=%27%23a9e4f2%27/%3E%3C/svg%3E);}
+.wavebar .fill i.mid{opacity:.85;animation:rl-wave 3.4s linear infinite,rl-swell 5.1s ease-in-out infinite;
+  background-image:url(data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%2796%27%20height=%2726%27%3E%3Cpath%20d=%27M0%209%20Q8%205%2016%209%20T32%209%20T48%209%20T64%209%20T80%209%20T96%209%20V26%20H0%20Z%27%20fill=%27%235cc8e6%27/%3E%3C/svg%3E);}
+.wavebar .fill i.front{animation:rl-wave 2.1s linear infinite,rl-swell 4.3s ease-in-out infinite;
+  background-image:url(data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%2796%27%20height=%2726%27%3E%3Cpath%20d=%27M0%2010%20Q24%205%2048%2010%20T96%2010%20V26%20H0%20Z%27%20fill=%27%231e93bd%27/%3E%3Cpath%20d=%27M0%2010%20Q24%205%2048%2010%20T96%2010%27%20fill=%27none%27%20stroke=%27%23cdf3ff%27%20stroke-width=%271.2%27%20opacity=%27.75%27/%3E%3C/svg%3E);}
+/* the sun glint that crosses the water now and then */
+.wavebar .fill i.sheen{top:0;height:100%;right:auto;width:26%;filter:blur(1px);animation:rl-sheen 6.2s ease-in-out infinite;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.55),transparent);}
+/* the foam at the front edge + the water depth, drawn OVER the layers (::after is the last child) */
+.wavebar .fill::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(90deg,transparent calc(100% - 14px),rgba(255,255,255,.5)),linear-gradient(180deg,transparent 45%,rgba(4,52,80,.2));}
+
+/* commands */
+/* minmax(0,1fr): a plain 1fr track never shrinks below its card's min-content width (the field's
+   intrinsic width), and three such cards are wider than the page. */
+.cmdgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;}
+.cmdcard{background:linear-gradient(180deg,var(--panel),var(--cream));border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);border-radius:14px;padding:16px;box-shadow:0 8px 20px rgba(40,30,10,.08);}
+.cmdcard .top{display:flex;align-items:center;gap:11px;margin-bottom:12px;}
+.cmdcard .ic{width:40px;height:40px;border-radius:11px;display:flex;align-items:center;justify-content:center;}
+.cmdic{width:28px;height:28px;object-fit:contain;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.25));}
+.cmdcard b{font-weight:800;font-size:14px;color:var(--ink);}
+.cmdcard small{color:var(--muted);font-size:11px;font-weight:700;}
+.cmdcard .in{display:flex;gap:8px;}
+.cmdcard input{flex:1;min-width:0;padding:10px 12px;border-radius:9px;border:1px solid color-mix(in srgb, var(--goldD) 35%, transparent);background:#fff;color:var(--ink);font-size:13px;font-weight:700;}
+.cmdcard .send{padding:10px 14px;border-radius:9px;border:1px solid var(--goldD);background:linear-gradient(180deg,var(--accHi),var(--gold));color:var(--btnInk);font-weight:800;font-size:12.5px;white-space:nowrap;}
+/* The cards of a .cmdgrid only (the Server page draws .cmdcard too, inside .grid2): a column with the
+   field row at its bottom edge, so the fields of one row line up whatever the subtitles' heights, and
+   14px at the sides, which keeps the longest subtitle on one line. */
+.cmdgrid>.cmdcard{display:flex;flex-direction:column;padding:16px 14px;}
+.cmdgrid>.cmdcard .in{margin-top:auto;}
+.console{margin-top:18px;background:var(--dark);border:1px solid color-mix(in srgb, var(--gold) 22%, transparent);border-radius:14px;overflow:hidden;}
+.console .bar{display:flex;align-items:center;gap:9px;padding:11px 16px;border-bottom:1px solid color-mix(in srgb, var(--gold) 14%, transparent);}
+.console .bar .lights{display:flex;gap:5px;}
+.console .bar .lights i{width:9px;height:9px;border-radius:50%;display:block;}
+.console .bar span{color:#8aa0c8;font-size:11.5px;font-weight:700;font-family:'JetBrains Mono',monospace;}
+.console .log{max-height:160px;overflow-y:auto;padding:14px 16px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.85;color:var(--logInk);}
+.console .log div{white-space:pre-wrap;word-break:break-word;}
+/* Install logs only (the command/server consoles colour every line themselves and stay as they are):
+   themed header, the last line = the step in progress (brightest), a terminal prefix (blank lines stay
+   collapsed) and a minimum height so an empty log is not a dead strip. */
+.console:has(#deploylog) .bar span{color:var(--logMut);}
+#deploylog div:last-child, #acctlog div:last-child{color:var(--logHi);font-weight:500;}
+#deploylog, #acctlog{min-height:96px;}
+#deploylog div::before, #acctlog div::before{content:"› ";color:color-mix(in srgb, var(--gold2) 60%, transparent);}
+#deploylog div:empty::before, #acctlog div:empty::before{content:none;}
+
+/* commands — character stage, slots, pickers */
+.gmhero{position:relative;height:240px;border-radius:16px;overflow:hidden;border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);
+  background:linear-gradient(120deg,#2b3350,#59496f 60%,#8a6f4e);box-shadow:0 10px 26px rgba(40,30,10,.14);}
+/* Gacha splash art is wide with the subject centred, so a cover crop would show a waist-level slice:
+   blur a copy to fill the band, then lay the sharp art on top with object-fit:contain. */
+.gmhero .bg{position:absolute;inset:-24px;background-size:cover;background-position:50% 20%;filter:blur(26px) saturate(1.15);transform:scale(1.12);}
+.gmhero .glow{position:absolute;inset:0;}
+.gmhero::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(90deg,rgba(20,16,10,.86),rgba(20,16,10,.42) 52%,transparent 78%),linear-gradient(0deg,rgba(20,16,10,.55),transparent 60%);}
+.gmhero .art{position:absolute;right:0;bottom:0;z-index:1;height:100%;width:42%;object-fit:contain;object-position:bottom right;
+  -webkit-mask-image:linear-gradient(90deg,transparent,#000 22%);mask-image:linear-gradient(90deg,transparent,#000 22%);}
+.gmhero .ph{display:none;position:absolute;right:7%;top:50%;transform:translateY(-50%);z-index:1;width:148px;height:148px;border-radius:50%;
+  align-items:center;justify-content:center;font-family:'Cinzel',serif;font-weight:800;font-size:60px;color:rgba(255,255,255,.92);
+  border:1px solid rgba(255,255,255,.22);text-shadow:0 3px 14px rgba(0,0,0,.45);}
+.gmhero.noart .art{display:none;}
+.gmhero.noart .ph{display:flex;}
+.gmhero .txt{position:relative;z-index:2;height:100%;display:flex;flex-direction:column;justify-content:flex-end;padding:26px 30px;gap:10px;}
+.gmhero .kicker{color:var(--gold2);font-size:11px;font-weight:800;letter-spacing:3px;}
+.gmhero h2{font-family:'Cinzel',serif;font-weight:800;font-size:32px;color:#fff;line-height:1;margin:0;text-shadow:0 4px 20px rgba(0,0,0,.6);}
+.gmhero p{margin:0;color:#dfe3ec;font-size:12.5px;font-weight:600;}
+
+.gmslot{display:flex;flex-direction:column;background:linear-gradient(180deg,var(--panel),var(--cream));border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);
+  border-radius:14px;padding:16px 18px;box-shadow:0 8px 20px rgba(40,30,10,.08);}
+.gmslot .top{display:flex;align-items:center;gap:11px;margin-bottom:12px;}
+.gmslot .ic{width:40px;height:40px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex:0 0 auto;}
+.gmslot b{font-weight:800;font-size:14px;color:var(--ink);}
+.gmslot small{color:var(--muted);font-size:11px;font-weight:700;}
+.gmslot .name{font-family:'Cinzel',serif;font-weight:700;font-size:16px;color:var(--ink);line-height:1.25;}
+.gmslot .name.empty{color:#9a917a;font-style:italic;}
+.gmslot .idm{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted);font-weight:600;margin-top:5px;line-height:1.75;word-break:break-word;}
+.gmslot .params{display:flex;gap:10px;margin-top:10px;}
+.gmslot .params label.fld{margin:0 0 5px;}
+.gmslot input.num{width:96px;padding:9px 11px;border-radius:9px;border:1px solid color-mix(in srgb, var(--goldD) 40%, transparent);background:#fff;color:var(--ink);font-size:13px;font-weight:700;}
+.gmslot .fill{flex:1;min-height:12px;}
+.gmslot .foot{display:flex;gap:10px;}
+.gmslot .foot .btn{flex:1;padding:11px 12px;font-size:12.5px;}
+.note{padding:9px 12px;border-radius:9px;background:#fbeede;border:1px solid #d9a35a;color:#9a6a2a;font-size:11.5px;font-weight:700;line-height:1.5;}
+.gmslot .note{margin-top:12px;}
+.stars{color:var(--gold);letter-spacing:1px;font-size:10px;}
+.sect .hint{color:var(--inkSoft);font-size:12.5px;font-weight:600;margin:-6px 0 14px;}
+.vchip{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:20px;background:color-mix(in srgb, var(--gold) 16%, transparent);
+  border:1px solid color-mix(in srgb, var(--gold) 40%, transparent);color:var(--goldD);font-size:11px;font-weight:800;}
+
+.pickbox{width:860px;height:620px;display:flex;flex-direction:column;overflow:hidden;
+  background:linear-gradient(180deg,var(--panel),var(--cream));border:1px solid color-mix(in srgb, var(--goldD) 40%, transparent);border-radius:16px;box-shadow:0 30px 70px rgba(0,0,0,.5);}
+.pickhead{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:17px 22px 14px;border-bottom:1px solid color-mix(in srgb, var(--goldD) 22%, transparent);}
+.pickhead .pclose{width:34px;height:30px;border:0;background:transparent;border-radius:8px;color:var(--ink2);display:flex;align-items:center;justify-content:center;flex:0 0 auto;}
+.pickhead .pclose:hover{background:rgba(60,65,82,.09);color:var(--ink);}
+.pickbar{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:12px 22px;border-bottom:1px solid color-mix(in srgb, var(--goldD) 16%, transparent);}
+.pickbar input.txt{flex:1;min-width:240px;padding:10px 13px;font-size:13px;}
+.chips{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;}
+.elchip{height:28px;padding:0 11px;border-radius:16px;background:rgba(255,255,255,.6);border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);color:var(--ink2);font-size:11.5px;font-weight:800;}
+.elchip:hover{border-color:var(--gold);}
+/* The chip that is on: the accent, unless the chip brings a colour of its own (an element) inline. */
+.elchip.on{color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.25);background:var(--goldD);border-color:var(--goldD);}
+/* The room above the list is a block of the list, not padding of the box: a sticky group heading stops
+   below the box's padding, and the rows scrolling by would show in that strip above it. */
+.pickbody{flex:1;overflow-y:auto;padding:0 22px 22px;}
+.pickbody::before{content:"";display:block;height:16px;}
+.pickfoot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 22px;border-top:1px solid color-mix(in srgb, var(--goldD) 22%, transparent);}
+.pickfoot .hint{margin:0;color:var(--muted);font-size:11.5px;font-weight:700;}
+.pickempty{padding:56px 0;text-align:center;color:var(--muted);font-size:13px;font-weight:700;}
+.hide{display:none!important;}
+
+.ptilegrid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;}
+/* ~40 of the 50 tiles are off-screen: content-visibility skips their layout/paint so the innerHTML
+   rewrite a chip click causes stays cheap, and loading="lazy" only works on a real <img>. */
+.ptile{position:relative;aspect-ratio:155/210;border-radius:12px;overflow:hidden;padding:0;border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);
+  background:linear-gradient(180deg,#e8dcc4,#dccfb2);content-visibility:auto;contain-intrinsic-size:155px 210px;}
+.ptile img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 14%;}
+.ptile .ph{display:none;position:absolute;inset:0;align-items:center;justify-content:center;font-family:'Cinzel',serif;font-weight:800;
+  font-size:44px;color:rgba(255,255,255,.94);text-shadow:0 2px 10px rgba(0,0,0,.35);}
+.ptile.noart img{display:none;}
+.ptile.noart .ph{display:flex;}
+.ptile .el{position:absolute;top:0;left:0;right:0;height:3px;}
+.ptile .nm{position:absolute;left:0;right:0;bottom:0;padding:18px 8px 7px;text-align:left;line-height:1.25;
+  background:linear-gradient(0deg,rgba(20,16,10,.88),transparent);color:#fff;font-size:12px;font-weight:800;text-shadow:0 2px 8px rgba(0,0,0,.7);}
+.ptile .new{position:absolute;top:7px;right:7px;padding:2px 6px;border-radius:8px;background:linear-gradient(180deg,var(--accHi),var(--gold));
+  color:var(--btnInk);font-size:9px;font-weight:800;letter-spacing:.5px;}
+.ptile.r5{border-color:color-mix(in srgb, var(--gold) 65%, transparent);}
+.ptile.r4{border-color:rgba(180,142,224,.6);}
+.ptile:hover{border-color:var(--gold);}
+.ptile.sel{outline:2px solid var(--gold);outline-offset:-2px;box-shadow:0 0 0 3px color-mix(in srgb, var(--gold) 22%, transparent),inset 0 0 24px color-mix(in srgb, var(--gold) 14%, transparent);}
+
+.wgroup{margin-bottom:16px;}
+.wgroup h5{position:sticky;top:0;z-index:1;margin:0 0 9px;padding:6px 0 8px;font-family:'Cinzel',serif;font-weight:700;font-size:13px;
+  letter-spacing:1px;color:var(--goldD);background:linear-gradient(180deg,var(--panel) 70%,transparent);}
+.wgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.wrow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 13px;border-radius:10px;background:#fff;
+  border:1px solid color-mix(in srgb, var(--goldD) 28%, transparent);text-align:left;}
+.wrow:hover{border-color:var(--gold);}
+.wrow b{flex:1;font-weight:800;font-size:13px;color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.wrow .meta{display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex:0 0 auto;}
+.wrow .meta .wid{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--muted);font-weight:600;}
+.wrow.sel{border:2px solid var(--gold);box-shadow:inset 0 0 20px color-mix(in srgb, var(--gold) 14%, transparent);}
+
+.asetgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.aset{padding:14px;border-radius:12px;background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 28%, transparent);text-align:left;}
+.aset:hover{border-color:var(--gold);}
+.aset .sn{font-weight:800;font-size:13.5px;color:var(--ink);}
+.aset .pcs{margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--muted);font-weight:600;line-height:1.85;}
+.aset.sel{border:2px solid var(--gold);box-shadow:inset 0 0 20px color-mix(in srgb, var(--gold) 14%, transparent);}
+
+/* item sprites (weapons / artifact pieces). The initial sits UNDER the <img>, so art that fails to
+   load simply reveals the placeholder — no onerror handler and no broken-image icon. */
+.spr{position:relative;flex:0 0 auto;width:34px;height:34px;border-radius:9px;overflow:hidden;
+  background:linear-gradient(180deg,color-mix(in srgb, var(--gold) 22%, transparent),color-mix(in srgb, var(--goldD) 10%, transparent));border:1px solid color-mix(in srgb, var(--goldD) 28%, transparent);}
+.spr i{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font-style:normal;font-weight:800;font-size:14px;color:var(--goldD);}
+.spr img{position:relative;width:100%;height:100%;object-fit:contain;display:block;}
+.spr.noart img{display:none;}
+.spr.big{width:54px;height:54px;border-radius:12px;}
+.spr.big i{font-size:21px;}
+.sprrow{display:flex;gap:6px;margin-top:9px;}
+.pickedrow{display:flex;align-items:center;gap:12px;min-width:0;}
+.pickedrow>div{min-width:0;}
+.wrow .spr{width:30px;height:30px;}
+.aset .spr{width:30px;height:30px;}
+
+/* ── in-game login details (end of install, library, game start) ──
+   The values carry .pick because body has user-select:none: without it the player could not even
+   select the account name to copy it by hand if the "Copy" button fails. */
+.credhead{color:var(--inkLbl);font-size:11.5px;font-weight:800;letter-spacing:.5px;margin:0 0 8px;}
+.creds{border-radius:12px;padding:6px 14px;text-align:left;
+  background:color-mix(in srgb, var(--gold) 12%, transparent);border:1px solid color-mix(in srgb, var(--gold) 38%, transparent);}
+.creds .crow{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;}
+.creds .crow + .crow{border-top:1px solid color-mix(in srgb, var(--goldD) 22%, transparent);}
+.creds small{display:block;color:var(--inkLbl);font-size:10.5px;font-weight:800;letter-spacing:.6px;}
+.creds b{display:block;margin-top:4px;font-size:15px;font-weight:800;color:var(--ink);line-height:1.35;}
+.creds .pw{font-size:12px;font-weight:700;color:var(--inkSoft);}
+.pick{-webkit-user-select:text;user-select:text;cursor:text;}
+.crcopy{flex:0 0 auto;padding:8px 13px;border-radius:9px;border:1px solid color-mix(in srgb, var(--goldD) 40%, transparent);
+  background:rgba(255,255,255,.65);color:var(--ink2);font-size:11.5px;font-weight:800;}
+.crcopy:hover{border-color:var(--gold);color:var(--ink);}
+.credline{margin:0 0 14px;padding:9px 12px;border-radius:10px;text-align:left;line-height:1.55;
+  background:color-mix(in srgb, var(--gold) 12%, transparent);border:1px solid color-mix(in srgb, var(--gold) 34%, transparent);
+  color:var(--ink2);font-size:12px;font-weight:700;}
+.credline b{color:var(--ink);font-size:13px;}
+
+/* server */
+.banner{margin-top:16px;display:flex;gap:13px;padding:16px 18px;border-radius:13px;background:linear-gradient(180deg,#fbeede,#f6e3c8);border:1px solid #d9a35a;}
+.banner b{font-weight:800;font-size:13.5px;color:#8a5a1a;}
+.banner p{margin:5px 0 0;color:#9a6a2a;font-size:12.5px;font-weight:600;line-height:1.55;}
+/* the icon is a flex item beside a paragraph that wants the whole row: without this it shrinks to a sliver */
+.banner>svg{flex:none;}
+.agentbar{margin-top:16px;display:flex;align-items:center;gap:11px;padding:14px 18px;border-radius:13px;background:var(--dark);border:1px solid color-mix(in srgb, var(--gold) 20%, transparent);}
+.agentbar span{color:#c9cfdd;font-size:12.5px;font-weight:700;}
+.agentbar small{color:#7a8299;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace;}
+/* "Agent settings" card (app.js agentCfgCard): the section headings inside the card, the "after
+   restart" pill, the right-hand control of a setting row (a fixed-width field + its unit), a field the
+   agent does not let us edit, and the folder dialog's unavailable option card. select.txt takes
+   input.txt's look (the enum settings and the only other select, Settings' language). */
+select.txt{width:100%;padding:12px 14px;border-radius:10px;border:1px solid color-mix(in srgb, var(--goldD) 40%, transparent);background:#fff;color:var(--ink);font-size:14px;font-weight:700;}
+.acfg .acfg-group{font-family:'Cinzel',serif;font-weight:700;font-size:13px;letter-spacing:1px;color:var(--goldD);margin:18px 0 6px;padding-top:14px;border-top:1px solid color-mix(in srgb, var(--goldD) 18%, transparent);}
+.acfg-badge{display:inline-block;margin-left:8px;padding:2px 8px;border-radius:10px;vertical-align:1px;font-size:9.5px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;
+  background:color-mix(in srgb, var(--gold) 16%, transparent);border:1px solid color-mix(in srgb, var(--gold) 40%, transparent);color:var(--goldD);}
+.acfg-ctl{flex:none;display:flex;align-items:center;gap:7px;}
+.acfg .txt.acfg-in{width:280px;padding:9px 11px;font-size:12.5px;}
+.acfg .txt.acfg-in.acfg-num{width:130px;}
+.acfg-unit{min-width:26px;color:var(--muted);font-size:11.5px;font-weight:800;}
+.acfg .txt:disabled{opacity:.6;cursor:not-allowed;background:rgba(255,255,255,.55);}
+.opt.dis{opacity:.5;cursor:default;}
+
+/* ── gameplay settings (app.js tweaks: the Gameplay page) ──
+   .twpage is the page's root. .twbar = the action bar: a band as wide as .main (it bleeds through
+   .pad's side padding) that sticks to the top of the scrolling page, so Apply is in reach from every
+   card; it has the page's own ground, slightly see-through over what scrolls under it, and its text
+   wraps inside its own half while the buttons keep their line. z-index 6: over the cards, under a help
+   bubble (15) and the overlays (20). What the page scrolls into view by itself — a field given the
+   caret — stops under the bar, not behind it (scroll-padding-top on .main while the bar is there).
+   .twchips = the version chips in the header; .twdot = "edits not applied" on a chip (any chip may
+   carry one). .twnotes = the state notes under the bar (.twnote = a note with a button at its right) —
+   the box is always there, so that the page can refill it in place, and takes no room while it is
+   empty; .twlog = the job console under them.
+   .twcard = a card (.sect) with .twhead = its title and .twmark, the pill that says the section holds
+   settings (.new = not applied yet); the last setting row of a card has no rule under it, and .twfoot
+   is the small line a card may end with. .twctl = the right half of a setting row: preset chips, then
+   the number field. input.twnum = a number field of the document: .chg = it holds a setting (differs
+   from the original), .bad = a number Apply refuses. Chips are .elchip: the chip that is on needs
+   nothing but its class, which a keystroke switches in place.
+   Grids on this page use minmax(0,1fr) tracks: a field inside a plain 1fr track keeps it from shrinking. */
+.twbar{position:sticky;top:0;z-index:6;display:flex;align-items:center;gap:16px;
+  margin:0 -34px 14px;padding:10px 34px;background:color-mix(in srgb, var(--cream) 90%, transparent);backdrop-filter:blur(8px);
+  border-top:1px solid color-mix(in srgb, var(--goldD) 16%, transparent);border-bottom:1px solid color-mix(in srgb, var(--goldD) 26%, transparent);}
+.main:has(.twbar){scroll-padding-top:74px;}
+.twbar-info{flex:1;display:flex;align-items:center;gap:10px;min-width:0;}
+.twbar-info .vchip{flex:none;}
+.twbar-text{min-width:0;color:var(--inkSoft);font-size:12.5px;font-weight:700;line-height:1.35;}
+.twbar-text.chg{color:var(--ink);font-weight:800;}
+.twbar-acts{flex:none;display:flex;align-items:center;gap:8px;}
+.twbar .btn{padding:9px 16px;font-size:12.5px;white-space:nowrap;}
+.twchips{display:flex;align-items:center;flex-wrap:wrap;gap:8px;}
+.twdot{display:inline-block;width:7px;height:7px;margin-left:7px;border-radius:50%;background:var(--warn);vertical-align:1px;}
+.twnotes{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;}
+.twnotes:empty{display:none;}
+.twnotes>.note{margin:0!important;}
+.twnotes .hint{color:var(--inkSoft);font-size:12.5px;font-weight:600;}
+.twnote{display:flex;align-items:center;justify-content:space-between;gap:12px;}
+.twnote>span{min-width:0;overflow-wrap:anywhere;}
+.twnote .btn{flex:none;padding:7px 12px;font-size:11.5px;}
+.twlog{margin-bottom:16px;}
+.twlog .console{margin-top:0;}
+.twhead{display:flex;align-items:center;gap:10px;margin-bottom:12px;}
+.twcard .twhead h4{margin:0;}
+.twmark{display:inline-block;padding:2px 8px;border-radius:10px;font-size:9.5px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;
+  background:color-mix(in srgb, var(--gold) 16%, transparent);border:1px solid color-mix(in srgb, var(--gold) 40%, transparent);color:var(--goldD);}
+.twmark.new{background:#fbeede;border-color:#d9a35a;color:#9a6a2a;}
+.twcard .hint{margin:0 0 6px;}
+.twctl{flex:none;display:flex;align-items:center;gap:10px;}
+input.txt.twnum{width:92px;padding:9px 11px;font-size:13px;text-align:center;}
+input.txt.twnum.chg{border-color:var(--gold);background:color-mix(in srgb, var(--gold) 10%, #fff);}
+input.txt.twnum.bad{border-color:var(--bad);background:color-mix(in srgb, var(--bad) 9%, #fff);}
+.twcard .line:last-of-type{border-bottom:0;}
+.twfoot{margin:2px 0 0;color:var(--muted);font-size:11.5px;font-weight:700;}
+.twfoot:empty{display:none;}
+/* The Spiral Abyss card (app.js tweaksAbyssCard). .twab-nav = what is on screen: the rotation (a
+   select, .twab-tip = the line beside it), then on one row the floor chips and the chamber chips;
+   .twab-sep parts the floors every rotation has from the rotation's own. A chip's .twdot says the
+   floor / chamber holds changes (.set = all of them are applied). .twab-panel = the chamber: .twab-top
+   = its name, its enemy level and Reset; .twab-halves = one column per half (.one = a floor fought with
+   one team), each a list of waves (.twab-wave: .twab-wh = "Wave 1" and .twab-all, Replace all;
+   .twab-mons = the wrap of enemy tiles). .twmon = one spawn slot: the sprite, .was = the original
+   enemy's sprite, small on its corner, when the slot holds another; .x = "×N" (the slot spawns N
+   times), .nm = the name on four lines at most (the longest names of the game take four); .chg = it
+   holds another enemy than the original, .new = not applied yet (the corner dot), .ro = a slot the
+   page cannot change. .twab-foot = a card's last line: what the section changes, counted, and the
+   button that resets all of it (the Domain and the Quest card end with it too). */
+.twab-nav{display:flex;flex-direction:column;gap:10px;margin:10px 0 14px;}
+.twab-row{display:flex;align-items:center;gap:10px;min-width:0;}
+.twab-lbl{flex:none;min-width:62px;color:var(--inkLbl);font-size:11.5px;font-weight:800;letter-spacing:.5px;}
+.twab-chips{display:flex;align-items:center;flex-wrap:wrap;gap:6px;}
+.twab-chips + .twab-lbl{min-width:0;margin-left:auto;}
+.twab-row .twab-chips:last-child{flex:none;flex-wrap:nowrap;}
+.twab-chips .elchip{display:inline-flex;align-items:center;justify-content:center;min-width:34px;padding:0 9px;}
+.twab-chips .twdot{margin-left:5px;}
+.twab-sep{flex:none;width:1px;height:18px;margin:0 5px;background:color-mix(in srgb, var(--goldD) 35%, transparent);}
+.twdot.set{background:var(--gold);}
+.elchip.on .twdot.set{background:#fff;}
+.twpage select.txt{flex:none;width:auto;min-width:270px;padding:8px 11px;font-size:12.5px;}
+.twab-tip{min-width:0;color:var(--muted);font-size:11.5px;font-weight:600;line-height:1.45;}
+.twab-panel{padding:14px 16px 16px;border-radius:12px;background:rgba(255,255,255,.5);border:1px solid color-mix(in srgb, var(--goldD) 22%, transparent);}
+.twab-top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid color-mix(in srgb, var(--goldD) 18%, transparent);}
+.twab-name{min-width:0;}
+.twab-name b{display:block;font-weight:800;font-size:14px;color:var(--ink);}
+.twab-name small{display:block;margin-top:3px;color:var(--muted);font-size:11.5px;font-weight:600;line-height:1.45;}
+.twab-top .twab-lbl{min-width:0;}
+.twab-top .btn{padding:8px 12px;font-size:11.5px;white-space:nowrap;}
+.twab-halves{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 29px;}
+.twab-halves.one{grid-template-columns:minmax(0,1fr);}
+.twab-half{position:relative;min-width:0;}
+.twab-half + .twab-half::before{content:"";position:absolute;left:-15px;top:2px;bottom:2px;width:1px;background:color-mix(in srgb, var(--goldD) 18%, transparent);}
+.twab-half h5{margin:0 0 10px;font-family:'Cinzel',serif;font-weight:700;font-size:13px;letter-spacing:1px;color:var(--goldD);}
+.twab-half .note{margin-bottom:10px;}
+.twab-half .twnote{flex-direction:column;align-items:flex-start;gap:8px;}
+.twab-wave + .twab-wave{margin-top:12px;}
+.twab-wh{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:22px;margin-bottom:7px;}
+.twab-wh b{color:var(--inkLbl);font-size:11.5px;font-weight:800;letter-spacing:.5px;}
+.twab-all{padding:3px 9px;border-radius:12px;border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);background:rgba(255,255,255,.6);color:var(--ink2);font-size:10.5px;font-weight:800;}
+.twab-all:hover{border-color:var(--gold);color:var(--ink);}
+.twab-mons{display:grid;grid-template-columns:repeat(auto-fill,minmax(86px,1fr));gap:6px;}
+.twmon{position:relative;display:flex;flex-direction:column;align-items:center;gap:5px;min-width:0;padding:8px 4px 7px;border-radius:10px;
+  background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 26%, transparent);color:var(--ink2);text-align:center;}
+button.twmon:hover{border-color:var(--gold);}
+.twmon .spr{width:46px;height:46px;border-radius:11px;}
+.twmon .spr i{font-size:18px;}
+.twmon .spr.was{position:absolute;top:35px;left:calc(50% + 9px);width:22px;height:22px;border-radius:7px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.25);}
+.twmon .spr.was i{font-size:10px;}
+.twmon .nm{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden;width:100%;font-size:10.5px;font-weight:800;line-height:1.22;overflow-wrap:anywhere;}
+.twmon .x{position:absolute;top:5px;right:5px;padding:1px 5px;border-radius:8px;background:var(--dark);color:#fff;font-size:9.5px;font-weight:800;}
+.twmon.chg{border-color:var(--gold);background:color-mix(in srgb, var(--gold) 10%, #fff);}
+.twmon.new::after{content:"";position:absolute;top:6px;left:6px;width:7px;height:7px;border-radius:50%;background:var(--warn);}
+.twmon.ro{opacity:.7;}
+.twab-foot{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:33px;margin-top:14px;color:var(--muted);font-size:11.5px;font-weight:700;}
+.twab-foot .btn{flex:none;padding:8px 12px;font-size:11.5px;}
+/* The pickers of the Gameplay page (app.js TW_PICK) inside the modal picker: .pickttl = the title
+   over .pickwhere, the line that says what the pick is for; .pickonly = a switch with its label, on a
+   row of its own under the search field (a .note of the bar takes a row too); .twgrid = the weapon
+   list's two columns with tracks that can shrink (a long second line must not widen one); .twpick = a
+   row of the list in the weapon rows' frame — a larger sprite, the name over a second line (.tx),
+   .twtag = the small marks at its right. Most rows are off-screen: content-visibility keeps the redraw
+   a chip click causes cheap, and the intrinsic size is the row's CONTENT height (the sprite), so the
+   list's length is right before a row is drawn. */
+.pickttl{min-width:0;}
+.pickwhere{margin-top:5px;color:var(--muted);font-size:11.5px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pickonly{flex-basis:100%;display:flex;align-items:center;gap:10px;padding:0;border:0;background:none;color:var(--ink2);font-size:12px;font-weight:800;text-align:left;}
+.pickbar .note{flex-basis:100%;}
+.pickonly .toggle{display:block;width:40px;height:23px;}
+.pickonly .toggle .knob{width:19px;height:19px;}
+.pickonly .toggle.on .knob{left:19px;}
+.wgrid.twgrid{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
+.wrow.twpick{padding:8px 12px;content-visibility:auto;contain-intrinsic-size:auto 40px;}
+.wrow.twpick .spr{width:40px;height:40px;border-radius:10px;}
+.twpick .tx{flex:1;display:block;min-width:0;}
+.twpick .tx b{display:block;}
+.twpick .tx small{display:block;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:11px;font-weight:600;}
+.twpick .meta{gap:3px;}
+.twtag{padding:2px 7px;border-radius:9px;font-size:9.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap;
+  background:color-mix(in srgb, var(--gold) 16%, transparent);border:1px solid color-mix(in srgb, var(--gold) 40%, transparent);color:var(--goldD);}
+.twtag.warn{background:#fbeede;border-color:#d9a35a;color:#9a6a2a;}
+.twtag.kind{background:rgba(60,65,82,.07);border-color:rgba(60,65,82,.2);color:var(--ink2);}
+/* The Domain and the Quest card (app.js tweaksDomainsCard / tweaksQuestsCard). .twkind = a setting row
+   with its small line beside the name, not under it (the five quest kinds). .twsub = the heading of
+   a card's second part ("One domain", "One quest"), under the rule of the last setting row. .twfind =
+   that part's search field with the kind chips beside it (they wrap under it when the row is short).
+   .twlist = one page of the searched list in two columns; .twrow = a row: an optional sprite, the name
+   over a second line (.tx, one line each), .tags = its marks at the right; .on = its editor is open,
+   .off = a domain nobody can enter. .twmore = the line under a list longer than a page: the range on
+   screen and the two page buttons (.twpg). .twnone = a list that shows nothing.
+   .twed = the editor of the open row, across both columns under the row's line: .twed-head = its name,
+   its reset button and the × that closes it; .twed-say = one line about what is edited; .twed-row = a
+   setting (.twed-lbl = its name over a small line, the control at the right); .twed-add = "Add item"
+   with its counter. .twits = a list of items in two columns; .twit = an item: sprite, name over the id
+   line (.tx), the amount field and .twit-x that takes the item out (.n = the amount as text, in a list
+   that cannot be edited). .twgives = what a domain gives: small tiles with the average amount under
+   the sprite. The item picker: .pickgroups = the group chips on a row of their own, .twgh = a group's
+   heading with "Show all" at its right, .pickmore = the line that says how many rows are not drawn; a
+   note at the top of the list keeps a gap under it. */
+.twcard .line.twkind{padding:9px 0;}
+.twcard .line.twkind small{display:inline;margin:0 0 0 9px;}
+.twsub{margin:18px 0 8px;font-family:'Cinzel',serif;font-weight:700;font-size:13px;letter-spacing:1px;color:var(--goldD);}
+.twfind{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin:10px 0 10px;}
+.twfind input.txt{flex:1 1 200px;min-width:180px;width:auto;padding:8px 11px;font-size:12.5px;}
+.twfind .twab-chips{flex:none;max-width:100%;}
+.twlist{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px;}
+.twrow{display:flex;align-items:center;gap:10px;min-width:0;min-height:50px;padding:7px 11px;border-radius:10px;background:#fff;
+  border:1px solid color-mix(in srgb, var(--goldD) 26%, transparent);color:var(--ink2);text-align:left;}
+.twrow:hover{border-color:var(--gold);}
+.twrow.on{border-color:var(--gold);background:color-mix(in srgb, var(--gold) 10%, #fff);box-shadow:inset 0 0 0 1px var(--gold);}
+.twrow.off{opacity:.62;}
+.twrow .tx,.twit .tx{flex:1;display:block;min-width:0;}
+.twrow .tx b,.twit .tx b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:800;font-size:12.5px;color:var(--ink);}
+.twrow .tx small,.twit .tx small{display:block;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:11px;font-weight:600;}
+.twrow .tags{flex:none;display:flex;align-items:center;gap:4px;}
+.twrow .tags:empty{display:none;}
+.twrow .tags .twdot{margin-left:3px;}
+.twmore{display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-top:10px;color:var(--muted);font-size:11.5px;font-weight:700;}
+.twmore span{margin-right:4px;}
+.twpg{width:28px;height:28px;padding:0 0 2px;border-radius:14px;border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);background:rgba(255,255,255,.6);color:var(--ink2);font-size:16px;font-weight:800;line-height:1;}
+.twpg:hover:not(:disabled){border-color:var(--gold);color:var(--ink);}
+.twpg:disabled{opacity:.45;cursor:default;}
+.twnone{padding:22px 0;text-align:center;color:var(--muted);font-size:12.5px;font-weight:700;overflow-wrap:anywhere;}
+.twed{grid-column:1 / -1;display:flex;flex-direction:column;gap:12px;min-width:0;padding:14px 16px 16px;border-radius:12px;background:rgba(255,255,255,.5);border:1px solid var(--gold);}
+.twed-head{display:flex;align-items:center;gap:10px;padding-bottom:12px;border-bottom:1px solid color-mix(in srgb, var(--goldD) 18%, transparent);}
+.twed-name{flex:1;min-width:0;}
+.twed-name b{display:block;font-weight:800;font-size:14px;color:var(--ink);overflow-wrap:anywhere;}
+.twed-name small{display:block;margin-top:3px;color:var(--muted);font-size:11.5px;font-weight:600;line-height:1.45;overflow-wrap:anywhere;}
+.twed .btn{flex:none;padding:8px 12px;font-size:11.5px;white-space:nowrap;}
+.twed-x{flex:none;width:30px;height:30px;padding:0 0 2px;border:0;border-radius:8px;background:transparent;color:var(--ink2);font-size:19px;line-height:1;}
+.twed-x:hover{background:rgba(60,65,82,.09);color:var(--ink);}
+.twed-say{margin:0;color:var(--inkSoft);font-size:12px;font-weight:600;line-height:1.5;}
+.twed-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-width:0;}
+.twed-lbl{min-width:0;}
+.twed-lbl b{display:block;font-weight:800;font-size:12.5px;color:var(--ink);}
+.twed-lbl small{display:block;color:var(--muted);font-size:11.5px;font-weight:600;line-height:1.45;}
+.twed-lbl b + small{margin-top:2px;}
+.twed-row .twab-chips{flex:none;justify-content:flex-end;max-width:76%;}
+.twed-add{flex:none;display:flex;align-items:center;gap:12px;color:var(--muted);font-size:11.5px;font-weight:700;}
+.twed .note{margin:0;}
+.twits{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px;}
+.twit{display:flex;align-items:center;gap:10px;min-width:0;padding:6px 6px 6px 9px;border-radius:10px;background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 26%, transparent);}
+.twit input.txt.twnum{flex:none;width:86px;padding:7px 9px;}
+.twit .n{flex:none;padding-right:8px;color:var(--ink);font-size:13px;font-weight:800;}
+.twit-x{flex:none;width:26px;height:26px;padding:0 0 2px;border:0;border-radius:7px;background:transparent;color:var(--muted);font-size:17px;line-height:1;}
+.twit-x:hover:not(:disabled){background:color-mix(in srgb, var(--bad) 14%, transparent);color:var(--bad);}
+.twit-x:disabled{opacity:.35;cursor:default;}
+.twgives{display:flex;flex-wrap:wrap;gap:6px;margin-top:-4px;}
+.twgive{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:56px;padding:7px 6px 5px;border-radius:10px;background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 22%, transparent);}
+.twgive b{font-size:10.5px;font-weight:800;color:var(--ink2);}
+.pickgroups{flex-basis:100%;justify-content:flex-start;}
+.pickbody>.note{margin-bottom:12px;}
+.wgroup h5.twgh{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.twgh .twab-all{font-family:'Mulish',system-ui,'Segoe UI',sans-serif;letter-spacing:0;}
+.pickmore{padding:14px 0 2px;text-align:center;color:var(--muted);font-size:12px;font-weight:700;}
+
+/* settings */
+.sect{background:linear-gradient(180deg,var(--panel),var(--cream));border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);border-radius:14px;padding:20px 22px;margin-bottom:16px;}
+.sect h4{font-family:'Cinzel',serif;font-weight:700;font-size:15px;color:var(--ink);margin:0 0 14px;}
+.sect .line{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:12px 0;border-bottom:1px solid color-mix(in srgb, var(--goldD) 18%, transparent);}
+.sect .line:last-child{border-bottom:0;}
+/* Without this the description runs glued to the title — <small> is inline by default, and every
+   other place that pairs <b>+<small> declares its own display:block (.row small, .vcard .body small,
+   .themecard .body small). */
+.sect .line small{display:block;color:var(--muted);font-size:11.5px;font-weight:600;margin-top:3px;line-height:1.5;}
+
+/* the theme selector in Settings */
+.themecard{position:relative;border-radius:12px;overflow:hidden;cursor:pointer;background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 28%, transparent);padding:0;text-align:left;font-family:inherit;}
+.themecard .ring{position:absolute;inset:0;border-radius:12px;border:2px solid var(--gold);z-index:2;pointer-events:none;}
+.themecard .tick{position:absolute;top:8px;right:8px;width:20px;height:20px;border-radius:50%;background:var(--gold);display:flex;align-items:center;justify-content:center;z-index:2;color:#fff;}
+.themecard .prev{height:76px;position:relative;display:flex;align-items:center;justify-content:center;}
+.themecard .prev.classic{background:radial-gradient(240px 100px at 50% -12%,#313c5c,#10131f 85%);}
+.themecard .prev.summer{background:url('assets/summer-2.8.webp') center 28% / cover;}
+.themecard .prev .minibuoy{position:absolute;right:8px;bottom:8px;display:block;width:18px;height:18px;border-radius:50%;
+  background:conic-gradient(#ff6f5e 0 45deg,#fff6ec 45deg 90deg,#ff6f5e 90deg 135deg,#fff6ec 135deg 180deg,#ff6f5e 180deg 225deg,#fff6ec 225deg 270deg,#ff6f5e 270deg 315deg,#fff6ec 315deg 360deg);
+  -webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 6px),#000 calc(100% - 5px));
+  mask:radial-gradient(farthest-side,transparent calc(100% - 6px),#000 calc(100% - 5px));
+  filter:drop-shadow(0 2px 3px rgba(6,60,80,.45));}
+.themecard .body{padding:10px 12px 12px;}
+.themecard .body b{font-weight:800;font-size:13px;color:var(--ink);display:block;}
+.themecard .body small{color:var(--muted);font-size:11px;font-weight:700;display:block;margin-top:2px;}
+
+/* ── help badge: a "?" beside a label (app.js helpBadge) ──
+   Hovering the badge, or reaching it with Tab, shows its bubble. Pure CSS: the bubble is a child of the
+   badge, so render() rewriting #app cannot leave a stale one behind. No title attribute anywhere —
+   WebView2 would draw the native tooltip over the bubble. pointer-events:none: the bubble never takes
+   the hover from the badge, and a click on the field under it goes through.
+   The base rules lay the bubble out against .helpbox (the field's <label>, the text half of a settings
+   row): it takes that element's width and opens under it, so it is never wider than its column. The
+   install form is a box with overflow-y:auto, whose overflow-x then computes to auto as well — a bubble
+   hung from the badge itself would give that box a horizontal scrollbar. scroll-margin: Tab scrolls the badge
+   into view WITH room for the bubble under it. z-index 15: over the page, under a modal overlay (20) —
+   Tab reaches a badge behind a dialog, and its bubble must not be drawn over that dialog; in the
+   install form the overlay itself is the stacking context, so the bubble is over the form.
+   The 15px badge must not make its line taller than the text alone does (a label's line is 15px):
+   vertical-align:middle and the negative block margins keep it inside that line box, so a field with
+   a badge stays level with the field beside it and a settings row with one is as tall as the others. */
+.helpbox{position:relative;}
+.help{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;margin:-2px 0 -2px 6px;vertical-align:middle;border-radius:50%;
+  border:1px solid color-mix(in srgb, var(--goldD) 55%, transparent);background:color-mix(in srgb, var(--gold) 14%, transparent);color:var(--goldD);
+  font-family:'Mulish',system-ui,'Segoe UI',sans-serif;font-size:10px;font-weight:800;letter-spacing:0;line-height:1;
+  cursor:help;-webkit-user-select:none;user-select:none;scroll-margin:12px 0 290px;}
+.help:hover,.help:focus{background:var(--gold);border-color:var(--goldD);color:var(--btnInk);outline:none;}
+.help:focus-visible{box-shadow:0 0 0 3px color-mix(in srgb, var(--gold) 28%, transparent);}
+.help > .tip{display:none;position:absolute;z-index:15;left:0;right:0;top:100%;max-width:360px;margin-top:6px;padding:10px 12px;border-radius:10px;
+  background:var(--dark);border:1px solid color-mix(in srgb, var(--gold) 45%, transparent);box-shadow:0 12px 28px rgba(0,0,0,.35);color:#e7ebf3;
+  font-size:12px;font-weight:600;letter-spacing:0;line-height:1.5;text-align:left;text-transform:none;white-space:normal;pointer-events:none;cursor:default;}
+.help:hover > .tip,.help:focus > .tip{display:block;}
+/* Where CSS anchor positioning exists (Chromium 131+, so every current WebView2 runtime) the bubble
+   leaves the scroll box: position:fixed takes it out of the box's clip (its containing block is
+   .overlay — the backdrop-filter there makes it one — or the viewport on the Server page), the anchor
+   keeps it centred under the badge while the box scrolls, flip-block puts it above the badge when there
+   is no room below, and anchors-visible hides it once the badge itself is scrolled out of sight. */
+@supports (anchor-scope: --help) {
+  .help{anchor-name:--help;anchor-scope:--help;scroll-margin:12px 0;}
+  .help > .tip{position:fixed;position-anchor:--help;inset:auto;position-area:bottom span-all;width:300px;max-width:none;margin:6px 0;
+    position-try-fallbacks:flip-block;position-visibility:anchors-visible;}
+}
+
+.toast{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);z-index:40;padding:11px 18px;border-radius:11px;background:var(--dark);color:#e7ebf3;font-size:12.5px;font-weight:700;border:1px solid color-mix(in srgb, var(--gold) 30%, transparent);box-shadow:0 12px 30px rgba(0,0,0,.4);max-width:80%;}
+.toast.bad{border-color:var(--bad);color:#ffd7cf;padding-right:38px;text-align:left;line-height:1.45;}
+.toast-x{position:absolute;top:6px;right:8px;width:22px;height:22px;padding:0;line-height:1;border:0;border-radius:6px;background:transparent;color:inherit;font-size:17px;font-weight:700;cursor:pointer;opacity:.7;}
+.toast-x:hover{opacity:1;background:rgba(255,255,255,.12);}
+.toast.ok{border-color:var(--ok);}
+.flex{display:flex;} .between{justify-content:space-between;} .center{align-items:center;} .gap{gap:12px;} .wrap{flex-wrap:wrap;}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}

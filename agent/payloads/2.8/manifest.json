@@ -1,0 +1,57 @@
+{
+  "version": "2.8",
+  "title": "Golden Apple Archipelago 2 (Summertime Odyssey)",
+  "account": "Aetherr",
+  "password": "any",
+  "note": "Save positioned right before the start of the GAA2 quest (\"A Path Through the Storm\"). Source: the community GAA 2.8 fixes. CAREFUL with sql_events: the 1.6 events (2005001/2003001/2013001/5051001) MUST be finished, otherwise the unlock quest does not start -- which is why they are pushed into 1998, exactly as in the original readme. Do NOT touch t_gacha_schedule_config: the 'special' banner (gacha_type 400) must be CONTAINED in a character banner (301); if you extend only its end_time, the gameserver dies at start in checkDbSpecialAvatarGacha. txt/NewActivityCondData.txt is the 2.8 original with ONLY the time gates removed from the 2014/5084 rows that also carry a quest condition: acts II-V no longer wait for days 2-5 of the schedule, the 'day<N' windows (2014022-25) no longer expire, and 5084017/2014008/5084001 no longer wait for day 33/36. The 2014/5084 family has no OR rows, so no quest gate is bypassed -- the mirage-domain transformations stay quest-driven, as in the original. Two corrections to that sentence: condType 13 is 'day < param', not '<='; and 2014008/5084001 carry NO quest condition (only 'day >= 36'), so opening them fires their exec 47 at once -- a fresh account receives the end-of-event mail (MailData 70/80) on day one. 2026-09-21: the between-chapter placements are sequenced by the PLAYER'S progress, never by the day. Rows 2014022-2014025 load them (199001025 + 199001247 = the camp tableau, npc 30203 Kazuha / 30204 Xinyan / 30205 Fischl / 30206 Oz / 30207 Mona, two identical copies; 199001040/41/44 and 199001045/228/229 = the island ones) on the closing quest of chapters 1-4 (4006414 / 4006714 / 4007017 / 4007318), with the day term held open (13 = 7777). The NEW rows 2014028-2014031 (registered in NewActivityCondGroupData 201401, notifyClient empty so the client never hears of them) retire each one when the NEXT chapter's opening step finishes -- 4006502 / 4006801 / 4007101 / 4007401, the in-game 'wait for daytime' step (quest finish 18 | 6,24) that precedes the chapter's first scene -- with exec 18 on its groups plus exec 59 '<cond>,否' on its row, the vendor's own state-handoff idiom (2005052; 5033002 -> 5033001, verified in game on 1.6). exec 59 also switches off the idle talks bound to that row (TalkData trigger cond 43 -> 2014022 etc., actors 302xx), so an earlier chapter's line cannot resurface. Why: the activity day is one global number counted from begin_time. With the vendor windows (day < 2..5) a player pacing one chapter per day saw the right thing, but anyone who rushed saw placements pile up, and anyone starting after day 5 -- or on a stack whose begin_time was moved back -- never saw them at all (tested 2026-09-21: begin_time 11 days back, empty camp at 'Contact Venti in a less conspicuous place', which is 4006415, right after the tableau's trigger 4006414). Now it is the same at day 1 and day 400: chapter N ends -> the cast idles in the camp (and stays there through an in-game night) -> chapter N+1's opening begins -> they are gone and the chapter's own quest NPCs take over (e.g. 4006802 opens act III with Mona, Xinyan, Kazuha -- no Fischl). Safe for progression: no quest script uses the 302xx npc ids, and every quest step whose id shows up in those talks' rows precedes its tableau's trigger (the ids only collide by naming -- e.g. quest 4007001 finishes on a lua notify of group 199001039, not on talk 4007001). Dead ends, recorded so they are not tried again: 7777 alone (placements never expire and pile up); the vendor day windows alone (placements depend on when the player started); a backdated begin_time (deletes them for everyone); exec 18 chained onto the next tableau row (retires a tableau only when the next chapter ENDS); exec 18 on the grant rows 2014004-2014007 (for chapters 2-4 they fire on the SAME quest as the load, so the order of evaluation decides). Symmetrical 1.6 edits were considered and REJECTED: restoring a '13' value on the 1.6 act rows makes cond 2005002 go false on a stack older than 21 days, and its deactivate exec 4|40011 CANCELS main quest 40011 under any player mid-act.",
+
+  "_stages_note": "files[].stage: 'save' = the progress (sdk.db, dump.rdb) -- installed only by a provision with progress 'default'; 'config' = server data files installed in every progress mode (default / keep / fixes) and never reverted; 'txt_fix' = the reversible fixes /server/txtfixes applies and reverts (.orig kept). A 'save' entry flagged tsv is treated as 'config' by the agent (effective_stage) for boxes whose payloads predate this note.",
+  "files": [
+    { "src": "sdk/data/sdk.db", "dst": "sdk/data/sdk.db", "stage": "save" },
+    { "src": "redis/dump.rdb",  "dst": "redis/dump.rdb",  "stage": "save" },
+
+    { "src": "txt/MaterialDeleteData.txt", "dst": "server/data/txt/MaterialDeleteData.txt", "stage": "config", "tsv": true },
+
+    { "src": "txt/NewActivityCondData.txt", "dst": "server/data/txt/NewActivityCondData.txt", "stage": "txt_fix", "tsv": true },
+    { "src": "txt/NewActivityCondGroupData.txt", "dst": "server/data/txt/NewActivityCondGroupData.txt", "stage": "txt_fix", "tsv": true }
+  ],
+
+  "mysql": [
+    { "src": "mysql/hk4e_db_user.sql", "db": "hk4e_db_user", "recreate": true }
+  ],
+
+  "templates": [
+    { "id": "pre-gaa",  "label": "Before the GAA2 quest", "sql": "mysql/hk4e_db_user.sql",              "md5": "8d31f1858a0db35c9f9feed41bcc30af" },
+    { "id": "post-gaa", "label": "After the GAA2 quest",  "sql": "templates/post-gaa/hk4e_db_user.sql", "md5": "18c3f227a053b0a9b21ce0e57dd87b7b" }
+  ],
+  "_templates_note": "Progress templates players may start from (policy-gated; the agent offers all of them by default); 'fresh' is implicit. Each dump holds exactly one player (uid 1); the agent imports it into relic_tpl_<id> (at provision, and at a start that finds it not imported) and copies it onto a new account with copy_save (guids rewritten). post-gaa (2026-09-29) is the shipped pre-gaa save played through the whole of Summertime Odyssey -- main quest collection 4013, parents 40064..40077 all finished (the last on 2026-09-23) -- dumped from the test box's account 'aetherr' (uid 1, nickname aetherlul, AR 35) with mysqldump --where=uid=1 --hex-blob while offline: same 26 characters, 57 scene blocks (the pre-gaa 41 + the archipelago's), the teapot row; the player stands in the archipelago (scene 9), as 1.6's post-gaa stands in scene 4. 2026-09-29, both saves (pre-gaa = the default save too): the Reminiscent Regimen record (activity 5083, schedule 5083001) the community's save carried SETTLED from an older run of the event was removed (strip_settled_activities; everything else byte-exact, recompressed) -- with it the server never offered the event's intro quest 7051701 'Any Unsolved Mysteries?' once the agent opened the event; the next login now builds a fresh record. Old md5s: pre-gaa 5e6298f9f26b837ca2587fdbc15288a9, post-gaa f29e8d7c94b64a0c46cfd22cae65d072.",
+
+  "events": {
+    "_note": "Only the archipelago events stay open. The four entries in 'others' marked 'required to trigger' MUST be finished -- that is what triggers the GAA2 unlock quest; hence the closed window in 1998, as in the original readme. Any id that appears in neither list is closed and flagged in the log. 5083001 Reminiscent Regimen (the co-op challenge event) moved to 'gaa' on 2026-09-29: it IS held on the archipelago -- NewActivityCondData 5083001 starts its intro quest 7051701 only once GAA2 step 4006415 is finished, 5083002 / 5083008 load the scene-9 groups 199001104 / 199002107 (5083008 also runs exec 1 '57,9', undone by exec 2 on deactivation) -- and 'not part of the archipelago' was a misreading. Its six challenges unlock on event days 1-6 (5083002-07, each also gated on 7051701) and 5083009 sends mail 78 (1000 Mora) from day 8; a stack where an older list had parked it in 1998 re-opens it on the running events' begin_time (agent 3.7 apply_events), so all six are open there at once.",
+    "openUntil": "2050-01-01 00:00:00",
+    "closedWindow": ["1998-06-09 10:00:00", "1998-06-28 03:59:59"],
+
+    "gaa": {
+      "2014001": "Summertime Odyssey -- the GAA2 event itself",
+      "5083001": "Reminiscent Regimen -- the co-op challenge event, held on the archipelago (needs GAA2 step 4006415)",
+      "5084001": "Resonating Visions -- the phantasmal conches of the archipelago"
+    },
+
+    "others": {
+      "2005001": "Midsummer Island Adventure (1.6) -- must be FINISHED for \"A Path Through the Storm\" to start",
+      "2003001": "Invitation of Windblume -- a 1.4 event, not from this version",
+      "2013001": "Perilous Trail -- a 2.7 event, must be finished",
+      "5051001": "Bantan Sango Case Files -- a 2.3 event, must be finished",
+      "5082001": "Evermotion Mechanical Painting -- a 2.8 event, but not part of the archipelago",
+      "5085001": "Hidden Strife -- a 2.8 event, but not part of the archipelago"
+    }
+  },
+
+  "sql_events": [
+    "USE hk4e_db_config",
+
+    "INSERT INTO t_activity_schedule_config (schedule_id, begin_time, end_time, `desc`) VALUES (2005001, '1998-06-09 10:00:00', '1998-06-28 03:59:59', 'Midsummer Island Adventure; required to trigger \"A Path Through the Storm\"') ON DUPLICATE KEY UPDATE `desc` = VALUES(`desc`)",
+
+    "UPDATE t_op_activity_schedule_config SET end_time = '2050-01-01 00:00:00'"
+  ]
+}

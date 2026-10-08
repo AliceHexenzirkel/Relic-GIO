@@ -1,0 +1,15 @@
+{
+  "global": {
+    "game_version": "OSRELWin1.6.0",
+    "modules": {
+      "UnityPlayer.dll": {
+        "checksum": 7404979598942061771,
+        "timestamp": 0
+      },
+      "UserAssembly.dll": {
+        "checksum": 9944551815735715967,
+        "timestamp": 0
+      }
+    }
+  }
+}

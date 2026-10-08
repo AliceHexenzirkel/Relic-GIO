@@ -1,0 +1,397 @@
+# Builds Relic (build/publish.ps1) and its installer (installer/relic.iss) on GitHub-hosted runners: the
+# same two commands as build\build.bat, from a clean checkout -- plus the release bundles.
+#
+#   Manual: Actions -> "Build Relic" -> Run workflow. Every field is optional; an empty field falls
+#           back to the repository variable named in its description (Settings -> Secrets and
+#           variables -> Actions -> Variables), else to publish.ps1's own default.
+#   Tag:    git tag v1.0.0 && git push origin v1.0.0 -> the same builds from the variables, plus a DRAFT
+#           GitHub Release (made public by hand from the Releases page) with every asset attached:
+#             RelicSetup.exe              the plain installer
+#             RelicSetup-navmesh.exe      the same build with the 2.8 navmesh bundle inside (only when a
+#                                         bundle is known -- see the build-navmesh job)
+#             relic-navmesh-2.8.zip       the navmesh archive itself, attached again
+#             relic-server-fixes-1.6.zip  the repaired server data + ready-made saves, for applying by hand
+#             relic-server-fixes-2.8.zip
+#             relic-mhynot-patch.zip      the Windows 11 injector + Run.bat + the 2.8 global-metadata.dat
+#             SHA256SUMS.txt              and the same table in the release body (build/make_release_bundles.py)
+#
+# Never bakes an agent token: artifacts and releases can be downloaded by everyone who can read the
+# repository (on a public one, by anyone), and the token is the only security boundary between Player
+# and Server Admin mode. Admin builds stay local (build\publish.ps1 --token=...). The private catalogue
+# (config/versions.json, Drive ids) is not in the repository either: the app ships
+# config/versions.sample.json, which is what a Drive-stripped local build ships anyway.
+
+name: Build Relic
+
+on:
+  workflow_dispatch:
+    inputs:
+      default_server:
+        description: 'Default server, host[:port] (empty = variable RELIC_DEFAULT_SERVER, else none)'
+        type: string
+        required: false
+      default_servers:
+        description: 'Quick picks, "Label=host[:port];..." (empty = variable RELIC_DEFAULT_SERVERS, else none)'
+        type: string
+        required: false
+      default_mode:
+        description: 'player | admin (empty = variable RELIC_DEFAULT_MODE, else no preselected mode)'
+        type: string
+        required: false
+      theme:
+        description: 'summer | classic (empty = variable RELIC_THEME, else summer)'
+        type: string
+        required: false
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------ the plain installer
+  build:
+    name: Relic + RelicSetup.exe
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # The runner's Git defaults to core.autocrlf=true and would build from CRLF copies of every text
+      # file .gitattributes does not pin (agent/gio-agent.service, which goes to a Linux box, among
+      # them). Build the committed bytes, like the dev tree (core.autocrlf=false).
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # For build/check_i18n.py, the translation gate publish.ps1 runs first.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      # publish.ps1 bakes config/agent.token whenever the file exists. It is gitignored; this catches a
+      # force-added one before it ends up inside a downloadable build.
+      - name: Refuse a committed agent token
+        run: |
+          if (Test-Path config/agent.token) { throw 'config/agent.token is committed - a CI build would bake it into a downloadable file' }
+
+      # The inputs travel as environment variables, never pasted into the script text. No navmesh
+      # bundle here: this is the plain build (a committed _bundled_navmesh/ folder would still ship --
+      # publish.ps1 takes it whenever it exists).
+      - name: Publish (build/publish.ps1)
+        env:
+          DEFAULT_SERVER: ${{ inputs.default_server || vars.RELIC_DEFAULT_SERVER }}
+          DEFAULT_SERVERS: ${{ inputs.default_servers || vars.RELIC_DEFAULT_SERVERS }}
+          DEFAULT_MODE: ${{ inputs.default_mode || vars.RELIC_DEFAULT_MODE }}
+          THEME: ${{ inputs.theme || vars.RELIC_THEME }}
+        run: |
+          $a = @()
+          if ($env:DEFAULT_SERVER)  { $a += "--default-server=$env:DEFAULT_SERVER" }
+          if ($env:DEFAULT_SERVERS) { $a += "--default-servers=$env:DEFAULT_SERVERS" }
+          if ($env:DEFAULT_MODE)    { $a += "--default-mode=$env:DEFAULT_MODE" }
+          if ($env:THEME)           { $a += "--theme=$env:THEME" }
+          ./build/publish.ps1 @a
+
+      # publish.ps1 (the step above) fails on a payload .exe / .dll that imports a Visual C++ runtime
+      # DLL: such a file would depend on the Visual C++ redistributable of the player's PC. This step
+      # puts on the run page what the shipped injector and enhancements DLLs import.
+      - name: Native payload files (imports)
+        run: |
+          . ./build/pe_imports.ps1
+          $payload = (Resolve-Path publish/win-x64/payload).Path
+          $manifest = Get-Content (Join-Path $payload 'manifest.json') -Raw | ConvertFrom-Json
+          $entries = @($manifest.common) + @($manifest.versions.PSObject.Properties.Value | ForEach-Object { $_ })
+          foreach ($e in $entries) {
+            if ("$($e.dst)" -notmatch '\.(exe|dll)$') { continue }
+            $imports = @(Get-PeImports (Join-Path $payload $e.src))
+            "- payload/$($e.src): imports $($imports -join ', ')" >> $env:GITHUB_STEP_SUMMARY
+          }
+
+      # Inno Setup 6 is preinstalled on GitHub's Windows images; installed from Chocolatey otherwise.
+      - name: Installer (installer/relic.iss)
+        run: |
+          function Find-Iscc {
+            Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          $iscc = Find-Iscc
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            $iscc = Find-Iscc
+          }
+          if (-not $iscc) { throw 'Inno Setup (ISCC.exe) not found' }
+          & $iscc installer/relic.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit code $LASTEXITCODE)" }
+          $setup = Get-Item installer/Output/RelicSetup.exe
+          $sha = (Get-FileHash $setup -Algorithm SHA256).Hash
+          "RelicSetup.exe: $([math]::Round($setup.Length / 1MB, 1)) MB, SHA-256 ``$sha``" >> $env:GITHUB_STEP_SUMMARY
+
+      # A single file, uploaded unzipped: the run page offers RelicSetup.exe itself. Kept 7 days, since
+      # on a private repository artifacts count against the account's Actions storage.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: RelicSetup
+          path: installer/Output/RelicSetup.exe
+          archive: false
+          retention-days: 7
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ the installer with the navmesh bundle
+  # The OPTIONAL navmesh bundle for the pathfindingserver (docs/NAVMESH.md) cannot be built here: it is
+  # baked inside the running game. It is a zip whose root holds <ver>/navmesh.json + <ver>/NavMesh/,
+  # published as the release asset relic-navmesh-2.8.zip, and the ONE place that names it is the version
+  # catalogue: config/versions.sample.json, versions[].id == "2.8" -> navmesh {url, sha256, size} (the
+  # launcher reads the same entry for its Download button, and takes it only whole -- so does this job:
+  # a url without a 64-hex sha256 and a size above 0 fails the build; nothing unpinned reaches the
+  # installer). The repository variables RELIC_NAVMESH_URL + RELIC_NAVMESH_SHA256 override it (both, the
+  # size then comes from the catalogue when it names the same url). With no url anywhere, every step
+  # after the first is skipped and the job still succeeds: the release then has no
+  # RelicSetup-navmesh.exe and no relic-navmesh-2.8.zip.
+  #
+  # The url must be downloadable by anyone at the moment the tag is pushed: an asset of an EARLIER
+  # release, a dedicated release that holds only the archive, or another host -- never the download url
+  # of the tag being built, whose release this workflow creates (as a draft) only after this job. A
+  # fetch that fails fails the release on purpose: a tag whose catalogue names a bundle never ships
+  # without it.
+  build-navmesh:
+    name: Relic + RelicSetup-navmesh.exe
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+
+      - name: Resolve the navmesh bundle (variables, else config/versions.sample.json)
+        id: navmesh
+        env:
+          VAR_URL: ${{ vars.RELIC_NAVMESH_URL }}
+          VAR_SHA256: ${{ vars.RELIC_NAVMESH_SHA256 }}
+        run: |
+          $url = "$env:VAR_URL".Trim(); $sha = "$env:VAR_SHA256".Trim(); $size = ''; $from = 'variables RELIC_NAVMESH_URL / RELIC_NAVMESH_SHA256'
+          $cat = Get-Content config/versions.sample.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          $v = @($cat.versions | Where-Object { $_.id -eq '2.8' }) | Select-Object -First 1
+          $nm = if ($v) { $v.PSObject.Properties['navmesh'].Value } else { $null }
+          $catUrl = if ($nm) { "$($nm.url)".Trim() } else { '' }
+          $catSize = ''
+          if ($nm -and "$($nm.size)".Trim() -match '^\d+$' -and [long]"$($nm.size)".Trim() -gt 0) { $catSize = [string][long]"$($nm.size)".Trim() }
+          if ($url) {
+            # The variables pin url + sha256; the size is known only when the catalogue names this url.
+            if ($catUrl -eq $url) { $size = $catSize }
+          } elseif ($catUrl) {
+            $url = $catUrl; $sha = "$($nm.sha256)".Trim(); $size = $catSize
+            $from = 'config/versions.sample.json (versions[2.8].navmesh)'
+            if (-not $size) { throw "the navmesh entry needs a size above 0 ($from)" }
+          }
+          if ($url) {
+            if ($url -notmatch '^https://') { throw "the navmesh bundle url must be https:// ($from)" }
+            if ($sha -notmatch '^[0-9a-fA-F]{64}$') { throw "the navmesh entry needs a 64-hex sha256 ($from)" }
+          }
+          "url=$url" >> $env:GITHUB_OUTPUT
+          "sha256=$($sha.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "size=$size" >> $env:GITHUB_OUTPUT
+          if ($url) { "Navmesh bundle: $url (from $from)" >> $env:GITHUB_STEP_SUMMARY }
+          else { "Navmesh bundle: none known (no RELIC_NAVMESH_URL, no navmesh.url for 2.8 in config/versions.sample.json) - RelicSetup-navmesh.exe not built" >> $env:GITHUB_STEP_SUMMARY }
+
+      - uses: actions/setup-dotnet@v6
+        if: steps.navmesh.outputs.url != ''
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/setup-python@v7
+        if: steps.navmesh.outputs.url != ''
+        with:
+          python-version: '3.x'
+
+      - name: Refuse a committed agent token
+        if: steps.navmesh.outputs.url != ''
+        run: |
+          if (Test-Path config/agent.token) { throw 'config/agent.token is committed - a CI build would bake it into a downloadable file' }
+
+      # Downloaded, pinned by sha256 (always) and size (when the catalogue names it), unpacked into
+      # _bundled_navmesh/ -- which publish.ps1 then verifies file by file against navmesh.json and ships
+      # as agent/payloads/2.8/navmesh/.
+      - name: Fetch the navmesh bundle
+        if: steps.navmesh.outputs.url != ''
+        env:
+          NAVMESH_URL: ${{ steps.navmesh.outputs.url }}
+          NAVMESH_SHA256: ${{ steps.navmesh.outputs.sha256 }}
+          NAVMESH_SIZE: ${{ steps.navmesh.outputs.size }}
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'relic-navmesh-2.8.zip'
+          curl.exe --fail --silent --show-error --location --retry 5 --retry-delay 10 --retry-all-errors --output $zip $env:NAVMESH_URL
+          if ($LASTEXITCODE -ne 0) { throw "the navmesh bundle could not be downloaded (curl exit code $LASTEXITCODE)" }
+          $len = (Get-Item $zip).Length
+          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($env:NAVMESH_SIZE -and [long]$env:NAVMESH_SIZE -ne $len) { throw "navmesh bundle: $len bytes, the catalogue expects $env:NAVMESH_SIZE" }
+          if (-not $env:NAVMESH_SHA256) { throw 'navmesh bundle: no sha256 to check against (the Resolve step must refuse this)' }
+          if ($sha -ne $env:NAVMESH_SHA256) { throw "navmesh bundle: SHA-256 $sha, expected $env:NAVMESH_SHA256" }
+          New-Item -ItemType Directory -Force -Path _bundled_navmesh | Out-Null
+          Expand-Archive -Path $zip -DestinationPath _bundled_navmesh -Force
+          $manifests = @(Get-ChildItem _bundled_navmesh/*/navmesh.json -ErrorAction SilentlyContinue)
+          Get-ChildItem _bundled_navmesh -Recurse | ForEach-Object {
+            $rel = $_.FullName.Substring((Get-Location).Path.Length + 1)
+            if ($_.PSIsContainer) { "$rel\" } else { "$rel  ($([math]::Round($_.Length / 1MB, 1)) MB)" }
+          }
+          if (-not (Test-Path _bundled_navmesh/2.8/navmesh.json)) { throw 'the zip root must hold 2.8/navmesh.json - see the listing above' }
+          New-Item -ItemType Directory -Force -Path installer/Output | Out-Null
+          Copy-Item $zip installer/Output/relic-navmesh-2.8.zip -Force
+          "relic-navmesh-2.8.zip: $([math]::Round($len / 1MB, 1)) MB, $($manifests.Count) version(s), SHA-256 ``$sha``" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Publish (build/publish.ps1) with the bundle
+        if: steps.navmesh.outputs.url != ''
+        env:
+          DEFAULT_SERVER: ${{ inputs.default_server || vars.RELIC_DEFAULT_SERVER }}
+          DEFAULT_SERVERS: ${{ inputs.default_servers || vars.RELIC_DEFAULT_SERVERS }}
+          DEFAULT_MODE: ${{ inputs.default_mode || vars.RELIC_DEFAULT_MODE }}
+          THEME: ${{ inputs.theme || vars.RELIC_THEME }}
+        run: |
+          $a = @()
+          if ($env:DEFAULT_SERVER)  { $a += "--default-server=$env:DEFAULT_SERVER" }
+          if ($env:DEFAULT_SERVERS) { $a += "--default-servers=$env:DEFAULT_SERVERS" }
+          if ($env:DEFAULT_MODE)    { $a += "--default-mode=$env:DEFAULT_MODE" }
+          if ($env:THEME)           { $a += "--theme=$env:THEME" }
+          ./build/publish.ps1 @a
+          if (-not (Test-Path publish/win-x64/agent/payloads/2.8/navmesh/navmesh.json)) { throw 'publish.ps1 shipped no agent/payloads/2.8/navmesh/ - the bundle was not taken' }
+
+      - name: Installer (installer/relic.iss, /DOutputName=RelicSetup-navmesh)
+        if: steps.navmesh.outputs.url != ''
+        run: |
+          function Find-Iscc {
+            Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          $iscc = Find-Iscc
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            $iscc = Find-Iscc
+          }
+          if (-not $iscc) { throw 'Inno Setup (ISCC.exe) not found' }
+          & $iscc /DOutputName=RelicSetup-navmesh installer/relic.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit code $LASTEXITCODE)" }
+          $setup = Get-Item installer/Output/RelicSetup-navmesh.exe
+          $sha = (Get-FileHash $setup -Algorithm SHA256).Hash
+          "RelicSetup-navmesh.exe: $([math]::Round($setup.Length / 1MB, 1)) MB, SHA-256 ``$sha``" >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v7
+        if: steps.navmesh.outputs.url != ''
+        with:
+          name: RelicSetup-navmesh
+          path: installer/Output/RelicSetup-navmesh.exe
+          archive: false
+          retention-days: 7
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        if: steps.navmesh.outputs.url != ''
+        with:
+          name: relic-navmesh-2.8
+          path: installer/Output/relic-navmesh-2.8.zip
+          archive: false
+          retention-days: 7
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ the bundles, sums and notes
+  # build/make_release_bundles.py builds the hand-apply zips from the repository and, with the two
+  # installers and the navmesh zip handed to it (--extra / --navmesh-zip), writes SHA256SUMS.txt and
+  # release-notes.md over EVERY asset -- so it runs after the Windows jobs. A skipped navmesh job just
+  # leaves those two assets out.
+  bundles:
+    name: Release bundles
+    needs: [build, build-navmesh]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: _artifacts
+
+      - name: Build the bundles (build/make_release_bundles.py)
+        run: |
+          set -eu
+          args=()
+          for name in RelicSetup.exe RelicSetup-navmesh.exe; do
+            f=$(find _artifacts -type f -name "$name" -print -quit)
+            if [ -n "$f" ]; then args+=(--extra "$f"); else echo "no $name among the artifacts"; fi
+          done
+          nav=$(find _artifacts -type f -name relic-navmesh-2.8.zip -print -quit)
+          if [ -n "$nav" ]; then args+=(--navmesh-zip "$nav"); else echo "no relic-navmesh-2.8.zip among the artifacts (no bundle known)"; fi
+          python3 build/make_release_bundles.py --out dist "${args[@]}"
+          { echo '### Release assets'; echo; cat dist/release-notes.md; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: dist
+          retention-days: 7
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ the draft release (tags only)
+  release:
+    name: Draft release
+    needs: [build, build-navmesh, bundles]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: dist
+
+      # A DRAFT: nothing is public until "Publish release" on the Releases page. A re-run for the same
+      # tag replaces the files and the body of the existing release while it is still a draft; a release
+      # already published is left alone (the run fails with the reason: delete it or bump the tag), so a
+      # re-run never rewrites notes edited by hand or swaps files people have downloaded. The body = the
+      # asset table of release-notes.md, then GitHub's own generated notes (the release-notes API renders
+      # them, so a re-run composes the same body instead of losing one half).
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          ls -l dist
+          [ -f dist/RelicSetup.exe ] || { echo 'RelicSetup.exe is missing from the assets'; exit 1; }
+          [ -f dist/release-notes.md ] || { echo 'release-notes.md is missing from the assets'; exit 1; }
+          assets=$(find dist -maxdepth 1 -type f \( -name '*.exe' -o -name '*.zip' -o -name 'SHA256SUMS.txt' \) | sort)
+          state=$(gh release view "$TAG" --json isDraft --jq .isDraft --repo "$GITHUB_REPOSITORY" 2>/dev/null || echo none)
+          case "$state" in
+            true)  echo "the draft release of $TAG exists - its body and files are replaced" ;;
+            none)  echo "no release of $TAG yet - a draft is created" ;;
+            *)     echo "the release of $TAG is already published - nothing is changed. Delete it or push another tag."; exit 1 ;;
+          esac
+          { echo '## Downloads'; echo; cat dist/release-notes.md; echo; } > body.md
+          if gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$TAG" --jq .body > generated.md 2>/dev/null; then
+            cat generated.md >> body.md
+          else
+            echo 'generated notes unavailable - the body carries the asset table alone'
+          fi
+          if [ "$state" = true ]; then
+            gh release edit "$TAG" --notes-file body.md --title "Relic $TAG" --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" --draft --notes-file body.md --title "Relic $TAG" --repo "$GITHUB_REPOSITORY"
+          fi
+          # shellcheck disable=SC2086
+          gh release upload "$TAG" $assets --clobber --repo "$GITHUB_REPOSITORY"
+          { echo "### Draft release Relic $TAG"; echo; echo '```'; echo "$assets" | sed 's#^dist/##'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

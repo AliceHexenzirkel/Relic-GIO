@@ -1,0 +1,11 @@
+Relic — in-game enhancements (entertainment_experience/)
+
+This component is based on Akebi GC ("AnimeGame-Cheat-3.3" v1.2.3, https://github.com/NctimeAza/AnimeGame-Cheat-3.3),
+Copyright (c) the Akebi-GC / CCGenshin contributors (Callow/CallowBlack, Taiga74164 and others),
+licensed under the Apache License, Version 2.0 (see LICENSE). Relic modified it; the modifications are
+recorded in VENDOR.md ("Changes made by Relic") and in this repository's history after the tag ee-vendor-v1.2.3.
+
+Third-party components bundled under mod/cheat-base/vendor/ and mod/cheat-library/res/ (see VENDOR.md):
+Dear ImGui (MIT, ocornut; brightness-fix fork by CallowBlack), {fmt} (MIT), nlohmann/json (MIT), magic_enum (MIT),
+SimpleIni (MIT), stb_image (MIT/Unlicense), WinReg (MIT), Microsoft Detours (MIT), imgui-notify (MIT),
+Font Awesome 5 Free (SIL OFL 1.1 / CC BY 4.0), Ruda font (SIL OFL 1.1).

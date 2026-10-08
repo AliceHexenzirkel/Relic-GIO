@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/app/">
+    <Project Path="app/Relic.App/Relic.App.csproj" />
+    <Project Path="app/Relic.Core/Relic.Core.csproj" />
+  </Folder>
+  <Folder Name="/spikes/">
+    <Project Path="spikes/Relic.Spikes/Relic.Spikes.csproj" />
+  </Folder>
+</Solution>

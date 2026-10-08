@@ -1,0 +1,354 @@
+{
+ "version": "2.8",
+ "branch": "2.8_live",
+ "_note": "Official miHoYo 2.8_live hotpatch outputs (the final in-version state a 2022 client ended with). Same mechanism as 1.6: the agent mirrors these files -- first as one ready-made bundle from archive.org (`bundles`, resumable, md5 + size pinned), then file by file from the official CDN (`upstreams`) for whatever is still missing, or entirely when the bundle cannot be used -- verifies them against the md5/size below (copied from the official index files), serves them token-less under /hotpatch/<path> and makes the dispatch advertise them. Payloads = every file that differs from the shipped 2.8.0 client (GenshinImpact_2.8.0.zip, res_revision 8078355 / data_revision 8078038 / silence_revision 8017153) plus the complete silence set; see docs/HOTFIX-1.6.md section 6.",
+ "upstreams": [
+  "https://autopatchhk.yuanshen.com",
+  "https://autopatchcn.yuanshen.com"
+ ],
+ "_bundleNote": "Ready-made bundles of the same files on archive.org (CDN-relative layout inside: client_game_res/... and client_design_data/...; a voice bundle holds client_game_res/<branch>/<res.base output>/client/StandaloneWindows64/AudioAssets/<Lang>/*.pck). The agent downloads a bundle first (resumable, md5 + size verified), unpacks it into a staging folder OUTSIDE the mirror and moves ONLY the files whose md5/size match this manifest (or, for voice packs, the mirrored official release index) into the mirror; whatever is still missing comes from `upstreams` file by file, which is also the whole path when a bundle cannot be used (no 7z tool, less than half the bytes missing, not enough disk, download failure). url is stored percent-encoded and used as-is; md5/size = the values of the archive.org item's <item>_files.xml. GIO_HOTPATCH_BUNDLES=0 switches the bundles off.",
+ "bundles": {
+  "hotpatch": {
+   "url": "https://archive.org/download/GenshinImpact2.8.0/2.8_hotpatch.7z",
+   "size": 204803605,
+   "md5": "cd7863ebabb0a71e2aba8fc03f26aa59",
+   "files": 46
+  },
+  "voice": {
+   "Chinese": {
+    "url": "https://archive.org/download/GenshinImpact2.8.0/2.8_voice_Chinese.7z",
+    "size": 6040830382,
+    "md5": "bbfdca67625d3bbfa8df1a233bea7dbc"
+   },
+   "English(US)": {
+    "url": "https://archive.org/download/GenshinImpact2.8.0/2.8_voice_English%28US%29.7z",
+    "size": 7549074489,
+    "md5": "c2416a6c6c304f088ee2de6cc69051a6"
+   },
+   "Japanese": {
+    "url": "https://archive.org/download/GenshinImpact2.8.0/2.8_voice_Japanese.7z",
+    "size": 7224789939,
+    "md5": "3ba38f7fdc75e4f893a743a32a13e48e"
+   },
+   "Korean": {
+    "url": "https://archive.org/download/GenshinImpact2.8.0/2.8_voice_Korean.7z",
+    "size": 6132507437,
+    "md5": "f41f5915751d1f8142ff5d466a02556d"
+   }
+  }
+ },
+ "res": {
+  "output": "output_8589120_fc51cefe86",
+  "revision": 8589120,
+  "suffix": "fc51cefe86",
+  "platform": "StandaloneWindows64",
+  "base": "output_8078355_c3a03ebac5"
+ },
+ "data": {
+  "output": "output_8644052_1ce48fca2c",
+  "revision": 8644052,
+  "suffix": "1ce48fca2c"
+ },
+ "silence": {
+  "output": "output_8812249_af39852a33",
+  "revision": 8812249,
+  "suffix": "af39852a33"
+ },
+ "_voiceNote": "Voice packs of the BASE output (res.base) per language: what a client whose voice language has no pack on disk downloads at login (isPatch:false lines of release_res_versions_external). Display totals only -- the agent authorises and verifies every pack from the mirrored index itself (POST /server/hotpatch/voice).",
+ "voice": {
+  "Chinese": {
+   "files": 111,
+   "bytes": 7441931288
+  },
+  "English(US)": {
+   "files": 111,
+   "bytes": 8575190532
+  },
+  "Japanese": {
+   "files": 111,
+   "bytes": 9363358652
+  },
+  "Korean": {
+   "files": 111,
+   "bytes": 7279768076
+  }
+ },
+ "files": [
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/release_res_versions_external",
+   "md5": "cfdc5ac675c8d6957266bd169beaf818",
+   "size": 536749,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/res_versions_external",
+   "md5": "a6d23469f6809d041bf5366302e25741",
+   "size": 536749,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/res_versions_medium",
+   "md5": "87e79c7efd00649bcece902bee49eca7",
+   "size": 270863,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/res_versions_streaming",
+   "md5": "d071239bff4c1df1ba2ec53b5638a829",
+   "size": 79068,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/release_res_versions_medium",
+   "md5": "7568236e5fcf9552855a0d54b42116a7",
+   "size": 270863,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/release_res_versions_streaming",
+   "md5": "720ebf52118aefbb3c1b52703f2caa8b",
+   "size": 79068,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/base_revision",
+   "md5": "d63405b218d9e75b90cd2ff8790b1f6c",
+   "size": 18,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/script_version",
+   "md5": "05770f32b71ce740fb5c6d371172f6df",
+   "size": 5,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/release_total_size",
+   "md5": "cfcd208495d565ef66e7dff9f98764da",
+   "size": 1,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/total_size",
+   "md5": "cfcd208495d565ef66e7dff9f98764da",
+   "size": 1,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/AudioAssets/audio_versions",
+   "md5": "f00b756b2893a5cc66b49721a919e639",
+   "size": 55660,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/VideoAssets/video_versions",
+   "md5": "c56febe3ddfea4e0761def8f1ec9c845",
+   "size": 9947,
+   "role": "index"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/data_versions",
+   "md5": "2c7aa9e6223f3f95c77f85675a4cf2f0",
+   "size": 4414,
+   "role": "index"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8812249_af39852a33/client_silence/General/AssetBundles/data_versions",
+   "md5": "a885a3b4eda99e786bb858a6ea107d96",
+   "size": 513,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/AssetBundles/blocks/00/00888219.blk",
+   "md5": "80f8c8652732f621b948a2f4ffbcd555",
+   "size": 3376046,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/AssetBundles/blocks/00/04777634.blk",
+   "md5": "d951fbf7e06c8830d0589f9ea0af8328",
+   "size": 909915,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/AssetBundles/blocks/00/05060895.blk",
+   "md5": "0746c264b1e649a74974885826511a7d",
+   "size": 185865,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/AssetBundles/blocks/00/07317000.blk",
+   "md5": "b2dca2811f43fc30139a9e203bb25d5d",
+   "size": 973082,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/AssetBundles/blocks/00/10603770.blk",
+   "md5": "1ea9a273210d4b80691e5b19ec67c392",
+   "size": 2462524,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/AssetBundles/blocks/00/25704984.blk",
+   "md5": "87cd23fcd35e4e361509dc392ebdf499",
+   "size": 6453491,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/AudioAssets/SFX_2.8_0.pck",
+   "md5": "a4e9709b282dc2b8f31514796c06f612",
+   "size": 720237,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/AudioAssets/Chinese/VO_2.8_0.pck",
+   "md5": "f2a9bedcb4190127ef541c6bf9e3c399",
+   "size": 248728,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/00/24230448.blk",
+   "md5": "686e977c9b1367be6b485ad22c72ff45",
+   "size": 19162508,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/00/25539185.blk",
+   "md5": "6bfaf53e705987bddcc236bab2b9333f",
+   "size": 6497048,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/00/35323818.blk",
+   "md5": "d1b0558f434b2ebce6076a27e0d23107",
+   "size": 3977371,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/01/26692920.blk",
+   "md5": "9745fab699013f84b0c6cfa3befb942b",
+   "size": 11373689,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/02/27251172.blk",
+   "md5": "b03c8c1afa331438fcdf8ea36a7af5ee",
+   "size": 11269885,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/03/25181351.blk",
+   "md5": "dd593182030f1739112747326e58b9f9",
+   "size": 12220681,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/04/25776943.blk",
+   "md5": "fdb63b30e1e51636ceb63bcec9220972",
+   "size": 11660397,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/05/20618174.blk",
+   "md5": "1674259e87c49ee2f63e5a85723e1be8",
+   "size": 11656438,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/06/25555476.blk",
+   "md5": "ad78bf9ca13f39e197e22c095294fad3",
+   "size": 11909449,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/07/30460104.blk",
+   "md5": "7221976370d0686cf890d90cb6f3da17",
+   "size": 11219501,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/08/32244380.blk",
+   "md5": "796dd9c57c450cfbc96e9e6f4404538a",
+   "size": 11397636,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/09/22299426.blk",
+   "md5": "78238df983fa3047e1c78ceff9ac2cc1",
+   "size": 11332868,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/10/23331191.blk",
+   "md5": "df27a556e084de73f595de077e6f8a38",
+   "size": 11679897,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/11/21030516.blk",
+   "md5": "ea6f144c6182ce90896dd71f7aaa516e",
+   "size": 12835627,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/12/27441594.blk",
+   "md5": "38a7555cbad3d20913b7334b40b7c8f0",
+   "size": 631985,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/12/32056053.blk",
+   "md5": "b02443dd9f841884339a37cd17e60119",
+   "size": 13741067,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8644052_1ce48fca2c/client/General/AssetBundles/blocks/13/34382464.blk",
+   "md5": "b1c31035c0c7a8bb9f0450a6fa8718e8",
+   "size": 11625197,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8812249_af39852a33/client_silence/General/AssetBundles/blocks/00/22551915.blk",
+   "md5": "0cf3d6b599d443c7cfa4a3e6189a7757",
+   "size": 3184,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8812249_af39852a33/client_silence/General/AssetBundles/blocks/00/25060239.blk",
+   "md5": "f3cf18d697e3380b2f833ccf2c7d4194",
+   "size": 3328,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8812249_af39852a33/client_silence/General/AssetBundles/blocks/00/29342328.blk",
+   "md5": "f4c6124d62ccb581a3cd967074047bab",
+   "size": 6635,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8812249_af39852a33/client_silence/General/AssetBundles/blocks/00/32070509.blk",
+   "md5": "4bf2a81d7565301269d1c90e14393045",
+   "size": 698,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/2.8_live/output_8812249_af39852a33/client_silence/General/AssetBundles/blocks/00/33067900.blk",
+   "md5": "0b4d781c1633537d2fa4b4f0f567d2ca",
+   "size": 454,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/AssetBundles/svc_catalog",
+   "md5": "73698e88549de140c6cfa1511e25007a",
+   "size": 62546,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/2.8_live/output_8589120_fc51cefe86/client/StandaloneWindows64/AssetBundles/blocks/00/31049740.blk",
+   "md5": "61e566de54c7116e830d763232d992aa",
+   "size": 6479364,
+   "role": "payload"
+  }
+ ]
+}

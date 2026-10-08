@@ -1,0 +1,10 @@
+{
+  "_comment": "Game 2.8 (OS) offsets transplant.py could not decide alone (see dumps_ref/2.8/unresolved.txt). Every one of these is an ambiguous same-signature pair: calling the wrong twin is memory-safe (same parameters) but semantically off, so each is UNVERIFIED until the live test confirms it. Swap the pair here and re-run apply_overrides.py if the in-game behaviour says so.",
+  "MoleMole_LevelModule_OnSceneEntityAppear":      { "rva": "0x00EE7B40", "note": "pair GJJJGLAIJPH/PHCBAODMFOO — both ESP hooks run the same handler, order irrelevant (UNVERIFIED)" },
+  "MoleMole_LevelModule_OnSceneEntityAppearAsync": { "rva": "0x00EEFCC0", "note": "pair GJJJGLAIJPH/PHCBAODMFOO — both ESP hooks run the same handler, order irrelevant (UNVERIFIED)" },
+  "MoleMole_LCAvatarCombat_GetSkillMaxChargesCount":     { "rva": "0x026F7F60", "note": "pair OBPBDHFMIMN/JCFKBJFCNHI int(uint) — VERIFIED in-game 2026-08-23 (ShowSkillCD shows 0/1 on cooldown, 1/1 when ready)" },
+  "MoleMole_LCAvatarCombat_GetSkillCurrentChargesCount": { "rva": "0x026F3A40", "note": "pair OBPBDHFMIMN/JCFKBJFCNHI int(uint) — VERIFIED in-game 2026-08-23 (ShowSkillCD shows 0/1 on cooldown, 1/1 when ready)" },
+  "MoleMole_UIManager_IsPS4Layout": { "rva": "0x014B25C0", "note": "pair MACHEOCFECB/LBLENCDIKLP static bool() — only hides the PS4 key icon in ShowSkillCD; the PC layout renders fine (2026-08-23)" },
+  "MoleMole_UIManager_TryShowInfoMessageWithoutBlockInput": { "rva": "0x014B62D0", "note": "pair DEDLKNKNMHA(default priority 6)/MMFGNNNLBFC(default 1) — same params, priority is passed explicitly by util.cpp (UNVERIFIED)" },
+  "MoleMole_PlayerModule_EntityAppear": { "rva": "0x029A63A0", "note": "pair PHNMBFMGKPB/GHPEOIGGNJC, identical signatures — hook only (AnimationChanger resets its state list), low impact (UNVERIFIED)" }
+}

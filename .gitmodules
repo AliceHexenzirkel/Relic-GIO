@@ -1,0 +1,3 @@
+[submodule "injector/mhynot2"]
+	path = injector/mhynot2
+	url = https://github.com/khang06/mhynot2.git

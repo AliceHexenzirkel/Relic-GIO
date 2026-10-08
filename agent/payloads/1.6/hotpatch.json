@@ -1,0 +1,300 @@
+{
+ "version": "1.6",
+ "branch": "1.6_live",
+ "_note": "Official miHoYo 1.6_live hotpatch outputs (the final in-version state a 2021 client ended with). The agent mirrors these files into its hotpatch folder -- first as one ready-made bundle from archive.org (`bundles`, resumable, md5 + size pinned), then file by file from the official CDN (`upstreams`) for whatever is still missing, or entirely when the bundle cannot be used -- verifies every one against the md5/size below (copied from the official index files, the same values the client verifies against), serves them token-less under /hotpatch/<path> and makes the dispatch advertise them. What they fix: HoYoLAB post 423223 \"V1.6 Known Issues & Update (7/2)\"; see docs/HOTFIX-1.6.md.",
+ "upstreams": [
+  "https://autopatchhk.yuanshen.com",
+  "https://autopatchcn.yuanshen.com"
+ ],
+ "_bundleNote": "Ready-made bundles of the same files on archive.org (CDN-relative layout inside: client_game_res/... and client_design_data/...; a voice bundle holds client_game_res/<branch>/<res.base output>/client/StandaloneWindows64/AudioAssets/<Lang>/*.pck). The agent downloads a bundle first (resumable, md5 + size verified), unpacks it into a staging folder OUTSIDE the mirror and moves ONLY the files whose md5/size match this manifest (or, for voice packs, the mirrored official release index) into the mirror; whatever is still missing comes from `upstreams` file by file, which is also the whole path when a bundle cannot be used (no 7z tool, less than half the bytes missing, not enough disk, download failure). url is stored percent-encoded and used as-is; md5/size = the values of the archive.org item's <item>_files.xml. GIO_HOTPATCH_BUNDLES=0 switches the bundles off.",
+ "bundles": {
+  "hotpatch": {
+   "url": "https://archive.org/download/client_design_data.7z/1.6_hotpatch.7z",
+   "size": 121998195,
+   "md5": "c19c80bf475bc7a62e3b0fb74974b956",
+   "files": 37
+  },
+  "voice": {
+   "Chinese": {
+    "url": "https://archive.org/download/client_design_data.7z/1.6_voice_Chinese.7z",
+    "size": 2827502115,
+    "md5": "91f9eacb58071bd7a9ab12b88dec2aef"
+   },
+   "English(US)": {
+    "url": "https://archive.org/download/client_design_data.7z/1.6_voice_English%28US%29.7z",
+    "size": 3223842930,
+    "md5": "73dbd52ed24038694c8aa5dbe71061bf"
+   },
+   "Japanese": {
+    "url": "https://archive.org/download/client_design_data.7z/1.6_voice_Japanese.7z",
+    "size": 3172602054,
+    "md5": "bf4b25056e1d24b6b6d661bf70a8cd2f"
+   },
+   "Korean": {
+    "url": "https://archive.org/download/client_design_data.7z/1.6_voice_Korean.7z",
+    "size": 2758073531,
+    "md5": "2d87c757e2240ef415a7bc34b7546cc7"
+   }
+  }
+ },
+ "res": {
+  "output": "output_3557509_5979a935f8",
+  "revision": 3557509,
+  "suffix": "5979a935f8",
+  "platform": "StandaloneWindows64",
+  "base": "output_3070488_2862694a85"
+ },
+ "data": {
+  "output": "output_3526661_2b3db51945",
+  "revision": 3526661,
+  "suffix": "2b3db51945"
+ },
+ "silence": {
+  "output": "output_3266913_b1501b6955",
+  "revision": 3266913,
+  "suffix": "b1501b6955"
+ },
+ "_voiceNote": "Voice packs of the BASE output (res.base) per language: what a client whose voice language has no pack on disk downloads at login (isPatch:false lines of release_res_versions_external). Display totals only -- the agent authorises and verifies every pack from the mirrored index itself (POST /server/hotpatch/voice).",
+ "voice": {
+  "Chinese": {
+   "files": 88,
+   "bytes": 3463071268
+  },
+  "English(US)": {
+   "files": 90,
+   "bytes": 3674724476
+  },
+  "Japanese": {
+   "files": 96,
+   "bytes": 3939855392
+  },
+  "Korean": {
+   "files": 84,
+   "bytes": 3246170364
+  }
+ },
+ "files": [
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/res_versions_external",
+   "md5": "51ee3c27dbf109e4ccde0a3851e5e16f",
+   "size": 277376,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/release_res_versions_external",
+   "md5": "d5093942fb60c7fcd75dc72c10906e6a",
+   "size": 277376,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/res_versions_medium",
+   "md5": "1ee65d2dd1a8a0a7aaca71749dd312cc",
+   "size": 131248,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/res_versions_streaming",
+   "md5": "b890859ffae293f15c929c5ac83aa0e6",
+   "size": 2216,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/base_revision",
+   "md5": "405a713134625778882ef378b1092de2",
+   "size": 18,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/script_version",
+   "md5": "ca9f0d77f73d954e88e6ab43539ac7cb",
+   "size": 5,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/AudioAssets/audio_versions",
+   "md5": "2a05e916b2cd74ddccccf924f73fbdab",
+   "size": 54377,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/VideoAssets/video_versions",
+   "md5": "efca865b844b0cb0d76cb2b4bdf6ed2b",
+   "size": 3960,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/release_res_versions_medium",
+   "md5": "97d63f0e987e2efebbdd1a7ba9b00395",
+   "size": 131248,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/release_res_versions_streaming",
+   "md5": "00064bfd2696182592e082388470f42e",
+   "size": 2216,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/release_total_size",
+   "md5": "cfcd208495d565ef66e7dff9f98764da",
+   "size": 1,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/total_size",
+   "md5": "cfcd208495d565ef66e7dff9f98764da",
+   "size": 1,
+   "role": "index"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/AudioAssets/English(US)/VO_1.6_11.pck",
+   "md5": "1f28afb97fb83ef0e213491ebeec7d77",
+   "size": 33499552,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/AssetBundles/blocks/00/00840539.blk",
+   "md5": "81d18be4c0aed1e955d40cd9e4139c41",
+   "size": 24951,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/AssetBundles/blocks/00/00928859.blk",
+   "md5": "95aba28efecde2639f0ee291a083a7bf",
+   "size": 932876,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/AssetBundles/blocks/00/05872732.blk",
+   "md5": "9569f01e1c27e3ac88032e239ffe5083",
+   "size": 62317,
+   "role": "payload"
+  },
+  {
+   "path": "client_game_res/1.6_live/output_3557509_5979a935f8/client/StandaloneWindows64/AssetBundles/blocks/00/25704984.blk",
+   "md5": "0755ebcffa8f655eede078334421900c",
+   "size": 3591863,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/data_versions",
+   "md5": "219dfb562a1cc8798b8c289379584a30",
+   "size": 4401,
+   "role": "index"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/00/24230448.blk",
+   "md5": "822cfee19f4b453e22c2b0ef681adca9",
+   "size": 8340095,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/00/25539185.blk",
+   "md5": "9ddd9243859d4554cc43a1f6e7e79a27",
+   "size": 3071408,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/00/35323818.blk",
+   "md5": "9e4462eba1cba253d75df5943f07fc76",
+   "size": 11509138,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/03/25181351.blk",
+   "md5": "a98a38f8c5da27d6e4bf5a63cd37b32d",
+   "size": 6668472,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/04/25776943.blk",
+   "md5": "04c4d8eaf838e8958715571395a50990",
+   "size": 6389141,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/05/20618174.blk",
+   "md5": "7679f7c3a0e17e0cc3cd2a2a3298abd5",
+   "size": 6395769,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/06/25555476.blk",
+   "md5": "a4207c4e01d33507e69985a1b9bb4b8c",
+   "size": 6446590,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/07/30460104.blk",
+   "md5": "828b9c3a8f4ec3ae26c878f365470b92",
+   "size": 6160210,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/08/32244380.blk",
+   "md5": "29d2e933e438fd8fec530470c9d44b0f",
+   "size": 6141303,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/09/22299426.blk",
+   "md5": "c9919dcbc3c0858fdf0bd9e70700c26d",
+   "size": 6224825,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/10/23331191.blk",
+   "md5": "e84ecbb9705bee2e253cfdf847ea6f34",
+   "size": 6363162,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/11/21030516.blk",
+   "md5": "1e75cb2dcf84cafa52c78ca08f52c989",
+   "size": 6972362,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3526661_2b3db51945/client/General/AssetBundles/blocks/12/32056053.blk",
+   "md5": "ea99725ba3616f9fc44bbe6c2f4e63de",
+   "size": 7435872,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3266913_b1501b6955/client_silence/General/AssetBundles/data_versions",
+   "md5": "81875fda073abae20ab827dbbe35e987",
+   "size": 515,
+   "role": "index"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3266913_b1501b6955/client_silence/General/AssetBundles/blocks/00/29342328.blk",
+   "md5": "8595e667dc50f0bba43bab25f8e1a14d",
+   "size": 18071,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3266913_b1501b6955/client_silence/General/AssetBundles/blocks/00/32070509.blk",
+   "md5": "d01e389985f225b957202e328f20d4ff",
+   "size": 4471,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3266913_b1501b6955/client_silence/General/AssetBundles/blocks/00/22551915.blk",
+   "md5": "0cf3d6b599d443c7cfa4a3e6189a7757",
+   "size": 3184,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3266913_b1501b6955/client_silence/General/AssetBundles/blocks/00/25060239.blk",
+   "md5": "f3cf18d697e3380b2f833ccf2c7d4194",
+   "size": 3328,
+   "role": "payload"
+  },
+  {
+   "path": "client_design_data/1.6_live/output_3266913_b1501b6955/client_silence/General/AssetBundles/blocks/00/33067900.blk",
+   "md5": "0b4d781c1633537d2fa4b4f0f567d2ca",
+   "size": 454,
+   "role": "payload"
+  }
+ ]
+}

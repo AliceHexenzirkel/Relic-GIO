@@ -1,0 +1,16 @@
+# Everything bash/python executes on the Linux box must stay LF — a default Windows clone with
+# core.autocrlf=true would otherwise check these out CRLF and every uploaded script would die with
+# bash: $'\r': command not found (deploy_from_windows.ps1 also sends its $remote script inline).
+*.sh text eol=lf
+*.py text eol=lf
+
+# The agent payloads reach the server byte for byte: the template dumps (*.sql) are md5-pinned in
+# their manifest.json and the TSV fixes (*.txt) are CRLF on purpose. Converted, the LF dumps come out
+# CRLF on a default Windows clone, the md5 no longer matches and gio_agent.py --selftest aborts every
+# agent install (install_agent.sh and the local Windows agent both run it first).
+agent/payloads/** -text
+
+# The pathfindingserver navmesh bundle (docs/NAVMESH.md) is binary data pinned by md5 + sha256 in its
+# navmesh.json: one converted byte fails publish.ps1's gate and the agent's install of the bundle.
+_bundled_navmesh/** -text
+*.navmesh -text

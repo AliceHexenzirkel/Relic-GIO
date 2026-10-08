@@ -1,0 +1,11 @@
+{
+ "version": "1.6",
+ "_note": "Ready-made 1.6_live docker stack on the Internet Archive (the vendor's all-in-one server package). The agent downloads it next to GIO_DIR_16 (<dir>.7z, resumable), verifies size + md5 (the values of the archive.org item's <item>_files.xml), extracts it into a sibling temp folder with 7zz/7z/7za/7zr/bsdtar (Linux) or 7-Zip/tar.exe (Windows), renames the top folder onto GIO_DIR_16, repairs the exec bits and deletes the archive. A verified <dir>.7z put there by hand (scp) is adopted without a download. extractedSize = bytes of the unpacked tree (disk check).",
+ "label": "Internet Archive",
+ "url": "https://archive.org/download/client_design_data.7z/1.6_live_gio.7z",
+ "size": 1870180624,
+ "md5": "9c7fb4829d1b3f0de59eac9de1b5d322",
+ "extractedSize": 12490943745,
+ "topDir": "1.6_live",
+ "strays": []
+}

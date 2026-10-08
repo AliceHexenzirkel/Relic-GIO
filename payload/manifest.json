@@ -1,0 +1,58 @@
+{
+  "_note": "Files Relic copies INTO the game folder after an install/import and re-checks before every launch. 'common' applies to every version; 'versions' only to that id. 'sha256' is verified: if the file in the game folder already has this hash it is not rewritten. 'backup': keeps the original as <name>.relic-orig the first time.",
+  "_note_bin": "The injector sources carry a .bin suffix, not .exe/.dll: 'dotnet publish' drops exactly those two from the output (a plain build copies them), so the ship build mirrors payload/ explicitly in publish.ps1 — and the suffix keeps antivirus away from the copy in {app}. The real names are restored at the destination ('dst').",
+  "_note_inject": "'inject': true marks an entry as an extra DLL for launcher.exe: when the 'In-game enhancements' setting is on (RelicSettings.Enhancements, default on) the entry is copied like any other and, at launch, handed to launcher.exe AFTER mhynot2.dll (launcher.exe <GameDir> <mhynot2.dll> <dst...>) on Windows 10 and 11 alike — the real mhyprot2 driver must never load under the mod. With the setting off the entry is neither copied nor verified nor deleted, and the launch is the plain per-OS one. Always 'required': false — a missing inject file costs the menu, never the launch. Such entries live under 'versions' (per game build) as '<ver>/ee/CLibrary.dll.bin' -> 'ayy/anime/ee/CLibrary.dll' (never a folder named 'bin'); their default hotkey F1 is what Relic's strings tell the player; publish.ps1 prints the size per inject entry and warns above 80 MB. Entries are added by entertainment_experience/tools/build_ee.ps1 once the DLLs exist.",
+  "common": [
+    {
+      "src": "common/ayy/anime/build/launcher.exe.bin",
+      "dst": "ayy/anime/build/launcher.exe",
+      "sha256": "793a306178b3e8977bdbcc5a80700281264e64b9a828e07ea7306d3efd96ea1e",
+      "reason": "mhynot2 injector — on Windows 11 the game only starts through it (mhyprot2 driver).",
+      "credit": "khang06/mhynot2",
+      "source": "https://github.com/khang06/mhynot2"
+    },
+    {
+      "src": "common/ayy/anime/build/mhynot2.dll.bin",
+      "dst": "ayy/anime/build/mhynot2.dll",
+      "sha256": "e80abcd5efb52add764e1d4309795b6d08365a751f63c400f8ad4dfcd7761167",
+      "reason": "DLL injected by launcher.exe (emulates the anti-cheat driver).",
+      "credit": "khang06/mhynot2",
+      "source": "https://github.com/khang06/mhynot2"
+    }
+  ],
+  "versions": {
+    "1.6": [
+      {
+        "src": "1.6/ee/CLibrary.dll.bin",
+        "dst": "ayy/anime/ee/CLibrary.dll",
+        "sha256": "96f6b7fcb7f5cf1cdd785ec3f69b3c23d57113113d0f3cf4645a6ef6b37a3547",
+        "inject": true,
+        "reason": "In-game enhancements menu (F1) for 1.6 — handed to launcher.exe after mhynot2.dll when Settings > In-game enhancements is on. Optional: the game runs without it.",
+        "credit": "Akebi GC — NctimeAza/AnimeGame-Cheat-3.3 v1.2.3 (Apache-2.0), backported to 1.6 from entertainment_experience/ (modified; see entertainment_experience/VENDOR.md)",
+        "source": "https://github.com/NctimeAza/AnimeGame-Cheat-3.3"
+      }
+    ],
+    "2.8": [
+      {
+        "src": "2.8/global-metadata.dat",
+        "dst": "GenshinImpact_Data/Managed/Metadata/global-metadata.dat",
+        "sha256": "f5c94f8bdb2a7e0b4e9bedbf5c14926ba6fe7b5f5941cf9f92740697304d140d",
+        "backup": true,
+        "required": true,
+        "reason": "Without this patched global-metadata.dat the 2.8 client does not start at all.",
+        "credit": "community patch (author: TODO)",
+        "source": "TODO"
+      },
+      {
+        "src": "2.8/ee/CLibrary.dll.bin",
+        "dst": "ayy/anime/ee/CLibrary.dll",
+        "sha256": "b90855926947578a01e8b2f2977a337e991fa7f400596dbf0f2746c919c5995c",
+        "inject": true,
+        "reason": "In-game enhancements menu (F1) for 2.8 — handed to launcher.exe after mhynot2.dll when Settings > In-game enhancements is on. Optional: the game runs without it.",
+        "credit": "Akebi GC — NctimeAza/AnimeGame-Cheat-3.3 v1.2.3 (Apache-2.0), built for 2.8 from entertainment_experience/ (modified; see entertainment_experience/VENDOR.md)",
+        "source": "https://github.com/NctimeAza/AnimeGame-Cheat-3.3"
+      }
+    ]
+  },
+  "_credits": "Third-party components: mhynot2 by khang06 (https://github.com/khang06/mhynot2) — launcher.exe + mhynot2.dll are built from it (the launcher as a console-subsystem executable, both with the static C runtime: no Visual C++ redistributable needed); the 2.8 global-metadata.dat is a community patch (source: TODO). See README.md 'Credits'."
+}
