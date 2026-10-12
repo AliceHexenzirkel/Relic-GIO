@@ -183,3 +183,5 @@ Requirements: .NET 10 SDK, Python 3, Inno Setup 6. For the .dll patch, you also 
 ## Feeling generous?
 If you feel that my work is worth anything, and want to support future development/projects, you can buy me a [ko-fi]() ^^. Ain't exactly living in a luxury, worst than that, at this current state I'm a self-employed employee of tha year
 Thank you so much for any small amount of support!
+
+[![Star History Chart](https://api.star-history.com/svg?repos=AliceHexenzirkel/Relic-GIO&type=Date)](https://star-history.com/#AliceHexenzirkel/Relic-GIO&Date)
