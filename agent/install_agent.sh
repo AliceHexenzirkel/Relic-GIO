@@ -6,48 +6,90 @@
 # them, else Docker's own repository), a python3 the agent can run on (3.9+; a box whose python3
 # is older gets a versioned interpreter next to it and the service uses that one) and a 7z extractor
 # (7zip / p7zip-full / libarchive-tools on apt, 7zip (EPEL) / p7zip / bsdtar on dnf; optional: without
-# it the hotpatch mirror is filled file by file from the CDN and no server package can be downloaded).
-# A box with NO server stack yet is fine too: answer "n" to "already extracted?" and the agent
-# downloads the ready-made 1.6 / 2.8 package from the Internet Archive after the install.
+# it the hotpatch mirror is filled file by file from the sources each version's manifest names and a
+# server package can be downloaded only where it comes as a .zip, which the agent reads by itself).
+# A box with NO server stack yet is fine too: choose d (download) for a version and the agent
+# downloads that version's ready-made package from the Internet Archive after the install.
 # Upload this together with gio_agent.py, uninstall_agent.sh and the payloads/ folder, then:
 #   bash install_agent.sh              # interactive
 #   bash install_agent.sh --yes        # non-interactive: takes every default (installs missing deps);
-#                                      # pre-seed defaults via env (GIO_DIR_16, GIO_BIND_IP,
-#                                      # GIO_AGENT_TOKEN, GIO_SERVER_NAME, GIO_MYSQL_ROOT_PASSWORD,
-#                                      # GIO_FLASK_SECRET_KEY, ...; GIO_KEEP_ENV=1 = "Keep .env
-#                                      # settings": the agent leaves each server's own .env as it
-#                                      # is, and no password or address of a stack is asked for;
-#                                      # GIO_INSTALL_DOCKER=n / GIO_INSTALL_PYTHON=n / GIO_INSTALL_7Z=n
-#                                      # refuse the dependency installs; GIO_FETCH_16=y /
-#                                      # GIO_FETCH_28=y = "not on this box: download it into
-#                                      # GIO_DIR_16 / GIO_DIR_28"; GIO_FETCH_FOLLOW=n only prints the
-#                                      # download command instead of running it)
+#                                      # pre-seed defaults via env (GIO_STACK_<nn>=download|have|
+#                                      # later|keep -- <nn> = a version without its dot, GIO_STACK_16
+#                                      # for 1.6 -- the version's choice; GIO_DIR_<nn> its folder;
+#                                      # GIO_BIND_IP, GIO_AGENT_TOKEN, GIO_SERVER_NAME,
+#                                      # GIO_MYSQL_ROOT_PASSWORD, GIO_FLASK_SECRET_KEY, ...;
+#                                      # GIO_KEEP_ENV=1 = "Keep .env settings": the agent leaves each
+#                                      # server's own .env as it is, and no password or address of a
+#                                      # stack is asked for; GIO_INSTALL_DOCKER=n / GIO_INSTALL_PYTHON=n
+#                                      # / GIO_INSTALL_7Z=n refuse the dependency installs; the
+#                                      # hand-run GIO_FETCH_<nn>=y = download it into GIO_DIR_<nn>
+#                                      # (only a version whose catalogue, payloads/<version>/stack.json,
+#                                      # came with this script), a GIO_DIR_<nn> alone = it is there,
+#                                      # one set and empty = not now; GIO_FETCH_FOLLOW=n only prints
+#                                      # the download command instead of running it)
 #   bash install_agent.sh --deps-only  # only the dependency phase (python3 / docker / 7z), then exit
 #   bash install_agent.sh --no-deps    # never install anything, only warn
-# GIO_FETCH_16/28, GIO_INSTALL_7Z and GIO_FETCH_FOLLOW are installer-only: never written to the config.
+#   bash install_agent.sh --plan[=DIR] # a rehearsal: goes through the prompts (add --yes to take the
+#                                      # defaults), prints the configuration the run would write --
+#                                      # the token and the stack secrets in it -- and the server
+#                                      # packages it would download, then stops: nothing is installed,
+#                                      # written or restarted and no running agent is asked anything.
+#                                      # Root is needed only to read a stored configuration (the
+#                                      # install keeps that file 0600): on a box that has the agent,
+#                                      # sudo bash install_agent.sh --plan. With =DIR the box's own
+#                                      # files are read under DIR instead of /: DIR/etc/gio-agent/config
+#                                      # as the stored configuration; DIR/home, DIR/root, DIR/opt and
+#                                      # DIR/srv for the stack folders; DIR<folder> for a folder a
+#                                      # download is marked for. Every path printed is the box's own,
+#                                      # without DIR.
+# GIO_STACK_<nn>, GIO_FETCH_<nn>, GIO_INSTALL_7Z and GIO_FETCH_FOLLOW are installer-only: never written to
+# the config.
 # UPGRADE = the same command on a box that already has the agent: every value of the existing
 # /etc/gio-agent/config (token, stack paths, advertised IP, ...) is the default of the run, the
 # previous agent/config/state/payloads are kept under /var/lib/gio-agent/previous/ for a rollback,
 # and the run refuses while the running agent has a job in progress (GIO_UPGRADE_FORCE=y overrides a
 # probe that could not tell, never a running job). The service keeps its enabled/stopped state on an
-# upgrade; GIO_AGENT_START=y (the launcher's install form sets it) starts it regardless.
+# upgrade; GIO_AGENT_START=y (the launcher's install form sets it) starts it regardless. A version's
+# folder the box already uses is kept (a folder changes only through a relocation: the launcher's Server
+# page, or gio_agent.py --relocate -- the command is named once the new agent file is installed), and a
+# stack folder relocated while the run goes on stops it before its configuration is written.
 # Details: docs/AGENT-UPGRADE.md.
 set -euo pipefail
 
-ASSUME_YES=0; DEPS_ONLY=0; NO_DEPS=0
+# The server versions, one row each: "<id>" or "<id>:implicit" -- the rows of VERSIONS in gio_agent.py, in
+# its order. Everything this script does per version comes from them: the config key GIO_DIR_<nn> and
+# the download mark GIO_FETCH_<nn> (<nn> = the id without its dot), the folder looked for (<id>_live),
+# the prompts, the config lines, the download. ":implicit" = the agent assumes /home/<id>_live for the
+# version while its key is unset, so this script writes a folder for it on every box. A row without it
+# is written only once a folder is named, found or stored: such a version stays unconfigured on a box
+# that never asked for it.
+STACK_VERSIONS=("1.6:implicit" "2.8:implicit" "3.2")
+STACK_IDS=(); declare -A STACK_IMPLICIT=()
+for row in "${STACK_VERSIONS[@]}"; do
+  STACK_IDS+=("${row%%:*}")
+  case "$row" in *:implicit) STACK_IMPLICIT["${row%%:*}"]=1 ;; *) STACK_IMPLICIT["${row%%:*}"]=0 ;; esac
+done
+dir_key() { echo "GIO_DIR_${1//./}"; }
+fetch_key() { echo "GIO_FETCH_${1//./}"; }
+stack_key() { echo "GIO_STACK_${1//./}"; }
+
+# ROOT is empty except under --plan=DIR, where the box's own files are read below DIR.
+ASSUME_YES=0; DEPS_ONLY=0; NO_DEPS=0; PLAN=0; ROOT=""
 for arg in "$@"; do
   case "$arg" in
     --yes|-y) ASSUME_YES=1 ;;
     --deps-only) DEPS_ONLY=1 ;;
     --no-deps) NO_DEPS=1 ;;
-    *) echo "unknown option: $arg  (use --yes, --deps-only, --no-deps)"; exit 2 ;;
+    --plan) PLAN=1; NO_DEPS=1 ;;
+    --plan=*) PLAN=1; NO_DEPS=1; ROOT="${arg#--plan=}"; ROOT="${ROOT%/}" ;;
+    *) echo "unknown option: $arg  (use --yes, --deps-only, --no-deps, --plan)"; exit 2 ;;
   esac
 done
 
 echo "==== GIO agent -- install ===="
 here="$(cd "$(dirname "$0")" && pwd)"
 
-if [ "$(id -u)" != 0 ]; then echo "Run as root (sudo bash install_agent.sh)."; exit 1; fi
+if [ "$PLAN" != 1 ] && [ "$(id -u)" != 0 ]; then echo "Run as root (sudo bash install_agent.sh)."; exit 1; fi
 
 # ── an existing install: its config is the default of this run (= upgrade) ──────────────────
 # Every KEY=VALUE the previous install (or the admin, by hand) left in /etc/gio-agent/config becomes
@@ -55,44 +97,105 @@ if [ "$(id -u)" != 0 ]; then echo "Run as root (sudo bash install_agent.sh)."; e
 # upgrade: token, stack paths, MUIP host/key, the MySQL root password and the Flask secret key
 # (GIO_MYSQL_ROOT_PASSWORD, GIO_FLASK_SECRET_KEY), advertised/bind IP, listen address, server name
 # and any extra key (GIO_TRUST_PROXY, ...) survive. Explicit, NON-EMPTY environment still wins (the
-# launcher's install form, an admin pre-seeding values); an EMPTY environment value means "not given",
+# launcher's install form, an admin pre-seeding values) -- except a version's folder: a folder the box
+# already uses for a version is kept whatever this run names (the per-version choice below; a folder
+# changes only through a relocation); an EMPTY environment value means "not given",
 # never "clear it" -- clearing is done in the config file. Otherwise a plain re-run (or the
 # launcher's form with the field left blank) would silently write GIO_ADVERTISED_IP= and the next re-render
 # of the stack would advertise the LAN IP to players outside it.
-CONFIG=/etc/gio-agent/config
+CONFIG="$ROOT/etc/gio-agent/config"
+# The install writes that file 0600 for root, and only --plan runs as anyone else: a config that is there
+# and cannot be read is said so here, in front of the loop that would end on it with bash's own error.
+if [ -f "$CONFIG" ] && [ ! -r "$CONFIG" ]; then
+  echo "$CONFIG cannot be read by this user -- its values are this run's defaults: run this again with sudo."
+  exit 1
+fi
+# The per-version choice of this run, read from the CALLER's environment before the stored config is
+# exported as the run's defaults below: GIO_STACK_<nn> (download | have | later | keep, any letter case)
+# and whether GIO_DIR_<nn> was handed over at all, even empty. A choice that names no folder (later,
+# keep) drops the caller's GIO_DIR_<nn> here -- the launcher sends one for every version: empty for
+# later, the stored folder for keep --, so only a folder the box STORED comes back below and a key the
+# box never held stays out of the config.
+declare -A ENV_STACK=() ENV_DIR=() ENV_DIR_SET=()
+for v in "${STACK_IDS[@]}"; do
+  skey=$(stack_key "$v"); key=$(dir_key "$v")
+  raw="${!skey:-}"; c="${raw#"${raw%%[![:space:]]*}"}"; c="${c%"${c##*[![:space:]]}"}"; c="${c,,}"
+  case "$c" in
+    ""|download|have|later|keep) ;;
+    *) echo "$skey must be download, have, later or keep (got '$raw')."; exit 2 ;;
+  esac
+  ENV_STACK[$v]="$c"
+  if [ -n "${!key+set}" ]; then ENV_DIR_SET[$v]=1; ENV_DIR[$v]="${!key}"; else ENV_DIR_SET[$v]=0; ENV_DIR[$v]=""; fi
+  case "$c" in later|keep) unset "$key" ;; esac
+done
 UPGRADE=0
 OLD_VERSION=""
 SVC_WAS_ACTIVE=""; SVC_WAS_ENABLED=""
 NEW_VERSION=$(sed -n 's/^AGENT_VERSION = "\([^"]*\)".*/\1/p' "$here/gio_agent.py" 2>/dev/null | head -1 || true)
+# conf_line LINE: one line of the config, read the way systemd's EnvironmentFile and the agent's own parser
+# read it -- KEY=VALUE, blanks around both halves, a trailing CR and one pair of quotes around the value
+# ignored. A KEY=VALUE line sets CONF_K and CONF_V; anything else returns 1. Call it only as a CONDITION (if /
+# while): as a plain statement a "no" would end the script (set -e).
+conf_line() {
+  local line="$1" k v
+  line="${line#"${line%%[![:space:]]*}"}"
+  case "$line" in [A-Za-z_]*=*) ;; *) return 1 ;; esac
+  k="${line%%=*}"; v="${line#*=}"
+  k="${k%"${k##*[![:space:]]}"}"; v="${v#"${v%%[![:space:]]*}"}"   # "KEY = value" is fine for the agent's parser
+  case "$k" in *[!A-Za-z0-9_]*) return 1 ;; esac
+  # systemd's EnvironmentFile and the agent's own parser accept a trailing CR, trailing blanks and
+  # a quoted value -- normalise the same way, or a hand-edited "0.0.0.0:18080" becomes a port of
+  # 18080" further down (firewall skipped, probe dialling nonsense).
+  v="${v%$'\r'}"; v="${v%"${v##*[![:space:]]}"}"
+  case "$v" in \"*\") v="${v#\"}"; v="${v%\"}" ;; \'*\') v="${v#\'}"; v="${v%\'}" ;; esac
+  CONF_K="$k"; CONF_V="$v"
+}
+# stored_dirs: the stack folder keys of $CONFIG as it stands now, one line per version in row order --
+# "GIO_DIR_<nn>=<value>" (read by conf_line, the LAST line of a key wins), "GIO_DIR_<nn> unset" for a key it
+# lacks -- or "unreadable". dirs_seen: the same lines from this run's first read (OLDCFG).
+stored_dirs() {
+  local line v key
+  declare -A now=()
+  if [ ! -r "$CONFIG" ]; then echo unreadable; return 0; fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    if conf_line "$line"; then now["$CONF_K"]="$CONF_V"; fi
+  done < "$CONFIG"
+  for v in "${STACK_IDS[@]}"; do
+    key=$(dir_key "$v")
+    if [ -n "${now[$key]+set}" ]; then echo "$key=${now[$key]}"; else echo "$key unset"; fi
+  done
+}
+dirs_seen() {
+  local v key
+  for v in "${STACK_IDS[@]}"; do
+    key=$(dir_key "$v")
+    if [ -n "${OLDCFG[$key]+set}" ]; then echo "$key=${OLDCFG[$key]}"; else echo "$key unset"; fi
+  done
+}
 declare -A OLDCFG=()
 if [ -f "$CONFIG" ]; then
   UPGRADE=1
   while IFS= read -r line || [ -n "$line" ]; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    case "$line" in [A-Za-z_]*=*) ;; *) continue ;; esac
-    k="${line%%=*}"; v="${line#*=}"
-    k="${k%"${k##*[![:space:]]}"}"; v="${v#"${v%%[![:space:]]*}"}"   # "KEY = value" is fine for the agent's parser
-    case "$k" in *[!A-Za-z0-9_]*) continue ;; esac
-    # systemd's EnvironmentFile and the agent's own parser accept a trailing CR, trailing blanks and
-    # a quoted value -- normalise the same way, or a hand-edited "0.0.0.0:18080" becomes a port of
-    # 18080" further down (firewall skipped, probe dialling nonsense).
-    v="${v%$'\r'}"; v="${v%"${v##*[![:space:]]}"}"
-    case "$v" in \"*\") v="${v#\"}"; v="${v%\"}" ;; \'*\') v="${v#\'}"; v="${v%\'}" ;; esac
-    OLDCFG["$k"]="$v"      # a repeated key: the LAST line wins, exactly as for systemd and the agent
+    if conf_line "$line"; then OLDCFG["$CONF_K"]="$CONF_V"; fi   # a repeated key: the LAST line wins, exactly as for systemd and the agent
   done < "$CONFIG"
   if [ "${#OLDCFG[@]}" -gt 0 ]; then
     for k in "${!OLDCFG[@]}"; do
       # only GIO_* becomes a default of this run; anything else in the EnvironmentFile (DOCKER_HOST,
       # HTTPS_PROXY -- the docker children inherit the file too) is carried into the rewrite verbatim
-      # and never exported into this shell
-      case "$k" in GIO_*) if [ -z "${!k:-}" ]; then export "$k=${OLDCFG[$k]}"; fi ;; esac
+      # and never exported into this shell. Nor is a key that only says what ONE run does (the
+      # per-version choice and download mark, the dependency, follow, start and force switches, the
+      # launcher's sentinel): a hand-edited config holding one must not make every later run act on it.
+      case "$k" in
+        GIO_STACK_*|GIO_FETCH_[0-9]*|GIO_FETCH_FOLLOW|GIO_INSTALL_7Z|GIO_INSTALL_DOCKER|GIO_INSTALL_PYTHON|GIO_AGENT_START|GIO_UPGRADE_FORCE|GIO_RELIC_ENV) ;;
+        GIO_*) if [ -z "${!k:-}" ]; then export "$k=${OLDCFG[$k]}"; fi ;;
+      esac
     done
   fi
   # The service's enabled/active state is part of what an upgrade must not change (an admin who
   # stopped or disabled the agent on purpose keeps it that way; a crashed one is restarted).
   SVC_WAS_ACTIVE=$(systemctl is-active gio-agent 2>/dev/null || true)
   SVC_WAS_ENABLED=$(systemctl is-enabled gio-agent 2>/dev/null || true)
-  OLD_VERSION=$(sed -n 's/^AGENT_VERSION = "\([^"]*\)".*/\1/p' /opt/gio-agent/gio_agent.py 2>/dev/null | head -1 || true)
+  OLD_VERSION=$(sed -n 's/^AGENT_VERSION = "\([^"]*\)".*/\1/p' "$ROOT/opt/gio-agent/gio_agent.py" 2>/dev/null | head -1 || true)
   echo "  existing install: agent ${OLD_VERSION:-?} -> ${NEW_VERSION:-?}; the values in $CONFIG are this run's defaults"
   if [ -n "$OLD_VERSION" ] && [ -n "$NEW_VERSION" ] && [ "$OLD_VERSION" != "$NEW_VERSION" ] \
      && [ "$(printf '%s\n%s\n' "$OLD_VERSION" "$NEW_VERSION" | sort -V | tail -1)" = "$OLD_VERSION" ]; then
@@ -314,10 +417,11 @@ else
 fi
 
 # ── 7z extractor (the archive.org bundles of the hotpatch mirror + the server package download) ──
-# Optional, so NON-FATAL: without it the agent fills the hotpatch mirror file by file from the official
-# CDN and refuses a server package download (409 "No 7z extractor") until one is installed. Ubuntu 24.04+
-# and Debian 12 ship `7zip` (7zz); older Ubuntu has p7zip-full; libarchive-tools = bsdtar. Alma/Rocky 9:
-# 7zip lives in EPEL (added only as the second choice); bsdtar is in AppStream (no extra repository).
+# Optional, so NON-FATAL: without it the agent fills the hotpatch mirror file by file from the sources each
+# version's manifest names and refuses the download of a server package that comes only as a .7z (409 "No 7z
+# extractor") until one is installed. Ubuntu 24.04+ and Debian 12 ship `7zip` (7zz); older Ubuntu has p7zip-full;
+# libarchive-tools = bsdtar. Alma/Rocky 9: 7zip lives in EPEL (added only as the second choice); bsdtar is
+# in AppStream (no extra repository).
 extractor_ok() {
   local t
   for t in 7zz 7z 7za 7zr bsdtar; do
@@ -335,16 +439,82 @@ install_extractor() {
     *) echo "  unknown distribution family -- install 7zz/7z/p7zip or bsdtar by hand"; return 1 ;;
   esac
 }
+# Whether unpacking the server package of version $1 takes a 7z tool. It does not when the package's
+# catalogue -- payloads/<id>/stack.json beside this script -- names a .zip archive, as its "url" or in an
+# "alt" entry: the agent reads a .zip by itself. An address names a .zip when it ends in .zip in front of
+# its query or fragment, in any letter case. A catalogue that cannot be read counts as "takes one" -- a
+# file that is not UTF-8 or starts with a byte order mark, a text that is not one JSON object, an "alt"
+# that is not a list of objects -- and so does a run that has no interpreter to read it with.
+# Test-NeedsExtractor in deploy_from_windows.ps1 is this rule, with the same address pattern. Call it
+# only as a CONDITION (if / while): as a plain statement a "no" would end the script (set -e).
+needs_extractor() {
+  local cat="$here/payloads/$1/stack.json"
+  if [ -z "$PY3" ] || [ ! -f "$cat" ]; then return 0; fi
+  if "$PY3" - "$cat" <<'PYEOF' 2>/dev/null
+import json, re, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    cat = json.load(f)
+alts = cat.get("alt", []) if isinstance(cat, dict) else None
+if not isinstance(alts, list) or not all(isinstance(alt, dict) for alt in alts):
+    sys.exit(1)
+urls = [cat.get("url")] + [alt.get("url") for alt in alts]
+zipped = any(isinstance(u, str) and re.search(r"^[^?#]*\.[zZ][iI][pP]([?#]|$)", u) for u in urls)
+sys.exit(0 if zipped else 1)
+PYEOF
+  then return 1; fi
+  return 0
+}
+# folder_kind FOLDER: what stands at a folder of the box (below $ROOT under --plan=DIR) -- the agent's
+# relocate_target_kind: absent | empty | stack (a docker-compose.yml.tmpl or docker-compose.yml) | other
+# (a non-empty folder without one, a file, a folder that cannot be listed). Prints it; never fails.
+folder_kind() {
+  local d="$ROOT$1"
+  if [ ! -e "$d" ] && [ ! -L "$d" ]; then echo absent
+  elif [ ! -d "$d" ]; then echo other
+  elif ! ls -A -- "$d" >/dev/null 2>&1; then echo other
+  elif [ -z "$(ls -A -- "$d")" ]; then echo empty
+  elif [ -f "$d/docker-compose.yml.tmpl" ] || [ -f "$d/docker-compose.yml" ]; then echo stack
+  else echo other; fi
+}
+# kept_dir ID: the folder this run keeps for the version whatever it names (a server's folder changes only
+# through a relocation) -- on an upgrade the stored non-empty GIO_DIR_<nn> and, for an implicit row whose key
+# the config never held, the folder the agent assumes, /home/<id>_live. Empty when there is none. Handed back
+# on stdout.
+kept_dir() {
+  local key
+  key=$(dir_key "$1")
+  if [ "$UPGRADE" != 1 ]; then return 0; fi
+  if [ -n "${OLDCFG[$key]+stored}" ]; then echo "${OLDCFG[$key]}"
+  elif [ "${STACK_IMPLICIT[$1]}" = 1 ]; then echo "/home/${1}_live"; fi
+}
 # Under --deps-only the stack prompts never run: a launcher-driven or scripted run says through
-# GIO_FETCH_16/28 whether a server package download is planned, which turns the warning into a
-# louder one (the download cannot work without the tool).
-FETCH_PLANNED=n
-if [ "${GIO_FETCH_16:-n}" = y ] || [ "${GIO_FETCH_28:-n}" = y ]; then FETCH_PLANNED=y; fi
+# GIO_STACK_<nn>=download -- or the hand-run GIO_FETCH_<nn>=y -- whether a server package download is
+# planned. A planned one that takes a 7z tool turns the warning into a louder one (that download cannot
+# work without the tool). Planned is what the per-version choice below can mark: nothing without a
+# catalogue, nothing into a folder that holds a server or other files (the one this run keeps for the
+# version, else the one given), and nothing without a folder to download into -- one handed over set and
+# empty, or stored empty, with no other given.
+FETCH_NEEDS_TOOL=n
+for v in "${STACK_IDS[@]}"; do
+  fkey=$(fetch_key "$v"); key=$(dir_key "$v"); want=n
+  if [ "${ENV_STACK[$v]}" = download ]; then want=y
+  elif [ -z "${ENV_STACK[$v]}" ] && [ "${!fkey:-n}" = y ]; then want=y; fi
+  if [ "$want" = y ]; then
+    sdir=$(kept_dir "$v")
+    if [ -z "$sdir" ]; then sdir="${ENV_DIR[$v]}"; fi
+    if [ -n "$sdir" ]; then
+      case "$(folder_kind "$sdir")" in absent|empty) ;; *) want=n ;; esac
+    elif [ "${ENV_DIR_SET[$v]}" = 1 ] || [ -n "${OLDCFG[$key]+stored}" ]; then
+      want=n
+    fi
+  fi
+  if [ "$want" = y ] && [ -f "$here/payloads/$v/stack.json" ] && needs_extractor "$v"; then FETCH_NEEDS_TOOL=y; fi
+done
 warn_no_extractor() {
-  if [ "$FETCH_PLANNED" = y ]; then
+  if [ "$FETCH_NEEDS_TOOL" = y ]; then
     echo "  WARNING : no 7z/bsdtar tool -- the server package download will be refused until one is installed (apt install 7zip | dnf install bsdtar), then run the download again"
   else
-    echo "  warning : no 7z/bsdtar tool -- the agent fetches the hotpatch files one by one from the official CDN and cannot download a server package (apt install 7zip | dnf install bsdtar)"
+    echo "  warning : no 7z/bsdtar tool -- the agent fetches the hotpatch files one by one from the sources each version's manifest names and can download a server package only where it comes as a .zip (apt install 7zip | dnf install bsdtar)"
   fi
 }
 if ! extractor_ok; then
@@ -361,52 +531,221 @@ fi
 if [ "$DEPS_ONLY" = 1 ]; then echo "Dependencies done (--deps-only)."; exit 0; fi
 
 # The stacks may live under /home, /root, /opt, /srv -- or, for a non-root admin, in their own home
-# (/home/admin/1.6_live). $SUDO_USER's home is tried before the glob so a multi-user box is deterministic.
+# (/home/admin/<id>_live). $SUDO_USER's home is tried before the glob so a multi-user box is deterministic.
 # Both of those stay quoted: an empty ${SUDO_USER:+...} and an unmatched glob become words that fail [ -d ].
-detect_dir() {
-  local d
-  for d in "/home/$1" "/root/$1" "/opt/$1" "/srv/$1" "${SUDO_USER:+/home/$SUDO_USER/$1}" /home/*/"$1"; do
-    if [ -d "$d" ]; then echo "$d"; return; fi
+# Prints the folder found for version $1, or nothing. For an implicit row any folder of that name
+# counts. For another row only one that holds a compose file does: an empty folder -- a cancelled
+# download leaves one -- must not configure, at the next --yes run, a version the box never asked for.
+# The folder is printed as the box names it: looked for below DIR under --plan=DIR, written without it.
+find_stack() {
+  local name="$1_live" d
+  for d in "$ROOT/home/$name" "$ROOT/root/$name" "$ROOT/opt/$name" "$ROOT/srv/$name" "${SUDO_USER:+$ROOT/home/$SUDO_USER/$name}" "$ROOT"/home/*/"$name"; do
+    [ -d "$d" ] || continue
+    if [ "${STACK_IMPLICIT[$1]}" = 1 ] || [ -f "$d/docker-compose.yml.tmpl" ] || [ -f "$d/docker-compose.yml" ]; then echo "${d#"$ROOT"}"; return; fi
   done
-  echo "/home/$1"
+}
+# The sizes of version $1's ready-made package for its question, from payloads/<id>/stack.json beside this
+# script: "<size> from the Internet Archive", then " (<size> as a .zip on a box without a 7z tool)" when the
+# url is a .7z and an alt entry is a .zip, then ", <size> once unpacked" when the catalogue names it. Empty
+# when the catalogue cannot be read. Handed back on stdout.
+package_phrase() {
+  local cat="$here/payloads/$1/stack.json"
+  if [ -z "$PY3" ] || [ ! -f "$cat" ]; then return 0; fi
+  "$PY3" - "$cat" <<'PYEOF' 2>/dev/null || true
+import json, re, sys
+zipped = re.compile(r"^[^?#]*\.[zZ][iI][pP]([?#]|$)")
+sevenz = re.compile(r"^[^?#]*\.7[zZ]([?#]|$)")
+def gb(n):
+    return "%.1f GB" % (n / 1e9)
+def count(n):
+    return isinstance(n, int) and not isinstance(n, bool) and n > 0
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        cat = json.load(f)
+    if not isinstance(cat, dict) or not count(cat.get("size")):
+        sys.exit(0)
+    out = gb(cat["size"]) + " from the Internet Archive"
+    if isinstance(cat.get("url"), str) and sevenz.search(cat["url"]) and isinstance(cat.get("alt"), list):
+        for alt in cat["alt"]:
+            if isinstance(alt, dict) and isinstance(alt.get("url"), str) and zipped.search(alt["url"]) and count(alt.get("size")):
+                out += " (%s as a .zip on a box without a 7z tool)" % gb(alt["size"])
+                break
+    if count(cat.get("extractedSize")):
+        out += ", %s once unpacked" % gb(cat["extractedSize"])
+    print(out)
+except Exception:
+    pass
+PYEOF
 }
 
-# An EMPTY stored path means "this version is not on this box" (the agent reports it unconfigured);
-# on an upgrade it stays empty instead of turning into the detected default.
-DEF16=$(detect_dir 1.6_live); DEF28=$(detect_dir 2.8_live)
-if [ "$UPGRADE" = 1 ]; then DEF16="${OLDCFG[GIO_DIR_16]-$DEF16}"; DEF28="${OLDCFG[GIO_DIR_28]-$DEF28}"; fi
-# ${VAR-default}, NOT ${VAR:-default}: the launcher exports every GIO_* key, empty ones included, so a
-# field the admin deliberately left blank arrives SET AND EMPTY. With `:-` that would become the detected
-# default -- a path that does not exist -- and the config would then claim the version is installed.
-# Per version: "already extracted?" yes = the path prompt; no = the folder the
-# ready-made package from the Internet Archive is to be installed into, and the version is MARKED for
-# the download that runs after the service is up (FETCH16/FETCH28 -- installer-only, never written to
-# the config; under --yes the answer comes from GIO_FETCH_16/28, so the launcher's form decides).
-# A marked folder that already holds a docker-compose.yml.tmpl needs no download: unmarked, with a note.
-FETCH16=n; FETCH28=n
-if ask_yn "Is the 1.6 server stack already extracted on this box?" "$( [ "${GIO_FETCH_16:-n}" = y ] && echo n || echo y )"; then
-  DIR16=$(ask "Path of the 1.6 server (docker compose dir; empty = not on this box)" "${GIO_DIR_16-$DEF16}")
-else
-  DIR16=$(ask "Where should the 1.6 server be installed (docker compose dir; empty = skip this version)" "${GIO_DIR_16-$DEF16}")
-  if [ -n "$DIR16" ]; then
-    if [ -f "$DIR16/docker-compose.yml.tmpl" ]; then echo "  note    : $DIR16 already holds a server stack -- the download will be skipped"
-    else FETCH16=y; fi
-  fi
+# Per version ONE choice: download the ready-made package now (only a version whose catalogue,
+# payloads/<id>/stack.json, came with this script), have it (a folder that holds the extracted server), or not
+# now. GIO_STACK_<nn> gives it; else the hand-run keys (GIO_FETCH_<nn>=y = download, a non-empty GIO_DIR_<nn>
+# = have that folder, one set and empty = not now); else the question (its default under --yes: have where a
+# stack of the version is found and the box never stored its key, else not now). A folder the box already
+# uses for the version stays whatever this run names: the stored non-empty GIO_DIR_<nn> and, on an upgrade, the
+# folder the agent assumes for an implicit row whose key the config never held. The download of a version
+# (FETCH[<id>], installer-only) runs after the service is up. A folder handed over SET AND EMPTY is never
+# replaced by a default folder, and neither is a key the box stores empty. A re-asked question never offers
+# the answer it refused as its default.
+declare -A DIR=() FETCH=() DIR_KEPT=()
+# The relocations this run points at -- a folder given for a version the box keeps in another one, a server
+# found in another folder: version + folder ("" = any), printed as commands only once the new agent file is
+# installed (print_relocate_hints). Named at a prompt, a --relocate run of the agent file still installed --
+# one that does not know the option -- would start a second agent beside the running one instead.
+RELOC_V=(); RELOC_D=()
+if [ "$ASSUME_YES" != 1 ]; then
+  echo "  Server versions: d = download the ready-made package now, h = it is already extracted on this box,"
+  echo "  l = not now (add it later on the launcher's Server page). A version this box already has keeps its folder."
 fi
-if ask_yn "Is the 2.8 server stack already extracted on this box?" "$( [ "${GIO_FETCH_28:-n}" = y ] && echo n || echo y )"; then
-  DIR28=$(ask "Path of the 2.8 server (docker compose dir; empty = not on this box)" "${GIO_DIR_28-$DEF28}")
-else
-  DIR28=$(ask "Where should the 2.8 server be installed (docker compose dir; empty = skip this version)" "${GIO_DIR_28-$DEF28}")
-  if [ -n "$DIR28" ]; then
-    if [ -f "$DIR28/docker-compose.yml.tmpl" ]; then echo "  note    : $DIR28 already holds a server stack -- the download will be skipped"
-    else FETCH28=y; fi
-  fi
+if [ "$PLAN" = 1 ] && [ "$(id -u)" != 0 ]; then
+  echo "  note    : not run as root -- a folder this user cannot look into (such as /root) reads as absent here, where the real run sees what it holds"
 fi
-# A download was just chosen interactively and the dependency phase above had no tool (and no
-# GIO_FETCH_* to know one was wanted): offer the extractor once more. Still non-fatal -- the agent
-# refuses the download with a clear 409 until a tool exists, and the admin can install one later.
-if { [ "$FETCH16" = y ] || [ "$FETCH28" = y ]; } && ! extractor_ok >/dev/null 2>&1; then
-  FETCH_PLANNED=y
+for v in "${STACK_IDS[@]}"; do
+  key=$(dir_key "$v"); fkey=$(fetch_key "$v"); skey=$(stack_key "$v")
+  FETCH[$v]=n; DIR[$v]=""; DIR_KEPT[$v]=0
+  havecat=0; if [ -f "$here/payloads/$v/stack.json" ]; then havecat=1; fi
+  given="${ENV_DIR[$v]}"
+  # The choice: GIO_STACK_<nn>; else the hand-run keys (GIO_FETCH_<nn>=y = download, a non-empty
+  # GIO_DIR_<nn> = have, one set and empty = later); else the question below (its default under --yes).
+  c="${ENV_STACK[$v]}"
+  if [ -z "$c" ]; then
+    if [ "${!fkey:-n}" = y ]; then c=download
+    elif [ -n "$given" ]; then c=have
+    elif [ "${ENV_DIR_SET[$v]}" = 1 ]; then c=later
+    fi
+  fi
+  found=$(find_stack "$v"); foundkind=""
+  if [ -n "$found" ]; then foundkind=$(folder_kind "$found"); fi
+  # 1. A folder the box already uses for the version stays, whatever this run names: a folder changes only
+  #    through a relocation. On an upgrade that is the stored non-empty GIO_DIR_<nn>, and for an implicit
+  #    row whose key the config never held the folder the agent assumes, /home/<id>_live (kept_dir).
+  stored=0
+  if [ "$UPGRADE" = 1 ] && [ -n "${OLDCFG[$key]+stored}" ]; then stored=1; fi
+  sdir=$(kept_dir "$v")
+  if [ -n "$sdir" ]; then
+    DIR[$v]="$sdir"; DIR_KEPT[$v]=1
+    if [ -n "$given" ] && [ "${given%/}" != "${sdir%/}" ]; then
+      echo "  note    : $v keeps its folder $sdir -- $given is not used (a server's folder changes only through a relocation: the launcher's Server page, or the command named at the end of this run)"
+      RELOC_V+=("$v"); RELOC_D+=("")
+    fi
+    skind=$(folder_kind "$sdir")
+    if [ "$skind" != stack ] && [ "$foundkind" = stack ] && [ "${found%/}" != "${sdir%/}" ]; then
+      echo "  note    : a $v server is in $found -- $v keeps its folder $sdir (to use that server, re-point $v at it: the launcher's Server page, or the command named at the end of this run)"
+      RELOC_V+=("$v"); RELOC_D+=("$found")
+    fi
+    case "$skind" in
+      absent|empty)
+        if [ "$havecat" = 1 ]; then
+          if ask_yn "The $v folder $sdir holds no server yet. Download the package into it now?" "$( [ "$c" = download ] && echo y || echo n )"; then FETCH[$v]=y; fi
+        elif [ "$c" = download ]; then
+          echo "  note    : no server package is known for $v (no payloads/$v/stack.json beside this script) -- it is not downloaded"
+        fi ;;
+      stack)
+        if [ "$c" = download ]; then echo "  note    : $sdir already holds a server stack -- the download will be skipped"; fi ;;
+      *)
+        if [ "$c" = download ]; then echo "  WARNING : $sdir holds other files and no server stack -- the $v download is not started (move them away, or change the folder with a relocation)"; fi ;;
+    esac
+    continue
+  fi
+  # 2. A version the box has no folder for: the choice, asked when nothing gave it.
+  if [ -z "$c" ]; then
+    def=l
+    if [ "$foundkind" = stack ] && [ "$stored" = 0 ]; then def=h; fi
+    if [ "$havecat" = 1 ]; then
+      phrase=$(package_phrase "$v")
+      q="  $v (${phrase:-a ready-made package}) -- d / h / l"
+    else
+      q="  $v (no ready-made package is known for it) -- h / l"
+    fi
+    while :; do
+      a=$(ask "$q" "$def"); a="${a,,}"
+      case "$a" in
+        d|download) if [ "$havecat" = 1 ]; then c=download; break; fi; echo "  no ready-made package is known for $v -- answer h or l" ;;
+        h|have) c=have; break ;;
+        l|later) c=later; break ;;
+        *) echo "  answer d, h or l" ;;
+      esac
+      def=l
+    done
+  fi
+  if [ "$c" = download ] && [ "$havecat" = 0 ]; then
+    if [ -z "${ENV_STACK[$v]}" ] && [ "${!fkey:-n}" = y ]; then
+      echo "  note    : no server package is known for $v (no payloads/$v/stack.json beside this script) -- $fkey=y is ignored"
+    else
+      echo "  note    : no server package is known for $v (no payloads/$v/stack.json beside this script) -- it is not downloaded"
+    fi
+    if [ -n "$given" ]; then c=have; else c=later; fi
+  fi
+  if [ "$c" = download ]; then
+    # A folder handed over SET AND EMPTY never becomes a default folder: that is "no folder". Nor does a key
+    # the box stores empty: the version is not on this box until a folder is given for it.
+    dd="$given"
+    if [ "${ENV_DIR_SET[$v]}" != 1 ] && [ "$stored" != 1 ]; then dd="${found:-/home/${v}_live}"; fi
+    while :; do
+      d=$(ask "  Install the $v server into (docker compose dir; '-' = not now)" "$dd")
+      if [ "$ASSUME_YES" != 1 ] && [ "$d" = - ]; then d=""; fi
+      if [ -z "$d" ]; then
+        if [ "$ASSUME_YES" != 1 ]; then
+          echo "  no folder given -- $v is not set up now"
+        elif [ "${ENV_DIR_SET[$v]}" = 1 ]; then
+          echo "  note    : a download of $v needs a folder -- $key is set and empty, so $v is not set up (give $key=<folder>)"
+        else
+          echo "  note    : a download of $v needs a folder -- the configuration stores $key empty ($v is not on this box), so $v is not set up (give $key=<folder>)"
+        fi
+        c=later; break
+      fi
+      case "$d" in
+        /*) ;;
+        *) if [ "$ASSUME_YES" = 1 ]; then echo "$key must be an absolute folder (got '$d') -- fix it and run this again."; exit 1; fi
+           echo "  the folder must be an absolute path"; dd=""; continue ;;
+      esac
+      case "$(folder_kind "$d")" in
+        absent|empty) DIR[$v]="$d"; FETCH[$v]=y; break ;;
+        stack) echo "  note    : $d already holds a server stack -- the download will be skipped"; DIR[$v]="$d"; break ;;
+        *) if [ "$ASSUME_YES" = 1 ]; then echo "$v: $d holds other files and no server stack -- choose an empty or a new folder ($key) and run this again."; exit 1; fi
+           echo "  $d holds other files and no server stack -- choose an empty or a new folder"; dd="" ;;
+      esac
+    done
+  fi
+  if [ "$c" = have ]; then
+    dh="$given"
+    if [ "${ENV_DIR_SET[$v]}" != 1 ] && [ "$foundkind" = stack ]; then dh="$found"; fi
+    while :; do
+      d=$(ask "  Folder of the extracted $v server (docker compose dir; '-' = not now)" "$dh")
+      if [ "$ASSUME_YES" != 1 ] && [ "$d" = - ]; then d=""; fi
+      if [ -z "$d" ]; then
+        if [ "$ASSUME_YES" = 1 ]; then echo "$skey=have needs $key, the folder of the extracted $v server -- fix it and run this again."; exit 1; fi
+        echo "  no folder given -- $v is not set up now"; c=later; break
+      fi
+      case "$d" in
+        /*) ;;
+        *) if [ "$ASSUME_YES" = 1 ]; then echo "$key must be an absolute folder (got '$d') -- fix it and run this again."; exit 1; fi
+           echo "  the folder must be an absolute path"; dh=""; continue ;;
+      esac
+      if [ "$(folder_kind "$d")" = stack ]; then DIR[$v]="$d"; break; fi
+      if [ "$ASSUME_YES" = 1 ]; then echo "  WARNING : $d holds no docker-compose.yml(.tmpl) -- $v is configured there anyway"; DIR[$v]="$d"; break; fi
+      echo "  $d holds no docker-compose.yml(.tmpl) -- not an extracted server"; dh=""
+    done
+  fi
+  if [ "$c" = later ] || [ "$c" = keep ]; then
+    if [ "$foundkind" = stack ]; then
+      echo "  note    : a $v server is in $found -- not set up now (answer h, or $skey=have $key=$found, to use it)"
+    fi
+  fi
+done
+# The versions marked for download, in row order, and whether one of them takes a 7z tool.
+FETCH_LIST=""; FETCH_NEEDS_TOOL=n
+for v in "${STACK_IDS[@]}"; do
+  if [ "${FETCH[$v]}" = y ]; then
+    FETCH_LIST="${FETCH_LIST:+$FETCH_LIST }$v"
+    if needs_extractor "$v"; then FETCH_NEEDS_TOOL=y; fi
+  fi
+done
+# A download that takes a 7z tool was just chosen interactively and the dependency phase above had no
+# tool (and no GIO_FETCH_* to know one was wanted): offer the extractor once more. Still non-fatal -- the
+# agent refuses the download with a clear 409 until a tool exists, and the admin can install one later.
+if [ "$FETCH_NEEDS_TOOL" = y ] && ! extractor_ok >/dev/null 2>&1; then
   if [ "$NO_DEPS" = 1 ] || ! ask_yn "A 7z extractor is needed to unpack the downloaded server package. Install one now?" "${GIO_INSTALL_7Z:-y}"; then
     warn_no_extractor
   elif install_extractor && extractor_ok; then
@@ -558,7 +897,7 @@ DEFBIND=$(ip -4 route get 203.0.113.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).
 OLDKEEP=n
 if [ "$UPGRADE" = 1 ] && is_on "${OLDCFG[GIO_KEEP_ENV]:-}"; then OLDKEEP=y; fi
 if [ "$UPGRADE" = 1 ] && { [ "$OLDKEEP" != y ] || [ -n "${OLDCFG[GIO_BIND_IP]:-}" ]; }; then DEFBIND="${OLDCFG[GIO_BIND_IP]-$DEFBIND}"; fi
-# ${VAR:-...} here, UNLIKE the two stack dirs: an empty bind IP is NOT "auto-detect" on a fresh box.
+# ${VAR:-...} here, UNLIKE the stack dirs: an empty bind IP is NOT "auto-detect" on a fresh box.
 # With no bind IP and no advertised IP the agent's ensure_bind_ip deliberately leaves .env alone, and the
 # vendor archive ships OUTER_IP=127.0.0.1 -- every published port would bind loopback and the client gets
 # 502 "server busy". The upgrade case is already safe without the non-colon form: DEFBIND was pinned to
@@ -575,9 +914,10 @@ BIND=$(ask  "Agent bind address"                    "${GIO_AGENT_LISTEN:-0.0.0.0
 SRVNAME=$(ask "Server name shown to players"        "${GIO_SERVER_NAME:-$(hostname)}")
 SRVNAME=${SRVNAME//[\"\']/}
 # Where the hotpatch mirror is filled FROM the first time this server fills it: the ready-made
-# archive.org bundles (default -- one pinned download) or the official CDN, file by file. This is
-# the SEED of the agent's policy field `hotpatchSource`; once the admin picks a source in the
-# launcher's hotpatch card, that stored choice wins and this value is no longer consulted.
+# archive.org bundles (default -- one pinned download) or, as `cdn`, file by file from the sources
+# each version's manifest names. This is the SEED of the agent's policy field `hotpatchSource`; once
+# the admin picks a source in the launcher's hotpatch card, that stored choice wins and this value is
+# no longer consulted.
 HPSRC="${GIO_HOTPATCH_SOURCE:-archive}"
 while :; do
   HPSRC=$(ask "Hotpatch mirror source (archive|cdn)" "$HPSRC")
@@ -587,7 +927,7 @@ while :; do
     echo "GIO_HOTPATCH_SOURCE must be 'archive' or 'cdn' -- fix it in $CONFIG (or the environment) and run this again."
     exit 1
   fi
-  echo "  type 'archive' (archive.org bundles) or 'cdn' (the official CDN, file by file)"
+  echo "  type 'archive' (the archive.org bundles) or 'cdn' (file by file from the sources each version's manifest names)"
 done
 # On an upgrade the existing token is the default (loaded from the config above): the launchers that
 # administer this server hold it -- entered on their start screen, or carried by an admin build -- and a
@@ -603,11 +943,110 @@ if [ "$UPGRADE" = 1 ] && [ -n "${OLDCFG[GIO_AGENT_TOKEN]:-}" ]; then
   else TOKEN_NOTE="CHANGES -- every launcher that uses the old token must be given the new one"; fi
 fi
 
+# ── the configuration this run writes ─────────────────────────────────────────────────────────
+# The stack folders' lines, in row order, and their keys for MANAGED. An implicit row is always written:
+# its empty value is what says "not on this box" where the agent would assume a folder. Any other row is
+# written once it has a folder, or when its key was handed to this run -- stored in the config or set in
+# the environment, even empty. A key nobody ever set stays out of the file, so a later run still takes a
+# stack folder that turns up. Each line carries its own newline: a row that is not written leaves no
+# blank line behind.
+DIR_LINES=""; DIR_KEYS=""
+for v in "${STACK_IDS[@]}"; do
+  key=$(dir_key "$v")
+  DIR_KEYS="$DIR_KEYS$key "
+  if [ "${STACK_IMPLICIT[$v]}" = 1 ] || [ -n "${DIR[$v]}" ] || [ -n "${!key+given}" ]; then
+    DIR_LINES="$DIR_LINES$key=${DIR[$v]}"$'\n'
+  fi
+done
+# Keys this script does not manage (GIO_TRUST_PROXY, GIO_PATHFINDING, the GIO_DIR_<nn> of a version the
+# rows above do not hold, anything an admin added by hand) survive an upgrade verbatim instead of
+# vanishing with the rewrite. GIO_KEEP_ENV, GIO_MUIP_KEY, GIO_MYSQL_ROOT_PASSWORD and GIO_FLASK_SECRET_KEY
+# ARE managed: render_config writes them, so listing them here keeps the stored value from being written
+# a second time behind the new one.
+MANAGED=" GIO_AGENT_TOKEN GIO_AGENT_LISTEN ${DIR_KEYS}GIO_KEEP_ENV GIO_MUIP_HOST GIO_AGENT_REGION GIO_MUIP_KEY GIO_MYSQL_ROOT_PASSWORD GIO_FLASK_SECRET_KEY GIO_ADVERTISED_IP GIO_ADVERTISED_HOST GIO_BIND_IP GIO_SERVER_NAME GIO_PAYLOAD_DIR GIO_STATE_PATH GIO_PROVISION_MODE GIO_TXT_FIXES_MODE GIO_HOTPATCH_SOURCE "
+UNMANAGED=()
+if [ "${#OLDCFG[@]}" -gt 0 ]; then
+  for k in "${!OLDCFG[@]}"; do
+    case "$MANAGED" in *" $k "*) ;; *) UNMANAGED+=("$k") ;; esac
+  done
+fi
+# The text of the config file: the managed keys, then every stored key that is not managed, as stored.
+# The one place that text comes from -- the install writes it, --plan prints it.
+render_config() {
+  local k
+  cat <<EOF
+GIO_AGENT_TOKEN=$TOKEN
+GIO_AGENT_LISTEN=$BIND
+${DIR_LINES}GIO_KEEP_ENV=$KEEPENV
+GIO_MUIP_HOST=$MUIP
+GIO_AGENT_REGION=$REGION
+GIO_MUIP_KEY=$MUIPKEY
+GIO_MYSQL_ROOT_PASSWORD=$MYSQLPW
+GIO_FLASK_SECRET_KEY=$FLASKKEY
+GIO_ADVERTISED_IP=$ADV
+GIO_ADVERTISED_HOST=$ADVHOST
+GIO_BIND_IP=$BINDIP
+GIO_SERVER_NAME=$SRVNAME
+GIO_PAYLOAD_DIR=/opt/gio-agent/payloads
+GIO_STATE_PATH=${GIO_STATE_PATH:-/var/lib/gio-agent/state.json}
+GIO_PROVISION_MODE=${GIO_PROVISION_MODE:-once}
+GIO_TXT_FIXES_MODE=${GIO_TXT_FIXES_MODE:-now}
+GIO_HOTPATCH_SOURCE=$HPSRC
+EOF
+  if [ "${#UNMANAGED[@]}" -gt 0 ]; then
+    for k in "${UNMANAGED[@]}"; do echo "$k=${OLDCFG[$k]}"; done
+  fi
+}
+# One line per stored key that is not managed. It names the KEY only: an unmanaged value may be a secret
+# (a proxy URL with its password), and this output reaches the launcher's install log.
+report_unmanaged() {
+  local k
+  if [ "${#UNMANAGED[@]}" -gt 0 ]; then
+    for k in "${UNMANAGED[@]}"; do echo "  kept    : $k (not managed by this script; value unchanged)"; done
+  fi
+}
+# The relocations the per-version choice named (RELOC_V / RELOC_D) as commands for this box, led by the line
+# $1. Never at a prompt: only once the new agent file is installed, or by --plan as what to run then.
+print_relocate_hints() {
+  local i d
+  if [ "${#RELOC_V[@]}" -eq 0 ]; then return 0; fi
+  echo "  folders : $1"
+  for i in "${!RELOC_V[@]}"; do
+    d="${RELOC_D[$i]}"
+    if [ -z "$d" ]; then d="<folder>   (add --mode move to take the server's files along)"; else d=$(printf '%q' "$d"); fi
+    echo "            $PY3 /opt/gio-agent/gio_agent.py --config /etc/gio-agent/config --relocate ${RELOC_V[$i]} $d"
+  done
+}
+# A relocation that ended while this ran -- from a launcher, or --relocate on this box -- changed a stack
+# folder in $CONFIG, and writing this run's configuration would undo it: compared key by key with the run's
+# first read (stored_dirs / dirs_seen), a difference stops the run. $1 = what the run has done by then.
+# Upgrades only.
+refuse_if_dirs_changed() {
+  local now seen i
+  local -a seen_lines=() now_lines=()
+  if [ "$UPGRADE" != 1 ]; then return 0; fi
+  now=$(stored_dirs); seen=$(dirs_seen)
+  if [ "$now" = "$seen" ]; then return 0; fi
+  echo "The stack folders in $CONFIG changed while this ran -- a relocation, from a launcher or with --relocate on this box?"
+  if [ "$now" = unreadable ]; then
+    echo "  the file cannot be read any more"
+  else
+    mapfile -t seen_lines <<< "$seen"; mapfile -t now_lines <<< "$now"
+    for i in "${!seen_lines[@]}"; do
+      if [ "${seen_lines[$i]}" != "${now_lines[$i]:-}" ]; then echo "  ${seen_lines[$i]}  ->  ${now_lines[$i]:-}"; fi
+    done
+  fi
+  echo "Writing this run's configuration would undo that. $1 Run this again: a folder the box uses is kept."
+  exit 1
+}
+
 echo
 echo "Summary:"
 if [ "$UPGRADE" = 1 ]; then echo "  mode    : UPGRADE (agent ${OLD_VERSION:-?} -> ${NEW_VERSION:-?})"; else echo "  mode    : fresh install (agent ${NEW_VERSION:-?})"; fi
-echo "  1.6 dir : $DIR16$( [ "$FETCH16" = y ] && echo " (to be downloaded from archive.org)")"
-echo "  2.8 dir : $DIR28$( [ "$FETCH28" = y ] && echo " (to be downloaded from archive.org)")"
+for v in "${STACK_IDS[@]}"; do
+  if [ -z "${DIR[$v]}" ]; then echo "  $v dir : not set up -- add it later on the launcher's Server page"
+  else echo "  $v dir : ${DIR[$v]}$( [ "${DIR_KEPT[$v]}" = 1 ] && echo " (kept)")$( [ "${FETCH[$v]}" = y ] && echo " (to be downloaded from archive.org)")"; fi
+done
 # Keep .env settings: none of the MUIP key / MySQL pw / Flask / bind IP values is applied to a stack, so
 # their lines promise neither a random value nor a detected address. A value the config stores is only
 # said to stay there -- without a fingerprint, since nothing runs on it.
@@ -616,7 +1055,7 @@ echo "  2.8 dir : $DIR28$( [ "$FETCH28" = y ] && echo " (to be downloaded from a
 # published passwords -- and with the option on nothing replaces either. Said once, for a run that has
 # both the option on and a version marked for download, and here: above "Continue?", while the admin
 # can still answer "n".
-if [ "$KEEPENV" = 1 ] && { [ "$FETCH16" = y ] || [ "$FETCH28" = y ]; }; then
+if [ "$KEEPENV" = 1 ] && [ -n "$FETCH_LIST" ]; then
   echo "  note    : the downloaded package comes with the vendor's .env (ports on 127.0.0.1, the published passwords) -- it is kept as it is; edit that .env before Prepare server to let other machines connect"
 fi
 echo "  MUIP    : $MUIP  (region=$REGION)"
@@ -637,9 +1076,32 @@ if [ "$KEEPENV" = 1 ]; then echo "  bind IP : the stack's own OUTER_IP is kept${
 else echo "  bind IP : ${BINDIP:-<auto-detected by the agent>}"; fi
 echo "  listen  : $BIND"
 echo "  name    : $SRVNAME"
-echo "  hotpatch: mirror filled from $([ "$HPSRC" = cdn ] && echo "the official CDN, file by file" || echo "the archive.org bundles")"
+echo "  hotpatch: mirror filled from $([ "$HPSRC" = cdn ] && echo "the sources each version's manifest names, file by file" || echo "the archive.org bundles")"
 echo "  python  : $PY3 ($(py_ver "$PY3"))"
 [ -n "$TOKEN_NOTE" ] && echo "  token   : $TOKEN_NOTE"
+# A relocation named above: a real run names its command once the new agent file is installed (the file in
+# place now may not know --relocate); --plan, as what to run once the upgrade is installed.
+if [ "$PLAN" = 1 ]; then print_relocate_hints "once this upgrade is installed, a server's folder changes through the launcher's Server page, or on this box:"; fi
+# --plan stops here, before the first thing a run changes: the configuration as it would be written --
+# between two marker lines, so the text can be cut out -- and one line per server package it would
+# download, with whether unpacking that package takes a 7z tool.
+if [ "$PLAN" = 1 ]; then
+  echo
+  echo "Plan (--plan): nothing was installed, written or restarted."
+  echo "---- /etc/gio-agent/config as this run would write it ----"
+  render_config
+  echo "---- end of /etc/gio-agent/config ----"
+  report_unmanaged
+  if [ -z "$FETCH_LIST" ]; then
+    echo "  download: no server package"
+  else
+    for v in $FETCH_LIST; do
+      if needs_extractor "$v"; then echo "  download: the $v server package into ${DIR[$v]} (takes a 7z extractor)"
+      else echo "  download: the $v server package into ${DIR[$v]} (comes as a .zip: no extractor needed)"; fi
+    done
+  fi
+  exit 0
+fi
 if [ "$ASSUME_YES" != 1 ]; then
   read -rp "Continue? [y/N]: " ok; [ "${ok:-N}" = "y" ] || { echo "cancelled"; exit 1; }
 fi
@@ -731,6 +1193,9 @@ if [ "$UPGRADE" = 1 ]; then
        fi ;;
   esac
 fi
+# The configuration was read at the start of this run, minutes ago (the prompts, the self-test): a stack folder
+# relocated meanwhile stops the run here, before anything of the agent is replaced.
+refuse_if_dirs_changed "Nothing of the agent was replaced."
 
 # Upgrade: keep ONE previous generation (agent, config, state, payloads) for a rollback --
 # docs/AGENT-UPGRADE.md has the commands. mode 0700: the config copy carries the token.
@@ -816,46 +1281,17 @@ if [ -d "$here/payloads" ]; then
   mv "$NEWPAY" /opt/gio-agent/payloads
   echo "  payloads: $(find /opt/gio-agent/payloads -type f | wc -l) files$(if [ "${CARRIED:-0}" -gt 0 ]; then echo " ($CARRIED kept from this box: navmesh bundle / archives)"; fi)"
 else
-  echo "  warning: payloads/ is missing -- the agent will not be able to apply the GAA progress"
+  echo "  warning: payloads/ is missing -- the agent will have no save, fixes or templates to prepare a server with"
 fi
 
+# ...and once more right before the write: a relocation that ended while the files were put in place.
+refuse_if_dirs_changed "The new agent files are in place, but the configuration was not written and the agent was not restarted."
 # Created 0600 BEFORE its first byte: on a fresh box the redirection below would create it 0644 (umask
 # 022) and leave it so until the chmod further down -- with the token and the stack secrets already in
 # it. An existing file is rewritten in place and keeps its mode.
 [ -e /etc/gio-agent/config ] || install -m 600 /dev/null /etc/gio-agent/config
-cat > /etc/gio-agent/config <<EOF
-GIO_AGENT_TOKEN=$TOKEN
-GIO_AGENT_LISTEN=$BIND
-GIO_DIR_16=$DIR16
-GIO_DIR_28=$DIR28
-GIO_KEEP_ENV=$KEEPENV
-GIO_MUIP_HOST=$MUIP
-GIO_AGENT_REGION=$REGION
-GIO_MUIP_KEY=$MUIPKEY
-GIO_MYSQL_ROOT_PASSWORD=$MYSQLPW
-GIO_FLASK_SECRET_KEY=$FLASKKEY
-GIO_ADVERTISED_IP=$ADV
-GIO_ADVERTISED_HOST=$ADVHOST
-GIO_BIND_IP=$BINDIP
-GIO_SERVER_NAME=$SRVNAME
-GIO_PAYLOAD_DIR=/opt/gio-agent/payloads
-GIO_STATE_PATH=${GIO_STATE_PATH:-/var/lib/gio-agent/state.json}
-GIO_PROVISION_MODE=${GIO_PROVISION_MODE:-once}
-GIO_TXT_FIXES_MODE=${GIO_TXT_FIXES_MODE:-now}
-GIO_HOTPATCH_SOURCE=$HPSRC
-EOF
-# Keys this script does not manage (GIO_TRUST_PROXY, GIO_PATHFINDING, anything an admin added by hand)
-# survive an upgrade verbatim instead of vanishing with the rewrite. GIO_KEEP_ENV, GIO_MUIP_KEY,
-# GIO_MYSQL_ROOT_PASSWORD and GIO_FLASK_SECRET_KEY ARE managed: the heredoc writes them, so listing them
-# here keeps the stored value from being appended a second time. The "kept" line names the KEY only: an
-# unmanaged value may be a secret (a proxy URL with its password), and this output reaches the launcher's
-# install log.
-MANAGED=" GIO_AGENT_TOKEN GIO_AGENT_LISTEN GIO_DIR_16 GIO_DIR_28 GIO_KEEP_ENV GIO_MUIP_HOST GIO_AGENT_REGION GIO_MUIP_KEY GIO_MYSQL_ROOT_PASSWORD GIO_FLASK_SECRET_KEY GIO_ADVERTISED_IP GIO_ADVERTISED_HOST GIO_BIND_IP GIO_SERVER_NAME GIO_PAYLOAD_DIR GIO_STATE_PATH GIO_PROVISION_MODE GIO_TXT_FIXES_MODE GIO_HOTPATCH_SOURCE "
-if [ "${#OLDCFG[@]}" -gt 0 ]; then
-  for k in "${!OLDCFG[@]}"; do
-    case "$MANAGED" in *" $k "*) ;; *) echo "$k=${OLDCFG[$k]}" >> /etc/gio-agent/config; echo "  kept    : $k (not managed by this script; value unchanged)" ;; esac
-  done
-fi
+render_config > /etc/gio-agent/config
+report_unmanaged
 chmod 600 /etc/gio-agent/config
 
 cat > /etc/systemd/system/gio-agent.service <<EOF
@@ -942,16 +1378,14 @@ else
   echo "Done. Test locally on the server:  curl -s $HEALTH_URL"
 fi
 echo "Agent token (enter it on the launcher's start screen, Server Admin mode): $TOKEN"
+print_relocate_hints "a server's folder changes only through a relocation -- the launcher's Server page, or on this box:"
 
 # ── the server package download(s) chosen above ────────────────────────────────────────────────
 # The RUNNING agent does the work (job `fetch`: resumable, verified, extracted, healed); this only
 # asks for it and streams the job log. Not when the launcher drives the install (GIO_RELIC_ENV=1: the
 # launcher starts and follows the jobs itself), and not when the service is not answering. The command
 # is printed first so a Ctrl+C (which stops the FOLLOWING, never the job) or a later session can rerun
-# it; GIO_FETCH_FOLLOW=n only prints it.
-FETCH_LIST=""
-[ "$FETCH16" = y ] && FETCH_LIST="1.6"
-[ "$FETCH28" = y ] && FETCH_LIST="${FETCH_LIST:+$FETCH_LIST }2.8"
+# it; GIO_FETCH_FOLLOW=n only prints it. FETCH_LIST = the versions marked at the prompts, in row order.
 if [ -n "$FETCH_LIST" ]; then
   FETCH_CMD="$PY3 /opt/gio-agent/gio_agent.py --config /etc/gio-agent/config --fetch $FETCH_LIST"
   echo

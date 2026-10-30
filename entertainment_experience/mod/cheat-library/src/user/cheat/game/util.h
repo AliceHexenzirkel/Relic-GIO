@@ -36,6 +36,7 @@ namespace cheat::game
 
 	bool IsInGame();
 
+#if RELIC_GAME_VERSION != 32   // the 3.2 data has neither these UI helpers nor their enums
 	void ShowInGameNormalMessage(std::string content, app::Color bgColor = app::Color(255,255,255,255), bool showBackground = false);
 	void ShowInGameInfoMessage(std::string content, bool discardIfDuplicated = false, app::UIShowPriority__Enum priority = app::UIShowPriority__Enum::Normal);
 	void ShowInGameGeneralDialog(std::string title, std::string content, app::GeneralDialogContext_GeneralDialogType__Enum dialogType = app::GeneralDialogContext_GeneralDialogType__Enum::DOUBLE_BUTTON, app::UIType__Enum uiType = app::UIType__Enum::Dialog, app::UIShowPriority__Enum mode = app::UIShowPriority__Enum::Normal, bool showNormalCloseBtn = true, bool isToggleDialog = false);
@@ -44,4 +45,5 @@ namespace cheat::game
     void ShowInGameInfoMessage(std::wstring content, bool discardIfDuplicated = false, app::UIShowPriority__Enum priority = app::UIShowPriority__Enum::Normal);
     void ShowInGameGeneralDialog(std::wstring title, std::wstring content, app::GeneralDialogContext_GeneralDialogType__Enum dialogType = app::GeneralDialogContext_GeneralDialogType__Enum::DOUBLE_BUTTON, app::UIType__Enum uiType = app::UIType__Enum::Dialog, app::UIShowPriority__Enum mode = app::UIShowPriority__Enum::Normal, bool showNormalCloseBtn = true, bool isToggleDialog = false);
     void ShowInGameSimpleGeneralDialog(std::wstring title, std::wstring content);
+#endif
 }

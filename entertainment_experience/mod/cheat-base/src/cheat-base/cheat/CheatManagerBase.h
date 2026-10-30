@@ -28,6 +28,12 @@ namespace cheat
 		// input lock and must stay on the render thread). A camera path started from the panel uses it so the
 		// menu is gone when the shot begins.
 		static void RequestHideMenu();
+#if RELIC_DEVTEST
+		// DevTest builds only (the dev-only test bed): open the menu at the next render, from any thread - the
+		// counterpart of RequestHideMenu, so a test can take a picture of the menu without a key press. Of a show
+		// and a hide that wait for the same render, the later one is served: each takes the other back.
+		static void RequestShowMenu();
+#endif
 
 		//static CheatManagerBase& GetInstance();
 		CheatManagerBase(CheatManagerBase const&) = delete;
@@ -59,6 +65,9 @@ namespace cheat
 		inline static bool s_IsMenuShowed = false;
 		inline static bool s_OverlayQuiet = false;   // Relic: see SetOverlayQuiet
 		inline static bool s_HideMenuWanted = false; // Relic: see RequestHideMenu
+#if RELIC_DEVTEST
+		inline static bool s_ShowMenuWanted = false; // see RequestShowMenu
+#endif
 		bool m_IsBlockingInput;
 		bool m_IsPrevCursorActive;
 		bool m_IsProfileConfigurationShowed;

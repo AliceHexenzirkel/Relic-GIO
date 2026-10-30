@@ -10,7 +10,7 @@
 #include <cheat/events.h>
 #include <cheat/game/EntityManager.h>
 #include <cheat-base/relic-guard.h>
-
+#if RELIC_GAME_VERSION <= 16 || RELIC_GAME_VERSION == 28   // the builds whose bindings and raw offsets are known (RenderDistance.h)
 namespace cheat::feature
 {
 	// Relic: "render distance" on this engine is not Unity's. QualitySettings.set_lodBias and
@@ -130,7 +130,7 @@ namespace cheat::feature
 
 #if RELIC_GAME_VERSION <= 16
 	static constexpr size_t kSkyGrassConfigOffset = 0x4C8;   // MoleMole.EnviroSky.mihoyoGrassConfig (1.6 dump.cs:1941294)
-#else
+#elif RELIC_GAME_VERSION == 28
 	static constexpr size_t kSkyGrassConfigOffset = 0x668;   // MoleMole.EnviroSky.mihoyoGrassConfig (2.8 dump.cs:1853745)
 #endif
 	static constexpr size_t kUnityCachedPtrOffset = 0x10;    // UnityEngine.Object.m_CachedPtr - the liveness idiom
@@ -191,7 +191,7 @@ namespace cheat::feature
 	                                                             // 960 m (7.5 sectors) makes the layer stop loading
 	                                                             // ALTOGETHER when the level is built with it -
 	                                                             // keep it small
-#else
+#elif RELIC_GAME_VERSION == 28
 	static constexpr float   kMaxGrassSectorRadius = 1.0f;       // 2.8: ONE sector = 128 m (1.6x stock). This build
 	                                                             // keeps at most 128 grass blocks on the GPU (lever B
 	                                                             // note): 256 m loads 45-60 sectors and runs them out,
@@ -236,7 +236,7 @@ namespace cheat::feature
 	static constexpr size_t kJobDescTypeOffset = 0x20;
 	static constexpr size_t kJobBaseBoxOffset = 0x38;
 	static constexpr size_t kJobEffBoxOffset = 0xE8;
-#else
+#elif RELIC_GAME_VERSION == 28
 	static constexpr size_t kMgrJobListOffsets[] = { 0xE0, 0x148, 0x150 };
 	static constexpr size_t kJobDescOffset = 0x20;
 	static constexpr size_t kJobDescTypeOffset = 0x8;
@@ -2203,3 +2203,4 @@ namespace cheat::feature
 		ShadowTick(wantAny && f_Shadows, EffectiveShadowMultiplier());
 	}
 }
+#endif

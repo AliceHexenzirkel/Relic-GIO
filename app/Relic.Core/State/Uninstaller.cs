@@ -89,6 +89,8 @@ public static class Uninstaller
         RemoveStartupEntry(r);
         RemoveFiddlerTraces(r, opt.RemoveFiddler);
         if (opt.RemoveGames) RemoveGames(r, state);
+        ReportServerFolders(r, state);
+        ReportSetupTools(r);
 
         // LAST: it holds the log we are writing into, and the profile slots checked above.
         RemoveAppData(r, profilesSafeToDelete);
@@ -131,22 +133,107 @@ public static class Uninstaller
     /// the pid file OR by its listening port, an autostarted one has no pid file — its HKCU Run value and
     /// its folder, entry by entry. Without this step RemoveAppData deletes the folder while pythonw still
     /// holds agent.log open (a half-deleted folder) and leaves an orphan Run value pointing at a script that
-    /// no longer exists. The firewall rule is the one thing that needs elevation, which the uninstaller
-    /// never asks for: it is reported as kept, with the netsh line. The docker stacks are never touched.</summary>
+    /// no longer exists. The firewall rules are the one thing that needs elevation, which the uninstaller
+    /// never asks for: every rule Relic added that is still there — the agent's port, and the game's ports of a
+    /// server other PCs join — is reported as kept, with its netsh line (<see cref="KeptFirewallLines"/>), those of
+    /// an agent removed earlier without its rules too. The docker stacks are never touched.</summary>
     private static void RemoveLocalAgent(CleanupReport r)
+    {
+        int port = ServerAddress.DefaultAgentPort;
+        IReadOnlyList<string>? keptRules = null;
+        try
+        {
+            if (LocalAgent.IsInstalled || Directory.Exists(LocalAgent.Root))
+            {
+                port = LocalAgent.ReadConfig()?.ListenPort ?? ServerAddress.DefaultAgentPort;
+                var rep = LocalAgent.Uninstall(port, removeFirewall: false, s => Log.Info("uninstall: " + s));
+                r.Removed.Add(L.T("core.uninstall.removed.localAgent"));
+                // A locked file (a hotpatch pack a client is being served) is a real leftover, like any other.
+                foreach (string left in rep.Leftovers) r.Warnings.Add(left);
+                keptRules = rep.KeptRules;
+            }
+        }
+        catch (Exception ex) { Log.Error("removing the local agent at uninstall (non-fatal)", ex); }
+
+        // Without an agent (none here, or one removed from the launcher without its rules) its config is gone with it:
+        // the rules looked for are those of the agent's default port and the game's two ports.
+        try
+        {
+            foreach (string line in KeptFirewallLines(port, keptRules ?? LocalAgent.FirewallRulesPresent(port)))
+                r.Kept.Add(line);
+        }
+        catch (Exception ex) { Log.Error("checking the firewall rules at uninstall (non-fatal)", ex); }
+    }
+
+    /// <summary>The report's lines for the firewall rules an uninstall leaves (<paramref name="keptRules"/>, by name, each
+    /// once): the agent's own rule for <paramref name="port"/> in its own words, every other rule — the game ports' of a
+    /// server other PCs join — by its name, each with the netsh line that deletes it. Pure.</summary>
+    public static IReadOnlyList<string> KeptFirewallLines(int port, IEnumerable<string?>? keptRules)
+    {
+        var lines = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string agentRule = LocalAgent.FirewallRuleName(port);
+        foreach (string? rule in keptRules ?? Array.Empty<string?>())
+        {
+            string name = (rule ?? "").Trim();
+            if (name.Length == 0 || !seen.Add(name)) continue;
+            lines.Add(string.Equals(name, agentRule, StringComparison.OrdinalIgnoreCase)
+                ? L.T("core.uninstall.kept.firewallRule", new { port })
+                : L.T("core.uninstall.kept.serverRule", new { rule = name }));
+        }
+        return lines;
+    }
+
+    /// <summary>The <c>servers</c> folder under the games' folder — where the server stacks set up on this PC live by
+    /// default — is never deleted, whatever is chosen for the games (a server's data is not the launcher's to remove):
+    /// named as kept when it is there.</summary>
+    private static void ReportServerFolders(CleanupReport r, RelicState state)
     {
         try
         {
-            if (!LocalAgent.IsInstalled && !Directory.Exists(LocalAgent.Root)) return;
-            int port = LocalAgent.ReadConfig()?.ListenPort ?? ServerAddress.DefaultAgentPort;
-            var rep = LocalAgent.Uninstall(port, removeFirewall: false, s => Log.Info("uninstall: " + s));
-            r.Removed.Add(L.T("core.uninstall.removed.localAgent"));
-            // A locked file (a hotpatch pack a client is being served) is a real leftover, like any other.
-            foreach (string left in rep.Leftovers) r.Warnings.Add(left);
-            if (LocalAgent.FirewallRuleExists(port))
-                r.Kept.Add(L.T("core.uninstall.kept.firewallRule", new { port }));
+            var roots = new[]
+            {
+                state.Settings.InstallRoot,
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Relic Games"),
+            };
+            foreach (string dir in roots.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => Path.Combine(x, "servers"))
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+                if (Directory.Exists(dir)) r.Kept.Add(L.T("core.uninstall.kept.serverFolders", new { dir }));
         }
-        catch (Exception ex) { Log.Error("removing the local agent at uninstall (non-fatal)", ex); }
+        catch (Exception ex) { Log.Error("checking the server folders at uninstall (non-fatal)", ex); }
+    }
+
+    /// <summary>What a server set up on this PC (Quick Start) leaves with its user, and the uninstall never removes —
+    /// other programs of the user may rely on either: Docker Desktop, and the memory limit of WSL in
+    /// <c>%UserProfile%\.wslconfig</c>. Each is named as kept when it is there (<see cref="KeptSetupLines"/>), whoever put
+    /// it there.</summary>
+    private static void ReportSetupTools(CleanupReport r)
+    {
+        try
+        {
+            string? docker = Setup.MachineCheck.DockerInstall()?.Location;
+            foreach (string line in KeptSetupLines(docker, Setup.WslConfig.ReadCap(), Setup.WslConfig.FilePath))
+                r.Kept.Add(line);
+        }
+        catch (Exception ex) { Log.Error("checking Docker Desktop and WSL's memory limit at uninstall (non-fatal)", ex); }
+    }
+
+    /// <summary>The report's lines for what the uninstall leaves of a server set up on this PC: Docker Desktop installed
+    /// in <paramref name="dockerDir"/>, and the memory limit of <paramref name="wslCap"/> bytes the WSL configuration file
+    /// at <paramref name="wslPath"/> sets (its size in GB, one decimal at most) — each only when there (null or empty:
+    /// none). Pure.</summary>
+    public static IReadOnlyList<string> KeptSetupLines(string? dockerDir, long? wslCap, string? wslPath)
+    {
+        var lines = new List<string>();
+        if (!string.IsNullOrWhiteSpace(dockerDir))
+            lines.Add(L.T("core.uninstall.kept.docker", new { dir = dockerDir.Trim() }));
+        if (wslCap is long cap && cap > 0)
+            lines.Add(L.T("core.uninstall.kept.wslMemory", new
+            {
+                path = (wslPath ?? "").Trim(),
+                gb = (cap / (double)(1L << 30)).ToString("0.#", CultureInfo.InvariantCulture),
+            }));
+        return lines;
     }
 
     // ── step 2: the official client's account data must be back in place ──
@@ -241,9 +328,12 @@ public static class Uninstaller
     {
         // The RunOnce logon-recovery value (armed while a private profile is loaded) is normally gone
         // by now — RestoreLiveProfile's LoadProfile(live) removed it — but a value pointing at an exe
-        // that is about to be deleted must never survive an uninstall, whatever happened above.
+        // that is about to be deleted must never survive an uninstall, whatever happened above. The same
+        // for Quick Start's resume value, armed while a run is not ended (its plan goes with AppDataDir).
         try { Startup.DisarmLogonRecovery(); }
         catch (Exception ex) { Log.Error("deleting the logon-recovery entry (non-fatal)", ex); }
+        try { Startup.DisarmQuickStartResume(); }
+        catch (Exception ex) { Log.Error("deleting the Quick Start resume entry (non-fatal)", ex); }
         try
         {
             if (!Startup.IsEnabled()) return;

@@ -1,0 +1,19 @@
+{
+  "description": "The free camera through the DevTest feature: a pose set, a move to another, a path of three keys, then released -- each pose relative to where the character stands, a shot of each. The character is not carried: it stays where it is.",
+  "steps": [
+    {"label": "camera start", "op": "status", "expect": {"inGame": true, "pos": {"len": 3}, "camera.held": false}},
+    {"label": "camera set", "op": "camera", "set": {"pos": {"$offset": [0, 6, -12]}, "pitch": 20, "yaw": 0, "roll": 0, "fov": 60}},
+    {"label": "the camera is held", "op": "status", "expect": {"camera.held": true}},
+    {"label": "the pose that was set", "op": "shot", "overlay": false, "out": "camera-set"},
+    {"label": "camera move", "op": "camera", "timeout": 30,
+     "move": {"to": {"pos": {"$offset": [12, 9, -6], "from": "camera start.pos"}, "pitch": 30, "yaw": -60, "roll": 0, "fov": 50}, "seconds": 3, "ease": "inOut"}},
+    {"label": "the pose moved to", "op": "shot", "overlay": false, "out": "camera-moved"},
+    {"label": "camera path", "op": "camera", "timeout": 60, "path": {"loop": false, "keys": [
+      {"pos": {"$offset": [-10, 8, -10], "from": "camera start.pos"}, "pitch": 25, "yaw": 45, "roll": 0, "fov": 55, "seconds": 2},
+      {"pos": {"$offset": [10, 8, -10], "from": "camera start.pos"}, "pitch": 25, "yaw": -45, "roll": 0, "fov": 55, "seconds": 2},
+      {"pos": {"$offset": [0, 15, 0], "from": "camera start.pos"}, "pitch": 80, "yaw": 0, "roll": 0, "fov": 60, "seconds": 2}]}},
+    {"label": "the end of the path", "op": "shot", "overlay": false, "out": "camera-path"},
+    {"label": "camera release", "op": "camera", "release": true},
+    {"label": "the camera is the game's again", "op": "status", "expect": {"camera.held": false}}
+  ]
+}

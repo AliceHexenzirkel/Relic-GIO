@@ -8,10 +8,13 @@
     Get-PeImports <file>                           # names of the DLLs the file imports
     Test-VcRuntimeDllName <name>                   # is this the name of a Visual C++ runtime DLL?
     Get-VcRuntimeImports <file>                    # of the file's imports, the Visual C++ runtime DLLs
+    Test-PayloadPeEntry <entry>                    # is this payload\manifest.json entry an .exe / .dll of the payload?
     Get-PayloadVcRuntimeProblems <dir> <entries>   # payload\manifest.json entries that import one
+    Test-DevBuildMarker <file>                     # does this file carry the mark of a DevTest build?
 
   build\make_release_bundles.py runs on Linux too and carries the same name rule in Python
-  (VC_RUNTIME_RE): the two expressions change together.
+  (VC_RUNTIME_RE): the two expressions change together. The DevTest mark has its Python twin in
+  entertainment_experience\tools\payload_manifest.py: the two change together as well.
 
   Those DLLs are not a part of Windows. A file that imports one loads only where the Microsoft Visual C++
   redistributable is installed, which a freshly installed Windows does not have and Relic neither
@@ -80,16 +83,54 @@ function Get-VcRuntimeImports([string]$path) {
     @(Get-PeImports $path | Where-Object { Test-VcRuntimeDllName $_ })
 }
 
-# Of the manifest entries (objects with src and dst) whose destination is an .exe or a .dll, the ones
-# whose file under $payloadDir imports a Visual C++ runtime DLL: one "<src> imports <names>" line each.
+# Is the payload file of this manifest entry (an object with src and dst) an .exe or a .dll that Relic
+# places fresh in the game folder: its destination ends .exe or .dll, it is not a bytepatch (those ship
+# only the changed bytes, not a PE file) and it does not carry sha256Before (those replace an existing
+# game file; the game's own plugins already depend on the Visual C++ redistributable).
+function Test-PayloadPeEntry($entry) {
+    "$($entry.dst)" -match '\.(exe|dll)$' -and "$($entry.kind)" -cne 'bytepatch' -and -not "$($entry.sha256Before)"
+}
+
+# Of the manifest entries whose payload file is an .exe or a .dll (Test-PayloadPeEntry), the ones whose
+# file under $payloadDir imports a Visual C++ runtime DLL: one "<src> imports <names>" line each.
 # Nothing comes back for a payload that loads on a PC without the redistributable.
 function Get-PayloadVcRuntimeProblems([string]$payloadDir, $entries) {
     $problems = @()
     foreach ($e in @($entries)) {
-        if ("$($e.dst)" -notmatch '\.(exe|dll)$') { continue }
+        if (-not (Test-PayloadPeEntry $e)) { continue }
         $file = Join-Path $payloadDir ("$($e.src)" -replace '/', '\')
         $crt = @(Get-VcRuntimeImports $file)
         if ($crt.Count -gt 0) { $problems += "$($e.src) imports $($crt -join ', ')" }
     }
     $problems
+}
+
+# The mark of a DevTest build - the dev-only test bed of the enhancements DLL (the DevTest|x64 configuration of
+# entertainment_experience\mod): the DLL carries it in a resource of its own and in the text of its status file,
+# and no release may carry it. It is put together from two parts so that no script carries it whole.
+function Get-DevBuildMarker { 'RELIC-DEV' + 'TEST-BUILD' }
+
+# Does this file carry the DevTest mark, as ASCII or as UTF-16LE? The file is read in pieces of 1 MiB, never
+# whole, and a mark that straddles two pieces is found too.
+function Test-DevBuildMarker([string]$path) {
+    $path = (Resolve-Path -LiteralPath $path -ErrorAction Stop).ProviderPath
+    $marker = Get-DevBuildMarker
+    $utf16 = -join ($marker.ToCharArray() | ForEach-Object { "$_`0" })
+    $keep = $utf16.Length - 1
+    # Latin-1 maps every byte to the char of the same value, so a byte search becomes an ordinal string search.
+    $latin1 = [Text.Encoding]::GetEncoding(28591)
+    $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        $buffer = New-Object byte[] (1MB)
+        $tail = ''
+        while (($n = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $text = $tail + $latin1.GetString($buffer, 0, $n)
+            if ($text.IndexOf($marker, [StringComparison]::Ordinal) -ge 0 -or
+                $text.IndexOf($utf16, [StringComparison]::Ordinal) -ge 0) { return $true }
+            $tail = if ($text.Length -gt $keep) { $text.Substring($text.Length - $keep) } else { $text }
+        }
+        return $false
+    } finally {
+        $stream.Dispose()
+    }
 }

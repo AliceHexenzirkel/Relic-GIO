@@ -286,7 +286,7 @@ public sealed class MainForm : Form
         if (_reallyExit) return;                       // tray "Exit completely"
         if (e.CloseReason == CloseReason.WindowsShutDown)
         {
-            _tray?.Dispose();                          // let Windows take us down
+            DisposeTray();                             // let Windows take us down
             return;
         }
         // Any other close (web X, Alt+F4, taskbar/Task Manager close) → keep running in the tray.
@@ -300,6 +300,9 @@ public sealed class MainForm : Form
         ShowInTaskbar = false;
         IsHiddenToTray = true;
         PostJson(new { @event = "window.visibility", data = new { hidden = true } });
+        // A "Find it on this PC" search walks the disks for a page nobody sees now: it stops (the page hears it from the
+        // search's own end, findgames.done).
+        _backend?.StopGameSearch("the window went to the tray");
         if (!_trayHintShown)
         {
             _trayHintShown = true;
@@ -351,7 +354,7 @@ public sealed class MainForm : Form
         _exiting = true;
         if (!ConfirmExitDuringSession()) { _exiting = false; return; }
         _reallyExit = true;
-        _tray?.Dispose();
+        DisposeTray();
         Close();
         Application.Exit();
     }
@@ -396,7 +399,7 @@ public sealed class MainForm : Form
             // running that on the UI thread would leave a process with no tray icon, no window and no
             // repaints — Windows paints it "not responding" and the user sees a launcher that hung
             // on exit. The tray still goes first so a second click cannot start a second pass.
-            _tray?.Dispose();
+            DisposeTray();
             Cursor.Current = Cursors.WaitCursor;
             var pass = Task.Run(() =>
             {
@@ -430,21 +433,69 @@ public sealed class MainForm : Form
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(L.T("shell.tray.exit"), null, (_, _) => ReallyExit());
 
-        // The shell draws NotifyIcon at the small-icon size (16 px at 100%, 20 at 125%); this ctor
-        // picks that frame out of the multi-resolution .ico instead of squashing the 32 px one,
-        // which is the whole reason the small frames are drawn by hand in build/make_icon.py.
-        Icon trayIcon = AppIcon;
-        try { trayIcon = new Icon(AppIcon, SystemInformation.SmallIconSize); }
-        catch (Exception ex) { Log.Error("tray icon resize (non-fatal)", ex); }
-
         _tray = new NotifyIcon
         {
-            Icon = trayIcon,
+            Icon = TrayIcon(),
             Text = "Relic",
             Visible = true,
             ContextMenuStrip = menu,
         };
         _tray.DoubleClick += (_, _) => ShowFromTray();
+    }
+
+    /// <summary>The brand icon at the size the notification area draws it — this window's tray icon, and the one of the
+    /// play process a desktop shortcut starts while the launcher runs (Program.RunPlay). The shell draws NotifyIcon at
+    /// the small-icon size (16 px at 100%, 20 at 125%); this ctor picks that frame out of the multi-resolution .ico
+    /// instead of squashing the 32 px one, which is the whole reason the small frames are drawn by hand in
+    /// build/make_icon.py.</summary>
+    internal static Icon TrayIcon()
+    {
+        try { return new Icon(AppIcon, SystemInformation.SmallIconSize); }
+        catch (Exception ex)
+        {
+            Log.Error("tray icon resize (non-fatal)", ex);
+            return AppIcon;
+        }
+    }
+
+    /// <summary>The balloon icon of a session notice (<see cref="SessionNotice"/>): a warning for a restore that waits for
+    /// a client to close, and for a session whose game was never seen (a launch that failed), else information.</summary>
+    internal static ToolTipIcon NoticeIcon(SessionNotice notice) =>
+        notice.Kind is SessionNotice.KindDeferredOwn or SessionNotice.KindDeferredForeign || notice.Appeared == false
+            ? ToolTipIcon.Warning
+            : ToolTipIcon.Info;
+
+    /// <summary>The tray icon goes (Exit completely, a Windows shutdown): disposed and forgotten, so a notice that arrives
+    /// afterwards — the recovery loop runs until the exit's own pass — finds no icon to show a balloon on.</summary>
+    private void DisposeTray()
+    {
+        var tray = _tray;
+        _tray = null;
+        tray?.Dispose();
+    }
+
+    /// <summary>A notice of <see cref="Backend.Notice"/> — the game has closed, what the session end did, the official
+    /// profile back after a deferred restore. Raised on a worker thread (the session's, just before its settle window
+    /// starts; the recovery loop's): handed to this window's thread and never waited for — a blocking handler would only
+    /// delay the window's start.</summary>
+    private void OnSessionNotice(SessionNotice notice)
+    {
+        try
+        {
+            if (IsHandleCreated && !IsDisposed) BeginInvoke(() => ShowNoticeBalloon(notice));
+        }
+        catch (Exception ex) { Log.Error($"the {notice.Kind} notice could not reach the tray (non-fatal)", ex); }
+    }
+
+    /// <summary>The balloon of a notice, only while nobody sees the page — the window in the tray (a desktop shortcut's
+    /// session, a window closed during the game) or minimized; the page says it otherwise. Nothing once the tray icon is
+    /// gone.</summary>
+    private void ShowNoticeBalloon(SessionNotice notice)
+    {
+        if (_tray is not { } tray || string.IsNullOrWhiteSpace(notice.Text)) return;
+        if (!IsHiddenToTray && WindowState != FormWindowState.Minimized) return;
+        try { tray.ShowBalloonTip(5000, "Relic", notice.Text, NoticeIcon(notice)); }
+        catch (Exception ex) { Log.Error($"the {notice.Kind} notice could not be shown in the tray (non-fatal)", ex); }
     }
 
     /// <summary>The brand icon, read from the exe's own resource first, then the loose file, then
@@ -500,6 +551,20 @@ public sealed class MainForm : Form
         splash.Show();
         try
         {
+            // A version whose client is not known to start on this OS through Relic's launch path is
+            // asked about first, before the server is: the answer decides whether there is anything to
+            // check the server for. No = the same way out as a "no" to the server question below.
+            if (!PlayPreflight.ConfirmWindows11(splash, versionId, splash.SetStatusSafe))
+            {
+                Log.Info($"shortcut launch cancelled by user ({versionId})");
+                splash.Close();
+                ShowFromTray();
+                return;
+            }
+            // A file of the player's own in the place of one Relic ships, while the version's stored choice
+            // is "ask": asked next, before the server check — as the page asks it. Its answer goes into the
+            // launch; it never stops one.
+            string? ownFiles = await AskOwnFilesAsync(splash, versionId);
             // The server check runs under the splash, not before it: that way it may retry (see
             // PlayPreflight) without the shortcut looking dead, and on the happy path the user sees
             // no extra dialog. The continuation returns to the UI thread, so Confirm may raise the
@@ -528,7 +593,8 @@ public sealed class MainForm : Form
                 {
                     splash.CloseSafe();       // error, or a game that never appeared at all
                     if (ex is not null) ShowShortcutPlayError(ex);
-                });
+                },
+                ownFiles: ownFiles);
         }
         catch (Exception ex)
         {
@@ -537,6 +603,45 @@ public sealed class MainForm : Form
             splash.CloseSafe();
             ShowShortcutPlayError(ex);
         }
+    }
+
+    /// <summary>The question of <see cref="PlayPreflight.AskOwnFiles"/> for the shortcut launch run in this
+    /// process: asked only while the version's stored choice is "ask" and its game folder holds a file of the
+    /// player's own in the place of one Relic ships (looked for off this thread). "Don't ask again" is stored
+    /// through the Backend, which the page hears of. null = nothing asked — the stored choice applies; a
+    /// question that fails asks nothing.</summary>
+    private async Task<string?> AskOwnFilesAsync(PlaySplashForm splash, string versionId)
+    {
+        try
+        {
+            var (files, choice) = await _backend!.OwnFilesAsync(versionId);
+            if (choice != OwnFileChoices.Ask || files.Count == 0 || splash.IsDisposed) return null;
+            var answer = PlayPreflight.AskOwnFiles(splash, versionId, files, splash.SetStatusSafe);
+            if (answer.Remember)
+            {
+                // A store that fails costs the "don't ask again", never this launch's answer.
+                try { _backend.RememberOwnFilesChoice(versionId, answer.Choice); }
+                catch (Exception ex) { Log.Error("shortcut launch: storing the answer about the player's own game files", ex); }
+            }
+            return answer.Choice;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("shortcut launch: the question about the player's own game files", ex);
+            return null;
+        }
+    }
+
+    /// <summary>Thread-safe: another Relic process (the play process of a desktop shortcut started while
+    /// this launcher runs) stored a version's answer about the player's own game files in the state file —
+    /// the Backend reads it in (<see cref="Backend.ReloadOwnFiles"/>).</summary>
+    public void OwnFilesChangedCrossThread()
+    {
+        try
+        {
+            if (IsHandleCreated && !IsDisposed) BeginInvoke(() => _backend?.ReloadOwnFiles());
+        }
+        catch (Exception ex) { Log.Error("OwnFilesChangedCrossThread (non-fatal)", ex); }
     }
 
     /// <summary>The error of a shortcut launch, shown as a dialog: the launcher window is hidden in
@@ -602,6 +707,9 @@ public sealed class MainForm : Form
             // in this process, and a WebView2 that fails to start must not mean the game no longer
             // starts at all. Backend needs no browser — PostJson is a no-op while CoreWebView2 is null.
             _backend = new Backend(this);
+            // What a play session or the recovery loop tells the person, as a balloon while nobody sees the page —
+            // subscribed once, before the shortcut's session can raise a notice.
+            _backend.Notice += OnSessionNotice;
             if (_shortcutPlay is string shortcutVersion) StartShortcutPlay(shortcutVersion);
 
             string userData = Path.Combine(

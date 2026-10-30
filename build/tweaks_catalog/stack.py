@@ -5,6 +5,10 @@ script and json config under server/data). It is the generator's index AND its p
 through the list, never by listing a folder, and its bytes are used only when their md5 is the listed one.
 So a stray file is never seen, a missing or edited file stops the run, and the catalogue is a pure function
 of the vendor's data.
+
+A stack whose vendor ships no such list is read through the list of the vendor's data archive instead
+(make_tweaks_catalog.py --vendor-data: the same line form, derived from the extracted archive and pinned by
+its sha256): one proof per stack, never both.
 """
 import hashlib
 import json
@@ -67,34 +71,82 @@ class Table(object):
         return self._index[name]
 
 
+def own_lists(root):
+    """The folders of a stack that hold the vendor's md5 list, as stack-relative paths: server/data when it
+    holds one, else each folder one level deeper named like a nested data folder that does."""
+    root = root.replace("\\", "/").rstrip("/")
+    if os.path.isfile("%s/%s/%s" % (root, DATA_DIR, MD5_LIST)):
+        return [DATA_DIR]
+    try:
+        inside = sorted(os.listdir(root + "/" + DATA_DIR))
+    except OSError:
+        return []
+    return [DATA_DIR + "/" + n for n in inside
+            if _NESTED_DATA.search(n) and os.path.isfile("%s/%s/%s/%s" % (root, DATA_DIR, n, MD5_LIST))]
+
+
+def data_without_list(root):
+    """-> the data folder of a stack read through the vendor data's md5 list: server/data, flat. CatalogError
+    when the stack holds an md5 list of its own (that list alone proves its data) or has no such folder."""
+    root = root.replace("\\", "/").rstrip("/")
+    own = own_lists(root)
+    if own:
+        raise CatalogError("%s/%s: the stack has its own md5 list -- --vendor-data is for a stack whose vendor "
+                           "ships none: %s" % (own[0], MD5_LIST, root))
+    flat = root + "/" + DATA_DIR
+    if not os.path.isdir(flat):
+        raise CatalogError("%s: not found -- not a vendor stack folder: %s" % (DATA_DIR, root))
+    return flat
+
+
 class Stack(object):
-    def __init__(self, version, root):
+    """`vendor_list` = the md5 list of the vendor's data archive (its text) for a stack that has none of its
+    own, `proof` = what that list is; without them the stack's own list is read."""
+
+    def __init__(self, version, root, vendor_list=None, proof=None):
         self.version = version
         self.root = root.replace("\\", "/").rstrip("/")
+        self.vendor_list = vendor_list
         self.data = self._data_folder()
+        if proof is None:
+            proof = ("the vendor data's md5 list" if vendor_list is not None
+                     else "the stack's own md5 list (%s)" % self._own_list())
+        self.proof = proof
         self.from_backup = set()
         self._tables = {}
         self.listed = self._read_list()
 
     def _data_folder(self):
-        flat = self.root + "/" + DATA_DIR
-        if os.path.isfile(flat + "/" + MD5_LIST):
-            return flat
-        try:
-            nested = [n for n in sorted(os.listdir(flat))
-                      if _NESTED_DATA.search(n) and os.path.isfile("%s/%s/%s" % (flat, n, MD5_LIST))]
-        except OSError:
-            nested = []
-        if len(nested) != 1:
-            raise CatalogError("%s/%s: not found -- not a vendor stack folder: %s" % (DATA_DIR, MD5_LIST, self.root))
-        return flat + "/" + nested[0]
+        if self.vendor_list is not None:
+            return data_without_list(self.root)
+        own = own_lists(self.root)
+        if len(own) > 1:
+            raise CatalogError("%s: %d folders hold a %s (%s) -- not a vendor stack folder the generator can read: %s"
+                               % (DATA_DIR, len(own), MD5_LIST, ", ".join(own), self.root))
+        if not own:
+            raise CatalogError("%s/%s: not found -- not a vendor stack folder, or one whose vendor ships no md5 "
+                               "list (then name the vendor's data with --vendor-data <version>=<folder>): %s"
+                               % (DATA_DIR, MD5_LIST, self.root))
+        return self.root + "/" + own[0]
+
+    def _own_list(self):
+        """The stack-relative name of the md5 list the stack ships."""
+        return "%s/%s" % (self.data[len(self.root) + 1:], MD5_LIST)
 
     def _read_list(self):
+        if self.vendor_list is not None:
+            return self._parse_list(self.vendor_list, "the vendor data's md5 list")
+        where = self._own_list()
         try:
             with open(self.data + "/" + MD5_LIST, "rb") as f:
                 text = f.read().decode("utf-8")
         except (OSError, UnicodeDecodeError) as e:
-            raise CatalogError("%s/%s: cannot be read (%s)" % (DATA_DIR, MD5_LIST, e))
+            raise CatalogError("%s: cannot be read (%s)" % (where, e))
+        return self._parse_list(text, where)
+
+    @staticmethod
+    def _parse_list(text, where):
+        """{data-relative name: md5} of one md5 list; `where` names the list in an error."""
         listed = {}
         for n, line in enumerate(text.split("\n"), 1):
             line = line.rstrip("\r")
@@ -102,12 +154,12 @@ class Stack(object):
                 continue
             m = _LIST_LINE.match(line)
             if not m:
-                raise CatalogError("%s/%s:%d: not a '<md5>  ./<path>' line" % (DATA_DIR, MD5_LIST, n))
+                raise CatalogError("%s:%d: not a '<md5>  ./<path>' line" % (where, n))
             if m.group(2) in listed:
-                raise CatalogError("%s/%s:%d: %s is listed twice" % (DATA_DIR, MD5_LIST, n, m.group(2)))
+                raise CatalogError("%s:%d: %s is listed twice" % (where, n, m.group(2)))
             listed[m.group(2)] = m.group(1)
         if not listed:
-            raise CatalogError("%s/%s: lists no file" % (DATA_DIR, MD5_LIST))
+            raise CatalogError("%s: lists no file" % where)
         return listed
 
     # ---- names ----------------------------------------------------------------------------

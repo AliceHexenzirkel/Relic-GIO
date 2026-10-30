@@ -1,0 +1,30 @@
+{
+  "python": {
+    "version": "3.14.8",
+    "url": "https://www.python.org/ftp/python/3.14.8/python-3.14.8-embed-amd64.zip",
+    "size": 12601679,
+    "sha256": "a93abe456ab01bd96d7a085b3cdb6566b3063f4241360d114142fbdb07f0a310"
+  },
+  "sevenZip": {
+    "version": "26.04",
+    "url": "https://github.com/ip7z/7zip/releases/download/26.04/7zr.exe",
+    "size": 602624,
+    "sha256": "256feca8e274e5da655e2a284fabafd9f554365eb164862089dacd4e8276d282"
+  },
+  "docker": {
+    "url": "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe",
+    "signer": "Docker Inc",
+    "licenceUrl": "https://www.docker.com/legal/docker-subscription-service-agreement/",
+    "size": 650000000,
+    "diskBytes": 3221225472,
+    "minWin10Build": 19045,
+    "minWin11Build": 22631,
+    "minWsl": "2.1.5",
+    "minRamBytes": 8589934592
+  },
+  "publicIpServices": [
+    "https://api.ipify.org",
+    "https://ipv4.icanhazip.com",
+    "https://checkip.amazonaws.com"
+  ]
+}

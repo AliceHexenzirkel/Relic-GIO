@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# save_point.sh [1.6|2.8] [label]
+# save_point.sh [<version>] [label]
 #
-# Make a restore point of the game progress for the given version:
+# Make a restore point of the game progress for the given version -- <digits>.<digits>, 1.6 when none
+# is given: any version whose stack folder the agent's config names (GIO_DIR_<nn>) or that lies under
+# /home or /root as <version>_live. The point holds:
 #   - hk4e_db_user (mysqldump, gzip)  - the players' progress
 #   - redis/dump.rdb                  - session state
 #   - sdk/data/sdk.db                 - the login accounts
@@ -11,14 +13,16 @@
 # flushes its in-memory data on stop), then brought back the way it was.
 # Do NOT run it at the same time as a job started from the app (Start/Stop/Prepare).
 #
-# Restore: ./restore_point.sh 1.6            (the latest point)
-#          ./restore_point.sh 1.6 <folder>   (a specific point)
+# Restore: ./restore_point.sh <version>            (the latest point)
+#          ./restore_point.sh <version> <folder>   (a specific point)
 set -euo pipefail
 
 V="${1:-1.6}"
 LABEL="${2:-}"
-case "$V" in 1.6|2.8) ;; *) echo "Unknown version: $V (expected 1.6 or 2.8)"; exit 1;; esac
-# Stack path: the agent config first (GIO_DIR_16/28), then /home, then /root.
+# A version is <digits>.<digits>; whether this box has it is settled by the folder it resolves to.
+[[ "$V" =~ ^[0-9]+\.[0-9]+$ ]] || { echo "Not a version: $V (expected <digits>.<digits>, e.g. 1.6)"; exit 1; }
+# Stack path: the agent config first (GIO_DIR_<nn>, <nn> = the version without its dot), then /home,
+# then /root.
 D=""
 if [ -f /etc/gio-agent/config ]; then
   D="$(sed -n "s/^GIO_DIR_${V/./}=//p" /etc/gio-agent/config | head -1)"
@@ -73,9 +77,9 @@ if [ "$WAS_UP" = 1 ]; then
   echo "== Stopping the $V stack so everything is flushed to disk (may take a few minutes if someone played)..."
   dc down
 else
-  # the dump needs mysql, and its network conflicts with the other stack
+  # the dump needs mysql, and its network conflicts with any other stack
   if [ -n "$(docker compose ls -q 2>/dev/null | grep -v "^${PROJ}$" || true)" ]; then
-    echo "The $V stack is stopped and the other one is running -- start $V from the app first, then retry."
+    echo "The $V stack is stopped and another one is running -- start $V from the app first, then retry."
     exit 1
   fi
 fi

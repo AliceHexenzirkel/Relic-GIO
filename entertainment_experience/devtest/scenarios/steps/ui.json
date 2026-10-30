@@ -1,0 +1,22 @@
+{
+  "description": "The game's UI and the mod's overlay, switched for this session only: the page tree with its texts, the game UI hidden and shown, the FPS pane (on by default) switched off through the feature op and put back, the overlay quiet and loud, the menu closed.",
+  "steps": [
+    {"label": "the pages", "op": "ui.tree", "root": "/Canvas/Pages", "depth": 2, "activeOnly": false, "texts": true, "limit": 2000,
+     "expect": {"nodes": {"len": {"min": 1}}}},
+    {"label": "the texts of the active pages", "op": "ui.tree", "root": "/Canvas/Pages", "depth": 6, "activeOnly": true, "texts": true, "limit": 2000,
+     "expect": {"nodes": {"len": {"min": 1}}}},
+    {"label": "the game UI hidden", "op": "hud", "visible": false, "expect": {"now": false}},
+    {"label": "the world without the game UI", "op": "shot", "overlay": false, "out": "no-hud"},
+    {"label": "the game UI back", "op": "hud", "visible": true, "expect": {"now": true}},
+    {"label": "the overlay as it is", "op": "shot", "overlay": true, "out": "overlay"},
+    {"label": "the FPS pane off, for this session only", "op": "feature", "section": "General::FPS", "name": "FpsShow", "value": false,
+     "expect": {"new": false, "type": {"in": ["bool", "toggle"]}}},
+    {"label": "the overlay without the FPS pane", "op": "shot", "overlay": true, "out": "overlay-no-fps"},
+    {"label": "the switches put back", "op": "feature", "restore": true, "expect": {"restored": {"min": 1}}},
+    {"label": "the mod's panes quiet", "op": "overlay", "quiet": true, "expect": {"quiet": true}},
+    {"label": "the overlay while quiet", "op": "shot", "overlay": true, "out": "overlay-quiet"},
+    {"label": "the mod's panes back", "op": "overlay", "quiet": false, "expect": {"quiet": false}},
+    {"label": "the menu closed", "op": "overlay", "menu": "hide"},
+    {"label": "nothing left switched", "op": "status", "expect": {"hudHidden": false, "overlayQuiet": false}}
+  ]
+}

@@ -481,7 +481,7 @@ namespace renderer
 		ImGui_ImplDX12_CreateDeviceObjects();
 		ImGui::GetIO().ImeWindowHandle = window;
 
-		static const std::string imguiPath = (util::GetCurrentPath() / "imgui.ini").string();
+		static const std::string imguiPath = (util::GetCurrentPath() / RELIC_IMGUI_INI).string();
 		ImGui::GetIO().IniFilename = imguiPath.c_str();
 		io.SetPlatformImeDataFn = nullptr; // F**king bug take 4 hours of my life
 	}
@@ -494,7 +494,7 @@ namespace renderer
 		ImGui::CreateContext();
 		ImGuiIO& io = ImGui::GetIO(); (void)io;
 		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-		static const std::string imguiPath = (util::GetCurrentPath() / "imgui.ini").string();
+		static const std::string imguiPath = (util::GetCurrentPath() / RELIC_IMGUI_INI).string();
 		io.IniFilename = imguiPath.c_str();
 
 		LoadImGuiStyles();

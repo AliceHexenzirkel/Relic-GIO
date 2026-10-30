@@ -1,0 +1,18 @@
+{
+  "description": "Teleports decided in-process: a short direct hop and back, a map teleport through the nearest unlocked waypoint and back, the character invulnerable meanwhile -- switched back on the server even when a step before it stops the run. Every target is relative to where the character stood: no world coordinate is assumed.",
+  "steps": [
+    {"label": "teleport start", "op": "status", "expect": {"inGame": true, "uid": {"min": 1}, "pos": {"len": 3}}},
+    {"label": "invulnerable", "op": "gm", "msg": "wudi global avatar on", "onFail": "continue"},
+    {"label": "direct hop", "op": "teleport", "pos": {"$offset": [20, 2, 0]}, "mode": "direct", "arrive": 12, "timeout": 60,
+     "expect": {"via": "direct", "distance": {"max": 30}}},
+    {"label": "after the hop", "op": "shot", "overlay": false, "out": "hop", "expect": {"width": {"min": 640}}},
+    {"label": "back from the hop", "op": "teleport", "pos": {"$answer": "teleport start.pos"}, "mode": "direct", "arrive": 12, "timeout": 60},
+    {"label": "map teleport", "op": "teleport", "pos": {"$offset": [400, 0, 0], "from": "teleport start.pos"}, "mode": "map",
+     "arrive": 30, "timeout": 180, "expect": {"via": "map"}, "onFail": "continue"},
+    {"label": "the world after the map teleport", "op": "wait", "until": {"inGame": true}, "timeout": 180, "onFail": "continue"},
+    {"label": "after the map teleport", "op": "shot", "overlay": false, "out": "map", "onFail": "continue"},
+    {"label": "home", "op": "teleport", "pos": {"$answer": "teleport start.pos"}, "mode": "auto", "arrive": 30, "timeout": 180},
+    {"label": "home again", "op": "wait", "until": {"inGame": true}, "timeout": 180},
+    {"label": "vulnerable again", "op": "gm", "msg": "wudi global avatar off", "onFail": "continue", "always": true}
+  ]
+}

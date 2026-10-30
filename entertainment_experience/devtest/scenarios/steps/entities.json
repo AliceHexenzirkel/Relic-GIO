@@ -1,0 +1,11 @@
+{
+  "description": "What is around the character, read in-process: the current character and the team, the monsters and gadgets within 100 m, everything within 60 m (the character's own entity among it).",
+  "steps": [
+    {"label": "the character and the team", "op": "avatar"},
+    {"label": "the character in the status", "op": "status", "expect": {"inGame": true, "avatarConfigId": {"min": 10000000}}},
+    {"label": "monsters and gadgets within 100 m", "op": "entities", "radius": 100, "kinds": ["monster", "gadget"], "limit": 200,
+     "expect": {"entities": {"len": {"max": 200}}}},
+    {"label": "everything within 60 m", "op": "entities", "radius": 60, "kinds": ["monster", "gadget", "avatar", "npc"], "limit": 200,
+     "expect": {"entities": {"contains": [{"kind": "avatar"}]}}}
+  ]
+}

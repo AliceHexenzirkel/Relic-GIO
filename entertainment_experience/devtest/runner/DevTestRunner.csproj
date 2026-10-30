@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The dev-only headless runner of the DevTest bed (entertainment_experience/devtest/README.md). It is
+       never part of a release: not in Relic.slnx, never referenced by Relic.App, never published —
+       build/devtest_run.py builds it on demand (dotnet build <this file> -c Release). Its bin/ and obj/
+       fall under the repository's [Bb]in/ and [Oo]bj/ ignore rules. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Relic.DevTest</RootNamespace>
+    <AssemblyName>DevTestRunner</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <IsPublishable>false</IsPublishable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\app\Relic.Core\Relic.Core.csproj" />
+  </ItemGroup>
+
+</Project>

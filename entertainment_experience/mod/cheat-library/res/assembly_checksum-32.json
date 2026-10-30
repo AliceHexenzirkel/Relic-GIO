@@ -1,0 +1,19 @@
+{
+  "global": {
+    "game_version": "OSRELWin3.2.0",
+    "modules": {
+      "UnityPlayer.dll": {
+        "checksum": 10384420361751589648,
+        "timestamp": 0
+      },
+      "UserAssembly.dll": {
+        "checksum": 9646231639596094985,
+        "bytepatchSha256": "e896b16630f7b273193cf60ade75410b7c832ec32201d6a97ee4a1d5fea63db5",
+        "timestamp": 0,
+        "alsoAccepted": [
+          9561536464145511908
+        ]
+      }
+    }
+  }
+}

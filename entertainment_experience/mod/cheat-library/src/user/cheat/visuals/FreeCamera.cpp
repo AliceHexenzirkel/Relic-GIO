@@ -78,9 +78,9 @@ namespace cheat::feature
 	// whichever camera path runs that frame. Absolute position, like everything else kept across frames here.
 	FreeCameraPose  relicPathPose{};
 	bool            relicPathPoseValid = false;
-	// miHoYoCamera.CameraStateMgr._camera - the Camera the manager flushes into. 0x50 in both dumps (the class
-	// layout is identical on 1.6 and 2.8). Read once per enable, for a diagnostic only.
-	constexpr size_t RELIC_CAMSTATEMGR_CAMERA_OFFSET = 0x50;
+#if RELIC_GAME_VERSION <= 16 || RELIC_GAME_VERSION == 28   // miHoYoCamera.CameraStateMgr._camera: 0x50 in both dumps (one layout)
+	constexpr size_t RELIC_CAMSTATEMGR_CAMERA_OFFSET = 0x50;   // the Camera the manager flushes into, read once per enable for a diagnostic
+#endif   // no other build installs the FlushStateData hook that reads it (FreeCamera.h)
 
 	FreeCamera::FreeCamera() : Feature(),
 		NFP(f_Enabled, "Visuals::FreeCamera", "Free Camera", false),
@@ -121,11 +121,11 @@ namespace cheat::feature
 		// in OnGameUpdate, so it cannot be OnGameUpdate that notices OnGameUpdate has been silenced.
 		events::GameUpdateEvent += MY_METHOD_HANDLER(FreeCamera::OnCameraWatchdog);
 		events::MoveSyncEvent += MY_METHOD_HANDLER(FreeCamera::OnMoveSync);
-		// Relic: the postfix that drives the game's own camera (1.6 always, 2.8 behind f_DriveGameCamera). It
-		// is inert until relicCamDrive is set, so installing it on both versions costs nothing.
+		// Relic: the postfix that drives the game's own camera (1.6 always, 2.8 behind f_DriveGameCamera); inert until relicCamDrive is set.
+#if RELIC_GAME_VERSION <= 16 || RELIC_GAME_VERSION == 28   // the builds whose FlushStateData RVA is known (FreeCamera.h)
 		INSTALL_HOOK(app::miHoYoCamera_CameraStateMgr_FlushStateData, CameraStateMgr_FlushStateData_Hook);
+#endif
 	}
-
 	const FeatureGUIInfo& FreeCamera::GetGUIInfo() const
 	{
 		TRANSLATED_GROUP_INFO("Free Camera", "Visuals");
@@ -185,7 +185,7 @@ namespace cheat::feature
 						"Best combined with Make Character invisible and Block User Input. Turn No-Clip OFF:\n"
 						"it shares the same WASD keys and would drive the character out from under the camera."));
 
-#if RELIC_GAME_VERSION > 16
+#if RELIC_GAME_VERSION == 28   // where the hook exists and the clone is the default
 				// Relic: 1.6 always drives the game camera (its clone path kills the grass there); 2.8 gets the
 				// same method as an option. Default off = upstream's clone, the tested 2.8 behaviour.
 				ConfigWidget(_TR("Drive the Game Camera"), f_DriveGameCamera,
@@ -491,7 +491,7 @@ namespace cheat::feature
 		if (damageOverlay != nullptr && damageOverlay->fields._.m_CachedPtr == nullptr)
 			damageOverlay = nullptr;
 	}
-
+#if RELIC_GAME_VERSION <= 16 || RELIC_GAME_VERSION == 28   // the builds whose FlushStateData RVA and CameraStateMgr layout are known
 	// Relic: drive the game's OWN camera instead of a clone of it. The only path on 1.6; on 2.8 the
 	// "Drive the Game Camera" option (default off - upstream's clone stays the tested 2.8 default).
 	//
@@ -565,7 +565,7 @@ namespace cheat::feature
 		if (relicCamCamera != nullptr)
 			app::Camera_set_fieldOfView(relicCamCamera, relicCamFov, nullptr);
 	}
-
+#endif
 	// The counterpart of EnableFreeCam(): upstream's input handling, applied to the game's camera.
 	static void RelicDriveRealCam()
 	{
@@ -713,16 +713,17 @@ namespace cheat::feature
 		isEnabled = false;
 	}
 
-	// Which path this frame wants. 1.6 has no choice (see above); 2.8 reads the option.
+	// Which path this frame wants. 1.6 has no choice (see above); 2.8 reads the option; a build without the hook takes the clone.
 	static bool RelicUseRealCam()
 	{
 #if RELIC_GAME_VERSION <= 16
 		return true;
-#else
+#elif RELIC_GAME_VERSION == 28
 		return FreeCamera::GetInstance().f_DriveGameCamera;
+#else
+		return false;   // no FlushStateData hook on this build: always the clone
 #endif
 	}
-
 	// Stand down whichever path owns the camera. Exactly one of them does while isEnabled, and each release
 	// only unwinds what its own path set up (only the clone path ever deactivated the real camera).
 	// The pending camera-path pose is deliberately NOT dropped here: the "Drive the Game Camera" flip stands one
@@ -736,7 +737,6 @@ namespace cheat::feature
 		else
 			DisableFreeCam();
 	}
-
 	// Upstream's free camera: a clone of the game camera, the real one deactivated. Kept as the 2.8 default
 	// because it is the path that has been tested there.
 	static void RelicRunCloneCam()

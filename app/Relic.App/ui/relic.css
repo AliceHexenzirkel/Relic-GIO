@@ -128,7 +128,27 @@ body.theme-summer .login::before{
 .lg-mode.admin .t b{color:var(--gold2);}
 .lg-mode .t small{font-size:11.5px;font-weight:700;opacity:.72;}
 .lg-mode.admin .t small{color:#b9c1d2;opacity:1;}
-.lg-panel{position:absolute;left:calc(50% - 235px);top:200px;width:470px;max-height:494px;overflow-y:auto;
+/* Quick Start, the start screen's highlighted entry: centred between "Which Way?" and the two modes (whose lines
+   come down at x=272 and x=916, clear of it), the admin button's glass behind the accent's own border and a slow glow
+   of its own — both themes through the tokens. A run stopped half way reads "Continue Quick Start", with a quiet
+   "Discard it" under it. The entry animation is inline (once()) on the wrapper, which holds no transform; the glow is
+   phased by app.js (phaseOf), so a redraw does not restart it. */
+.lg-qs{position:absolute;left:calc(50% - 240px);top:274px;width:480px;display:flex;flex-direction:column;align-items:center;gap:6px;}
+.lg-qs > button[data-act="qsOpen"]{width:100%;display:flex;align-items:center;gap:13px;padding:11px 18px;border-radius:13px;text-align:left;cursor:pointer;
+  border:2px solid var(--gold);background:rgba(11,14,24,.58);backdrop-filter:blur(7px);color:#e9edf6;animation:rl-qsglow 6s ease-in-out infinite;}
+.lg-qs > button[data-act="qsOpen"]:hover{background:rgba(11,14,24,.74);border-color:var(--gold2);}
+.lg-qs .t{display:flex;flex-direction:column;gap:3px;min-width:0;}
+.lg-qs .t b{font-family:'Cinzel',serif;font-weight:700;font-size:15px;letter-spacing:1.8px;color:var(--gold2);}
+.lg-qs .t small{font-size:11.5px;font-weight:700;color:#c9d0de;}
+.lg-qs-discard{background:none;border:0;padding:0;color:var(--loginSub);font-size:11px;font-weight:800;text-decoration:underline;text-shadow:0 1px 6px rgba(0,0,0,.85);cursor:pointer;}
+.lg-qs-discard:hover{color:#fff;}
+@keyframes rl-qsglow{
+  0%,100%{box-shadow:0 14px 32px rgba(0,0,0,.38),0 0 10px color-mix(in srgb, var(--gold) 40%, transparent);}
+  50%{box-shadow:0 14px 32px rgba(0,0,0,.38),0 0 26px color-mix(in srgb, var(--gold2) 80%, transparent);}
+}
+/* ...and its link under each panel's main button. */
+.lg-link.lg-qs-link{display:block;margin:10px auto 0;}
+.lg-panel{position:absolute;left:calc(50% - 250px);top:200px;width:500px;max-height:500px;overflow-y:auto;
   background:linear-gradient(180deg,var(--panel),var(--cream));border:1px solid color-mix(in srgb, var(--goldD) 42%, transparent);border-radius:16px;
   padding:20px 22px 18px;box-shadow:0 28px 66px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.6);} /* entry animation: inline via once() in app.js */
 .lg-panel .corner{position:absolute;width:15px;height:15px;opacity:.6;pointer-events:none;}
@@ -149,9 +169,9 @@ body.theme-summer .login::before{
 .lg-chip{padding:6px 11px;border-radius:16px;background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);color:var(--ink2);font-size:11.5px;font-weight:800;}
 .lg-chip:hover{border-color:var(--gold);}
 .lg-chip.on{border:2px solid var(--gold);color:var(--ink);box-shadow:0 0 0 3px color-mix(in srgb, var(--gold) 15%, transparent);}
-.lg-row{display:flex;gap:8px;align-items:center;}
-.lg-row input.txt{flex:1;min-width:0;}
-.lg-test{flex:0 0 auto;padding:11px 14px;border-radius:10px;border:1px solid color-mix(in srgb, var(--goldD) 40%, transparent);background:rgba(255,255,255,.7);color:var(--ink2);font-weight:800;font-size:12px;}
+.lg-row{display:flex;gap:6px;align-items:center;}
+.lg-row input.txt{flex:1;min-width:0;padding-left:12px;padding-right:12px;}
+.lg-test{flex:0 0 auto;padding:11px;border-radius:10px;border:1px solid color-mix(in srgb, var(--goldD) 40%, transparent);background:rgba(255,255,255,.7);color:var(--ink2);font-weight:800;font-size:12px;}
 .lg-test:hover{border-color:var(--gold);color:var(--ink);}
 .lg-status{margin-top:8px;display:flex;align-items:center;gap:7px;color:var(--inkMut,#8a8163);font-size:11.5px;font-weight:700;line-height:1.45;}
 .lg-status .dot{flex:0 0 auto;}
@@ -178,6 +198,51 @@ body.theme-summer .login::before{
 .lg-update button{flex:0 0 auto;padding:6px 11px;border-radius:8px;border:1px solid var(--goldD);background:linear-gradient(180deg,var(--accHi),var(--gold));color:var(--btnInk);
   font-weight:800;font-size:11px;white-space:nowrap;}
 .lg-update button:disabled{border:1px dashed color-mix(in srgb, var(--goldD) 48%, transparent);background:rgba(60,65,82,.06);color:var(--muted);cursor:not-allowed;}
+/* Saved servers, on both tabs of the panel. Save beside Test opens one row for a name; the list under the
+   address has a head (its title, Delete all at its right) and a row per server — its name (the pick's button,
+   for the keyboard) and "in use" with Connect / Delete at its right, the address, the mode and "token saved"
+   under them, the whole row picking it. Two rows show and more scroll inside the list, the address hint steps
+   aside while the Save row is open, and the panel reaches 8px above the window's bottom (.lg-foot is not drawn
+   while a panel is open): so the Player tab's CTA stays in sight at the 1188x752 window with the quick-pick
+   chips, a Test result (on two lines too) and the Save row at once. Theme tokens for the accents; the fixed
+   green and red are .lg-status' own and read on both themes' light panel. */
+.lg-test:disabled{opacity:.5;cursor:not-allowed;}
+.lg-saving{margin-top:6px;display:flex;align-items:center;gap:7px;padding:3px 5px 3px 11px;border-radius:11px;
+  background:rgba(255,255,255,.55);border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);}
+.lg-sv-namelbl{flex:0 0 auto;color:var(--inkLbl);font-size:10.5px;font-weight:800;letter-spacing:.7px;}
+.lg-saving input.txt{flex:1;min-width:0;width:auto;padding:6px 10px;font-size:13px;}
+.lg-saving .lg-test{padding:6px 11px;}
+.lg-test.lg-sv-save{border-color:var(--goldD);background:linear-gradient(180deg,var(--accHi),var(--gold));color:var(--btnInk);}
+.lg-sv-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0 4px;}
+.lg-saved .lg-sv-head .lg-sv-title{text-transform:uppercase;margin:0;}
+.lg-sv-list{display:flex;flex-direction:column;gap:4px;max-height:103px;overflow-y:auto;}
+.lg-sv-row{flex:0 0 auto;display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;row-gap:1px;align-items:center;
+  padding:4px 6px 5px 11px;border-radius:10px;background:rgba(255,255,255,.62);border:1px solid color-mix(in srgb, var(--goldD) 26%, transparent);cursor:pointer;}
+.lg-sv-row:hover{border-color:var(--gold);background:rgba(255,255,255,.85);}
+.lg-sv-row.cur{border-color:color-mix(in srgb, var(--gold) 75%, transparent);box-shadow:inset 3px 0 0 var(--gold);}
+.lg-sv-name{display:flex;align-items:center;gap:8px;min-width:0;}
+.lg-sv-pick{min-width:0;display:block;padding:0;border:0;background:none;font:inherit;color:inherit;text-align:left;cursor:pointer;}
+.lg-sv-pick:focus-visible{outline:2px solid var(--gold);outline-offset:2px;border-radius:4px;}
+.lg-sv-name b{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink);font-size:12.5px;font-weight:800;}
+.lg-sv-cur{flex:0 0 auto;display:inline-flex;align-items:center;gap:5px;color:#3f7a42;font-size:10px;font-weight:800;letter-spacing:.3px;white-space:nowrap;}
+.lg-sv-cur::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--ok);}
+.lg-sv-acts{display:flex;gap:5px;}
+.lg-sv-acts button{padding:3px 9px;border-radius:8px;font-size:11px;font-weight:800;white-space:nowrap;}
+.lg-sv-go{border:1px solid var(--goldD);background:linear-gradient(180deg,var(--accHi),var(--gold));color:var(--btnInk);}
+.lg-sv-go:hover:not(:disabled){filter:brightness(1.06);}
+.lg-sv-del{border:1px solid color-mix(in srgb, var(--goldD) 32%, transparent);background:rgba(255,255,255,.7);color:var(--ink2);}
+.lg-sv-del:hover:not(:disabled){border-color:var(--bad);color:#a03a2e;}
+.lg-sv-acts button:disabled{opacity:.5;cursor:not-allowed;filter:none;}
+.lg-sv-meta{grid-column:1 / -1;display:flex;flex-wrap:wrap;align-items:center;gap:3px 8px;min-width:0;color:var(--muted);font-size:10.5px;font-weight:700;line-height:1.4;}
+.lg-sv-addr{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink2);font-size:11px;font-weight:500;}
+.lg-sv-mode{flex:0 0 auto;padding:0 7px;border-radius:8px;font-size:9.5px;font-weight:800;letter-spacing:.4px;line-height:15px;}
+.lg-sv-mode.player{background:rgba(60,65,82,.08);color:var(--ink2);}
+.lg-sv-mode.admin{background:color-mix(in srgb, var(--gold) 18%, transparent);color:var(--goldD);}
+.lg-sv-tok{flex:0 0 auto;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;}
+.lg-sv-tok svg{flex:0 0 auto;}
+.lg-sv-all{flex:0 0 auto;line-height:14px;background:none;border:0;padding:0;color:var(--muted);font-size:11px;font-weight:800;text-decoration:underline;cursor:pointer;}
+.lg-sv-all:hover:not(:disabled){color:#a03a2e;}
+.lg-sv-all:disabled{cursor:not-allowed;text-decoration:none;opacity:.6;}
 .lg-foot{position:absolute;left:50%;bottom:26px;transform:translateX(-50%);white-space:nowrap;}
 .pill{display:inline-flex;align-items:center;gap:8px;padding:7px 15px;border-radius:20px;background:rgba(11,14,24,.55);border:1px solid color-mix(in srgb, var(--gold) 22%, transparent);color:#c9cfdd;font-size:12px;font-weight:600;}
 .dot{width:8px;height:8px;border-radius:50%;}
@@ -221,7 +286,9 @@ h1.title{font-family:'Cinzel',serif;font-weight:700;font-size:26px;color:var(--i
 /* library */
 .hero{position:relative;height:294px;overflow:hidden;background:linear-gradient(120deg,#2b3350,#59496f 60%,#8a6f4e);background-size:cover;background-position:center 30%;}
 .hero::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,rgba(20,16,10,.82),rgba(20,16,10,.35) 46%,transparent 72%),linear-gradient(0deg,rgba(20,16,10,.6),transparent 55%);}
-body.theme-summer .hero{background-position:center 32%;}
+/* The gradients are what a version without a shipped picture shows: the page sets background-image
+   inline only for a picture the build has, and that inline value wins over these. */
+body.theme-summer .hero{background-image:linear-gradient(120deg,#0a3652,#12708f 58%,#e6cf9a);background-position:center 32%;}
 body.theme-summer .hero::after{background:linear-gradient(90deg,rgba(5,38,58,.82),rgba(5,38,58,.32) 46%,transparent 72%),linear-gradient(0deg,rgba(5,38,58,.62),transparent 55%);}
 .hero .inner{position:relative;z-index:2;height:100%;display:flex;flex-direction:column;justify-content:flex-end;padding:30px 34px;gap:12px;}
 .hero .kicker{color:var(--gold2);font-size:11px;font-weight:800;letter-spacing:3px;}
@@ -231,6 +298,7 @@ body.theme-summer .hero::after{background:linear-gradient(90deg,rgba(5,38,58,.82
 .vcard{position:relative;border-radius:14px;overflow:hidden;background:var(--panel);border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);box-shadow:0 8px 22px rgba(40,30,10,.1);}
 .vcard.sel{outline:2px solid var(--gold);outline-offset:-2px;box-shadow:0 0 0 3px color-mix(in srgb, var(--gold) 22%, transparent),inset 0 0 24px color-mix(in srgb, var(--gold) 14%, transparent);}
 .vcard .thumb{position:relative;height:118px;background:linear-gradient(120deg,#37507a,#6b5a86);background-size:cover;background-position:center;}
+body.theme-summer .vcard .thumb{background-image:linear-gradient(120deg,#0f4a6d,#22a7cc);}
 .vcard .thumb::after{content:"";position:absolute;inset:0;background:linear-gradient(0deg,rgba(20,16,10,.55),transparent 60%);}
 .vcard .thumb .vid{position:absolute;left:12px;bottom:9px;font-family:'Cinzel',serif;font-weight:700;font-size:22px;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,.6);}
 .vcard .thumb .st{position:absolute;top:9px;right:9px;display:flex;align-items:center;gap:5px;padding:4px 9px;border-radius:14px;background:rgba(11,14,24,.6);color:#eef1f7;font-size:10.5px;font-weight:700;}
@@ -247,6 +315,20 @@ body.theme-summer .hero::after{background:linear-gradient(90deg,rgba(5,38,58,.82
 .vcard .body .accline{color:var(--goldD);font-weight:800;margin-top:6px;display:flex;align-items:center;gap:5px;}
 .vcard .body .accline b{font-size:12px;color:var(--ink);}
 .addcard{min-height:236px;border-radius:14px;border:2px dashed color-mix(in srgb, var(--goldD) 42%, transparent);background:rgba(255,255,255,.28);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--muted);font-weight:800;font-size:13.5px;}
+/* The end of a play session (app.js sessionNote): .busy while it runs (the spinner), .ok what it did, .warn a restore
+   that waits for a client, .bad a client that never started; .sn-x puts a notice of the past away. */
+.sessnote{display:flex;align-items:center;gap:12px;margin:0 0 18px;padding:12px 14px;border-radius:12px;background:var(--panel);border:1px solid color-mix(in srgb, var(--goldD) 30%, transparent);}
+.sessnote.ok{background:color-mix(in srgb, var(--ok) 10%, var(--panel));border-color:color-mix(in srgb, var(--ok) 60%, transparent);}
+.sessnote.warn{background:#fbeede;border-color:#d9a35a;}
+.sessnote.bad{background:color-mix(in srgb, var(--bad) 9%, var(--panel));border-color:color-mix(in srgb, var(--bad) 55%, transparent);}
+.sessnote .sn-ic{flex:none;display:flex;align-items:center;justify-content:center;width:24px;color:var(--goldD);}
+.sessnote.ok .sn-ic{color:var(--ok);} .sessnote.warn .sn-ic{color:#c07b2a;} .sessnote.bad .sn-ic{color:var(--bad);}
+.sessnote .sn-ic .rl-spin{width:15px;height:15px;}
+.sessnote .sn-body{flex:1;min-width:0;}
+.sessnote .sn-body small{display:block;color:var(--goldD);font-size:10.5px;font-weight:800;letter-spacing:1.5px;}
+.sessnote .sn-body span{display:block;margin-top:1px;color:var(--ink);font-size:12.5px;font-weight:700;line-height:1.5;overflow-wrap:anywhere;}
+.sn-x{flex:none;width:26px;height:26px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--ink2);font-size:17px;font-weight:700;line-height:1;opacity:.7;}
+.sn-x:hover{opacity:1;background:rgba(60,65,82,.08);}
 
 /* wizard */
 .stepper{display:flex;align-items:center;margin-bottom:24px;}
@@ -265,6 +347,12 @@ body.theme-summer .hero::after{background:linear-gradient(90deg,rgba(5,38,58,.82
 .opt .h{display:flex;align-items:center;gap:10px;font-weight:800;font-size:13.5px;color:var(--ink);}
 .opt p{color:var(--muted);font-size:11.5px;font-weight:600;margin:8px 0 0;}
 .opt.center{text-align:center;}
+/* A choice card drawn as a <button>, so the keyboard reaches it, looks as one drawn as a <div> does; so does a way
+   back of the step bar drawn as one. */
+button.opt{display:block;width:100%;margin:0;font:inherit;color:inherit;text-align:left;}
+button.opt:focus-visible{outline:2px solid var(--gold);outline-offset:2px;}
+.stepper button{margin:0;padding:0;border:0;background:none;font:inherit;color:inherit;}
+.stepper button:focus-visible{outline:2px solid var(--gold);outline-offset:3px;border-radius:8px;}
 .opt .vbig{font-family:'Cinzel',serif;font-weight:800;font-size:28px;color:var(--ink);}
 label.fld{display:block;color:var(--inkLbl);font-size:11.5px;font-weight:800;letter-spacing:.5px;margin:14px 0 7px;}
 input.txt{width:100%;padding:12px 14px;border-radius:10px;border:1px solid color-mix(in srgb, var(--goldD) 40%, transparent);background:#fff;color:var(--ink);font-size:14px;font-weight:700;}
@@ -285,6 +373,64 @@ input.txt.mono{font-family:'JetBrains Mono',monospace;font-weight:500;font-size:
 .summary .k{color:var(--inkLbl);font-size:11px;font-weight:800;letter-spacing:.5px;margin-bottom:8px;}
 .summary .g{display:grid;grid-template-columns:1fr 1fr;gap:7px 18px;font-size:12px;font-weight:700;color:var(--ink2);}
 .summary .g b{color:var(--ink);}
+/* ── the wizard's local folder (app.js localSourceHtml) ──
+   .impv = the check of what the field names: .impv-line its sentence (.ok ready to add, .bad refused, .busy being
+   checked), .impv-note a note of it (.warn one that asks for care), .impv-acts its buttons, .impv-why why START waits
+   (the summary's), .impv-empty the field's hint while it is empty. .fsec = "Find it on this PC": .fsec-head its title,
+   its words and its buttons (.fsec-ctl); .fprog where the search is, .fdisks one .fdisk per physical disk (its dot by
+   its state: .searching, .done, .stopped, .waiting), .fdone how it ended; .fhits the folders found, .fhit one of them
+   (.on the one in the field, .off one that cannot be added — folded away under .fothers' .flink), .fhit-tag a word in
+   place of its button; .fnone nothing found. .rl-spin = a small spinner beside a line that waits. */
+.impv{margin-top:10px;}
+.impv-line{display:flex;align-items:flex-start;gap:9px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,.55);border:1px solid color-mix(in srgb, var(--goldD) 26%, transparent);
+  color:var(--ink2);font-size:12.5px;font-weight:700;line-height:1.5;overflow-wrap:anywhere;}
+.impv-line.ok{background:color-mix(in srgb, var(--ok) 12%, #fff);border-color:color-mix(in srgb, var(--ok) 60%, transparent);color:var(--ink);}
+.impv-line.bad{background:color-mix(in srgb, var(--bad) 9%, #fff);border-color:color-mix(in srgb, var(--bad) 50%, transparent);color:#8a3a2a;}
+.impv-line.busy{color:var(--inkSoft);}
+.impv-line .rl-spin{margin-top:2px;}
+.impv-note{margin:6px 0 0 12px;color:var(--inkSoft);font-size:11.5px;font-weight:600;line-height:1.5;overflow-wrap:anywhere;}
+.impv-note.warn{color:#9a6a2a;font-weight:700;}
+.impv-acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;}
+.impv-acts .btn{padding:7px 12px;font-size:12px;}
+.impv-why{margin:8px 0 0;color:var(--muted);font-size:11.5px;font-weight:700;line-height:1.5;}
+.impv-empty{margin:0;color:var(--muted);font-size:12px;font-weight:600;line-height:1.5;}
+.rl-spin{display:inline-block;flex:none;width:13px;height:13px;border-radius:50%;border:2px solid color-mix(in srgb, var(--goldD) 28%, transparent);border-top-color:var(--goldD);animation:rl-spin .9s linear infinite;}
+.fsec{margin-top:18px;padding-top:16px;border-top:1px solid color-mix(in srgb, var(--goldD) 20%, transparent);}
+.fsec-head{display:flex;align-items:center;justify-content:space-between;gap:16px;}
+.fsec-head b{display:block;font-weight:800;font-size:13.5px;color:var(--ink);}
+.fsec-head small{display:block;margin-top:3px;color:var(--muted);font-size:11.5px;font-weight:600;line-height:1.5;}
+.fsec-ctl{display:flex;flex:none;gap:8px;}
+.fsec-ctl .btn{padding:8px 14px;font-size:12px;white-space:nowrap;}
+.fprog{display:flex;align-items:center;gap:9px;margin-top:12px;color:var(--ink2);font-size:12px;font-weight:700;line-height:1.5;}
+.fprog small{margin-left:auto;color:var(--muted);font-size:11.5px;font-weight:700;white-space:nowrap;}
+.fdisks{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+.fdisk{display:inline-flex;align-items:center;gap:7px;padding:5px 10px;border-radius:14px;background:rgba(255,255,255,.6);border:1px solid color-mix(in srgb, var(--goldD) 26%, transparent);
+  color:var(--ink2);font-size:11.5px;font-weight:700;}
+.fdisk i{flex:none;width:7px;height:7px;border-radius:50%;border:1.5px solid color-mix(in srgb, var(--goldD) 50%, transparent);}
+.fdisk.searching i{border-color:var(--gold);background:var(--gold);animation:rl-pulse 1.4s ease-in-out infinite;}
+.fdisk.done i{border-color:var(--ok);background:var(--ok);}
+.fdisk.stopped i{border-color:var(--warn);background:var(--warn);}
+.fdisk b{font-family:'JetBrains Mono',monospace;font-weight:600;color:var(--ink);}
+.fdisk em{font-style:normal;padding:0 6px;border-radius:8px;background:rgba(60,65,82,.08);color:var(--ink2);font-size:10px;font-weight:800;letter-spacing:.3px;}
+.fdisk small{color:var(--muted);font-size:11px;font-weight:600;}
+.fdone{margin-top:12px;color:var(--ink2);font-size:12px;font-weight:700;line-height:1.5;}
+.fdone.bad{color:var(--bad);}
+.fnone{margin:10px 0 0;color:var(--inkSoft);font-size:12px;font-weight:600;line-height:1.5;}
+.fhits{display:flex;flex-direction:column;gap:6px;margin-top:10px;}
+.fhit{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 26%, transparent);}
+.fhit.on{border-color:var(--gold);box-shadow:inset 0 0 0 1px var(--gold);}
+.fhit.off{background:rgba(255,255,255,.45);opacity:.62;}
+.fhit-main{flex:1;min-width:0;}
+.fhit-main b{display:block;font-size:12.5px;font-weight:600;color:var(--ink);overflow-wrap:anywhere;}
+.fhit-main small{display:block;margin-top:2px;color:var(--muted);font-size:11.5px;font-weight:600;line-height:1.45;overflow-wrap:anywhere;}
+.fhit-main small.warn{color:#9a6a2a;font-weight:700;}
+.fhit-act{flex:none;}
+.fhit-act .btn{padding:7px 12px;font-size:12px;white-space:nowrap;}
+.fhit-tag{display:inline-block;padding:4px 10px;border-radius:12px;background:rgba(60,65,82,.07);color:var(--ink2);font-size:11px;font-weight:800;white-space:nowrap;}
+.fhit-tag.on{background:color-mix(in srgb, var(--gold) 16%, transparent);color:var(--goldD);}
+.fothers{margin-top:8px;}
+.flink{padding:4px 0;border:0;background:none;color:var(--inkSoft);font-size:12px;font-weight:800;text-decoration:underline;text-underline-offset:3px;}
+.flink:hover{color:var(--ink);}
 
 /* overlay */
 .overlay{position:absolute;inset:0;z-index:20;background:rgba(20,16,10,.5);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:34px;}
@@ -546,7 +692,202 @@ select.txt{width:100%;padding:12px 14px;border-radius:10px;border:1px solid colo
 .acfg .txt:disabled{opacity:.6;cursor:not-allowed;background:rgba(255,255,255,.55);}
 .opt.dis{opacity:.5;cursor:default;}
 
-/* ── gameplay settings (app.js tweaks: the Gameplay page) ──
+/* ── the Server Admin area (app.js adminPage: adminHeader, adminStrip, the tabs) ──
+   .admhead = the area's title, the agent it administers and the one Check; .admtabs = the tab bar, the start screen's
+   segmented control (.lg-tabs) on the page's ground, one row of six that never wraps and is not sticky (the gameplay
+   settings' .twbar sticks to the top of .main); .admstrip = the status strip; .admbody = the tab's blocks. Overview:
+   .ovfacts = the agent's facts, .ovrow = one version (its id + badge | the lifecycle line, its facts and words | the next
+   step's buttons), .lcstep = a step of Folder → Package → Prepared → Running (.done filled, .cur a ring, .warn filled in
+   the warning colour, .unk dashed, plain = not yet). .line.pkg = a Server packages row whose button keeps its width;
+   .pwv = a read-only fact; .roaddr = an address shown, not edited; .twh = the heading of the gameplay settings. */
+.admhead{display:flex;align-items:center;flex-wrap:wrap;gap:6px 14px;}
+.admhost{min-width:0;color:var(--inkSoft);font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;overflow-wrap:anywhere;}
+.admhead .admcheck{margin-left:auto;padding:8px 16px;font-size:12px;}
+.lg-tabs.admtabs{margin-top:16px;}
+.lg-tabs.admtabs button{min-width:0;padding:9px 6px;font-size:12px;letter-spacing:.4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.admbody{margin-top:16px;}
+.ovfacts{margin:0 0 4px;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:11.5px;font-weight:600;overflow-wrap:anywhere;}
+.ovrow{display:grid;grid-template-columns:150px minmax(0,1fr) auto;align-items:center;gap:8px 16px;padding:14px 0;border-bottom:1px solid color-mix(in srgb, var(--goldD) 18%, transparent);}
+.ovrow:last-of-type{border-bottom:0;}
+.ovid{display:flex;flex-direction:column;align-items:flex-start;gap:7px;min-width:0;}
+.ovid b{font-family:'Cinzel',serif;font-weight:700;font-size:16px;color:var(--ink);}
+.ovmain{min-width:0;}
+.ovfact{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:8px;font-size:12px;font-weight:700;color:var(--ink2);}
+.ovfact small{margin-right:6px;color:var(--muted);font-size:10.5px;font-weight:800;}
+.ovnote{margin:6px 0 0;color:var(--inkSoft);font-size:12px;font-weight:600;line-height:1.5;}
+.ovnote.warn{color:var(--warn);font-weight:700;}
+.ovacts{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;max-width:290px;}
+.ovacts .btn{padding:9px 14px;font-size:12.5px;}
+.sect .hint.ovhint{margin:10px 0 0;}
+.lifeline{display:flex;flex-wrap:wrap;align-items:center;gap:4px 0;}
+.lcstep{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:11.5px;font-weight:800;}
+.lcstep + .lcstep::before{content:"\2192";margin:0 9px;color:color-mix(in srgb, var(--goldD) 50%, transparent);font-weight:700;}
+.lcstep i{flex:none;width:9px;height:9px;border-radius:50%;border:1.5px solid currentColor;}
+.lcstep.done{color:var(--ink2);} .lcstep.done i{background:var(--ok);border-color:var(--ok);}
+.lcstep.cur{color:var(--ink);} .lcstep.cur i{background:transparent;border:2.5px solid var(--goldD);}
+.lcstep.warn{color:var(--ink);} .lcstep.warn i{background:var(--warn);border-color:var(--warn);}
+.lcstep.unk i{border-style:dashed;}
+.line.pkg > .btn{flex:none;max-width:300px;}
+.pwv{color:var(--muted);font-size:12px;font-weight:800;text-align:right;}
+.pwv.on{color:var(--ok);}
+.roaddr{padding:12px 14px;border-radius:10px;border:1px dashed color-mix(in srgb, var(--goldD) 40%, transparent);background:rgba(255,255,255,.45);
+  color:var(--ink2);font-family:'JetBrains Mono',monospace;font-size:13.5px;font-weight:500;overflow-wrap:anywhere;}
+.twh{margin:0;font-family:'Cinzel',serif;font-weight:700;font-size:20px;color:var(--ink);}
+
+/* ── server versions: NOT SET UP, the disk a download needs, the install form's one choice per version ──
+   .ovnote.bad / .line small.bad = the agent's refusal of a download, or a disk with less free than the download needs
+   (its button is dead then); .line small.warn = why a version's folder cannot be set from here. .pkgacts = a Server
+   packages row's buttons (the download, Change folder…). The install form (app.js agentInstallOverlay): .stkrows = one
+   .stkrow per version — its title and its choice (.stkseg: Download now | I have it | Not now, or Keep | Download now,
+   the start screen's segmented control), the folder field or the kept folder (.stkdir), the .stkline hints and this
+   PC's look at the folder (.bad red, .warn the warning colour); .dsum = what the install sets up, above its button. */
+.ovnote.bad{color:var(--bad);font-weight:700;}
+.sect .line small.bad{color:var(--bad);font-weight:700;}
+.sect .line small.warn{color:var(--warn);font-weight:700;}
+.line.pkg .pkgacts{display:flex;flex:none;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:8px;max-width:380px;}
+.line.pkg .pkgacts .btn{flex:none;max-width:300px;}
+.stkrows{display:flex;flex-direction:column;gap:8px;margin-top:8px;}
+.stkrow{padding:12px 14px;background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 28%, transparent);border-radius:11px;}
+.stkhead{display:flex;align-items:center;justify-content:space-between;gap:12px;}
+.stkhead b{font-family:'Cinzel',serif;font-weight:700;font-size:14px;color:var(--ink);}
+.lg-tabs.stkseg{flex:none;margin-top:0;padding:3px;gap:3px;}
+.lg-tabs.stkseg button{flex:none;padding:7px 12px;font-size:11.5px;letter-spacing:.3px;white-space:nowrap;}
+.lg-tabs.stkseg button:disabled{opacity:.45;cursor:default;}
+.stkrow label.fld{margin:10px 0 6px;}
+.stkrow input.txt{min-width:0;padding:10px 12px;font-size:12.5px;}
+.stkrow .roaddr.stkdir{margin-top:10px;padding:9px 12px;font-size:12.5px;}
+.stkline{display:block;margin-top:6px;color:var(--muted);font-size:11.5px;font-weight:600;line-height:1.5;}
+.stkline.bad{color:var(--bad);font-weight:700;}
+.stkline.warn{color:var(--warn);font-weight:700;}
+.dsum{margin-top:16px;padding:12px 14px;border-radius:11px;background:color-mix(in srgb, var(--gold) 10%, transparent);border:1px solid color-mix(in srgb, var(--gold) 30%, transparent);
+  color:var(--ink2);font-size:12px;font-weight:700;line-height:1.55;}
+
+/* ── the Players tab's "Accounts on this server" (app.js acctsCard) ──
+   .acchead = the card's title with Refresh at its right; .accchips = the version chips (.accup = the dot of the version
+   that runs); .accfacts = the one fact line (a small label beside each value; .accbusy = a read in flight); .accfind =
+   the search field with its buttons, .accfound = what the search found. .acclist = the list: .acchd = the column
+   heads, .accrow = one account in the same columns — its presence (.accdot: .on online, .stale online by the server's
+   records though saved long ago, .off not online, .unk not known), the login with its Copy (.accname: .accnm, .acccopy;
+   a guest's .accguest) over its sdk uid and the origin badge (.accorig, a hint; .kind the plainer ones, .src the source
+   of a copy that waits for its target), the game uid, the nickname, the adventure rank, the last time in the game, and
+   .accend = its button. A row is .on while its actions or an editor are open under it, .src while a copy takes its
+   progress. .accacts = the actions under a row (.accwhy = why one is not offered); .accpanel = an editor (a starting
+   progress, a password; .accseg = its two-way choice); .accpick = the copy's question for its target, above the list;
+   .accmore = the line under a page that has more after it; .accnone = a list with no row. */
+.acchead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px;}
+.acchead h4{margin:0;}
+.acchead .btn{flex:none;padding:7px 14px;font-size:12px;}
+.accchips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;}
+.accup{display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:var(--ok);vertical-align:1px;}
+.accfacts{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 18px;margin-bottom:10px;font-size:12.5px;font-weight:700;color:var(--ink2);}
+.accfacts small{margin-right:6px;color:var(--muted);font-size:10.5px;font-weight:800;letter-spacing:.4px;}
+.accbusy{color:var(--muted);font-size:11.5px;font-weight:700;}
+.accfind{display:flex;align-items:center;gap:8px;margin:12px 0 0;}
+.accfind input.txt{flex:1;min-width:0;width:auto;padding:9px 12px;font-size:13px;}
+.accfind .btn{flex:none;padding:8px 14px;font-size:12px;}
+.accfound{margin:8px 0 0;color:var(--inkSoft);font-size:12px;font-weight:700;overflow-wrap:anywhere;}
+.acclist{margin-top:12px;}
+.acchd,.accrow{display:grid;grid-template-columns:10px minmax(0,1.7fr) 62px minmax(0,1.3fr) 38px minmax(0,1fr) 100px;align-items:center;gap:0 12px;}
+.acchd{padding:0 0 6px;border-bottom:1px solid color-mix(in srgb, var(--goldD) 26%, transparent);color:var(--inkLbl);font-size:10.5px;font-weight:800;letter-spacing:.5px;}
+.accrow{padding:8px 0;border-bottom:1px solid color-mix(in srgb, var(--goldD) 16%, transparent);font-size:12.5px;font-weight:700;color:var(--ink2);}
+.accrow > *{min-width:0;}
+.accrow.on{border-bottom-color:transparent;}
+.accrow.src{background:color-mix(in srgb, var(--gold) 9%, transparent);}
+.accrow .mono{font-size:12px;}
+.accdot{display:block;width:9px;height:9px;border-radius:50%;}
+.accdot.on{background:var(--ok);}
+.accdot.stale{background:var(--warn);}
+.accdot.off{border:1.5px solid color-mix(in srgb, var(--goldD) 50%, transparent);}
+.accdot.unk{border:1.5px dashed color-mix(in srgb, var(--goldD) 40%, transparent);}
+.accname{display:flex;flex-direction:column;gap:3px;}
+.accnm{display:flex;align-items:center;gap:8px;min-width:0;}
+.accnm b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:800;color:var(--ink);}
+.accnm .accguest{font-family:'Mulish',system-ui,'Segoe UI',sans-serif;font-style:italic;color:var(--inkSoft);}
+.acccopy{flex:none;padding:2px 8px;border-radius:7px;border:1px solid color-mix(in srgb, var(--goldD) 35%, transparent);background:rgba(255,255,255,.6);color:var(--ink2);font-size:10.5px;font-weight:800;}
+.acccopy:hover{border-color:var(--gold);color:var(--ink);}
+.accsub{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;}
+.accsub small{color:var(--muted);font-size:10.5px;font-weight:600;}
+.accorig{padding:1px 6px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:.5px;white-space:nowrap;cursor:default;
+  background:color-mix(in srgb, var(--gold) 16%, transparent);border:1px solid color-mix(in srgb, var(--gold) 40%, transparent);color:var(--goldD);}
+.accorig.kind{background:rgba(60,65,82,.07);border-color:rgba(60,65,82,.2);color:var(--ink2);}
+.accorig.src{background:#fbeede;border-color:#d9a35a;color:#9a6a2a;}
+.accnick{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink);}
+.acclast{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--inkSoft);font-size:12px;}
+.accdim{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-weight:600;}
+.accend{display:flex;justify-content:flex-end;}
+.accend .btn{padding:6px 12px;font-size:11.5px;white-space:nowrap;}
+.accacts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:2px 0 12px 22px;border-bottom:1px solid color-mix(in srgb, var(--goldD) 16%, transparent);}
+.accacts .btn{padding:7px 12px;font-size:11.5px;}
+.accwhy{flex-basis:100%;display:flex;flex-direction:column;gap:2px;}
+.accwhy small{color:var(--muted);font-size:11.5px;font-weight:600;line-height:1.45;}
+.accpanel{margin:2px 0 12px 22px;padding:14px 16px;border-radius:12px;background:rgba(255,255,255,.5);border:1px solid var(--gold);}
+.accpanel > b{display:block;font-size:13.5px;font-weight:800;color:var(--ink);overflow-wrap:anywhere;}
+.accpanel .hint{margin:6px 0 10px;}
+.accpanel .opt{padding:12px 14px;}
+.accpanel-note{margin-bottom:10px;}
+.accpanel-go{margin-top:12px;}
+.accpanel-go .btn{padding:8px 14px;font-size:12px;}
+.accpanel input.txt{max-width:340px;padding:10px 12px;font-size:13px;}
+.accpanel label.fld{margin:12px 0 6px;}
+.lg-tabs.accseg{display:inline-flex;margin-top:0;padding:3px;gap:3px;}
+.lg-tabs.accseg button{flex:none;padding:7px 12px;font-size:11.5px;letter-spacing:.3px;white-space:nowrap;}
+.accpw-sub{margin:10px 0 0;}
+.accpick{display:flex;align-items:flex-start;gap:14px;margin-top:12px;padding:14px 16px;border-radius:12px;background:color-mix(in srgb, var(--gold) 10%, transparent);border:1px solid color-mix(in srgb, var(--gold) 38%, transparent);}
+.accpick-say{flex:1;min-width:0;}
+.accpick-say b{display:block;font-size:13.5px;font-weight:800;color:var(--ink);overflow-wrap:anywhere;}
+.accpick-say p{margin:5px 0 0;color:var(--inkSoft);font-size:12px;font-weight:600;line-height:1.5;}
+.accpick label.fld{margin:12px 0 6px;}
+.accpick-new{display:flex;align-items:center;gap:8px;}
+.accpick-new input.txt{flex:0 1 260px;min-width:0;width:auto;padding:9px 12px;font-size:13px;}
+.accpick-new .btn,.accpick-x{flex:none;padding:8px 14px;font-size:12px;}
+.accmore{display:flex;align-items:center;justify-content:flex-end;gap:12px;margin-top:12px;color:var(--muted);font-size:11.5px;font-weight:700;}
+.accmore .btn{padding:7px 14px;font-size:12px;}
+.accnone{margin:14px 0 0;color:var(--muted);font-size:12.5px;font-weight:700;overflow-wrap:anywhere;}
+
+/* "Bring progress from another version" (app.js migrateCard, the Players tab; its chips are .accchips, its rows reuse the
+   account list's .accname, .accnick, .accdim). .migdir = the source folder's field, .migfold = the small line under the
+   source; .migopts = the two options; .miggo = a button with what it says beside it (.migsay, .migsum = the totals);
+   .migres = an answer: .mighd = the column heads, .migrow = one account (.migwhat: .migv = what happens to it, its dot in
+   the row's tone — .ok, .warn, .bad —; .migctl = its choice; .migmore = its details' button), .migdet = the details under
+   a row; .migstop = a note of the card. A chip or the folder is disabled while a check or a move of the card runs. */
+.accchips .lg-chip:disabled{opacity:.55;cursor:default;}
+.migdir:disabled{opacity:.6;cursor:default;}
+.migfold{display:block;margin-top:6px;color:var(--muted);font-size:11.5px;font-weight:600;line-height:1.45;}
+.migopts{margin-top:14px;}
+.migopts .row{gap:14px;padding:10px 14px;}
+.miggo{display:flex;align-items:center;gap:12px;margin-top:14px;}
+.miggo .btn{flex:none;padding:9px 16px;font-size:12.5px;}
+.migres .miggo{justify-content:space-between;}
+.migsay{margin:0;color:var(--inkSoft);font-size:12px;font-weight:700;line-height:1.45;}
+.migsum{color:var(--ink2);font-size:12.5px;font-weight:800;}
+.migres{margin-top:16px;padding-top:14px;border-top:1px solid color-mix(in srgb, var(--goldD) 26%, transparent);}
+.migstop{margin-top:10px;}
+.miglist{margin-top:10px;}
+.mighd,.migrow{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr) minmax(0,2.2fr);align-items:start;gap:0 12px;}
+.mighd{padding:0 0 6px;border-bottom:1px solid color-mix(in srgb, var(--goldD) 26%, transparent);color:var(--inkLbl);font-size:10.5px;font-weight:800;letter-spacing:.5px;}
+.migrow{padding:8px 0;border-bottom:1px solid color-mix(in srgb, var(--goldD) 16%, transparent);font-size:12.5px;font-weight:700;color:var(--ink2);}
+.migrow > *{min-width:0;}
+.migwhat{display:flex;flex-direction:column;align-items:flex-start;gap:6px;}
+.migv{line-height:1.4;overflow-wrap:anywhere;}
+.migv::before{content:"";display:inline-block;width:8px;height:8px;margin-right:7px;border-radius:50%;background:color-mix(in srgb, var(--goldD) 45%, transparent);vertical-align:1px;}
+.migv.ok{color:var(--ink);}
+.migv.ok::before{background:var(--ok);}
+.migv.warn::before{background:var(--warn);}
+.migv.bad{color:var(--bad);}
+.migv.bad::before{background:var(--bad);}
+.migctl{display:flex;align-items:center;flex-wrap:wrap;gap:8px;max-width:100%;}
+.migctl > span{color:var(--inkSoft);font-size:11.5px;font-weight:800;}
+.migctl select.txt{width:auto;max-width:100%;padding:7px 10px;font-size:12px;}
+.migctl select.txt.danger{border-color:var(--bad);color:var(--bad);}
+.migctl option{color:var(--ink);}
+.migctl option.danger{color:var(--bad);}
+.migctl input.txt{flex:0 1 200px;width:auto;min-width:0;padding:7px 10px;font-size:12.5px;}
+.migmore{padding:0;border:0;background:transparent;color:var(--goldD);font-size:11.5px;font-weight:800;}
+.migmore:hover{color:var(--ink);}
+.migdet{margin:0;padding:8px 0 10px 22px;border-bottom:1px solid color-mix(in srgb, var(--goldD) 16%, transparent);color:var(--inkSoft);font-size:12px;font-weight:600;line-height:1.5;}
+.migdet li{overflow-wrap:anywhere;}
+
+/* ── gameplay settings (app.js tweaks: the gameplay settings of the Game rules tab) ──
    .twpage is the page's root. .twbar = the action bar: a band as wide as .main (it bleeds through
    .pad's side padding) that sticks to the top of the scrolling page, so Apply is in reach from every
    card; it has the page's own ground, slightly see-through over what scrolls under it, and its text
@@ -556,7 +897,7 @@ select.txt{width:100%;padding:12px 14px;border-radius:10px;border:1px solid colo
    .twchips = the version chips in the header; .twdot = "edits not applied" on a chip (any chip may
    carry one). .twnotes = the state notes under the bar (.twnote = a note with a button at its right) —
    the box is always there, so that the page can refill it in place, and takes no room while it is
-   empty; .twlog = the job console under them.
+   empty.
    .twcard = a card (.sect) with .twhead = its title and .twmark, the pill that says the section holds
    settings (.new = not applied yet); the last setting row of a card has no rule under it, and .twfoot
    is the small line a card may end with. .twctl = the right half of a setting row: preset chips, then
@@ -580,13 +921,18 @@ select.txt{width:100%;padding:12px 14px;border-radius:10px;border:1px solid colo
 .twnotes:empty{display:none;}
 .twnotes>.note{margin:0!important;}
 .twnotes .hint{color:var(--inkSoft);font-size:12.5px;font-weight:600;}
-.twnote{display:flex;align-items:center;justify-content:space-between;gap:12px;}
-.twnote>span{min-width:0;overflow-wrap:anywhere;}
-.twnote .btn{flex:none;padding:7px 12px;font-size:11.5px;}
-.twlog{margin-bottom:16px;}
-.twlog .console{margin-top:0;}
-.twhead{display:flex;align-items:center;gap:10px;margin-bottom:12px;}
+.twnote,.notebtn{display:flex;align-items:center;justify-content:space-between;gap:12px;}
+.twnote>span,.notebtn>span{min-width:0;overflow-wrap:anywhere;}
+.twnote .btn,.notebtn .btn{flex:none;padding:7px 12px;font-size:11.5px;}
+.twhead{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px;}
 .twcard .twhead h4{margin:0;}
+/* A card's buttons that put its data files back at once (app.js twFileActs) sit at the right of its head and
+   wrap under the title when the card is narrow; .twfiles = what a card says of its data files, under its title
+   (twFilesNote), before the card's own controls. */
+.twhead-acts{margin-left:auto;display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;}
+.twhead-acts:empty{display:none;}
+.twhead-acts .btn{padding:7px 12px;font-size:11.5px;white-space:nowrap;}
+.twcard>.note.twfiles{margin:0 0 10px;overflow-wrap:anywhere;}
 .twmark{display:inline-block;padding:2px 8px;border-radius:10px;font-size:9.5px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;
   background:color-mix(in srgb, var(--gold) 16%, transparent);border:1px solid color-mix(in srgb, var(--gold) 40%, transparent);color:var(--goldD);}
 .twmark.new{background:#fbeede;border-color:#d9a35a;color:#9a6a2a;}
@@ -683,6 +1029,8 @@ button.twmon:hover{border-color:var(--gold);}
   background:color-mix(in srgb, var(--gold) 16%, transparent);border:1px solid color-mix(in srgb, var(--gold) 40%, transparent);color:var(--goldD);}
 .twtag.warn{background:#fbeede;border-color:#d9a35a;color:#9a6a2a;}
 .twtag.kind{background:rgba(60,65,82,.07);border-color:rgba(60,65,82,.2);color:var(--ink2);}
+/* .na = a setting of a domain's own that does not apply to it (its reward is kept as it was changed outside Relic). */
+.twtag.na{text-decoration:line-through;opacity:.55;}
 /* The Domain and the Quest card (app.js tweaksDomainsCard / tweaksQuestsCard). .twkind = a setting row
    with its small line beside the name, not under it (the five quest kinds). .twsub = the heading of
    a card's second part ("One domain", "One quest"), under the rule of the last setting row. .twfind =
@@ -697,9 +1045,11 @@ button.twmon:hover{border-color:var(--gold);}
    with its counter. .twits = a list of items in two columns; .twit = an item: sprite, name over the id
    line (.tx), the amount field and .twit-x that takes the item out (.n = the amount as text, in a list
    that cannot be edited). .twgives = what a domain gives: small tiles with the average amount under
-   the sprite. The item picker: .pickgroups = the group chips on a row of their own, .twgh = a group's
-   heading with "Show all" at its right, .pickmore = the line that says how many rows are not drawn; a
-   note at the top of the list keeps a gap under it. */
+   the sprite. .twed-foes = the enemies of the open domain, under a rule of their own: a setting row
+   (the name, Reset enemies), a line about them, their notes and the waves of the Abyss card
+   (.twab-wave, .twab-mons, .twmon). The item picker: .pickgroups = the group chips on a row of their
+   own, .twgh = a group's heading with "Show all" at its right, .pickmore = the line that says how many
+   rows are not drawn; a note at the top of the list keeps a gap under it. */
 .twcard .line.twkind{padding:9px 0;}
 .twcard .line.twkind small{display:inline;margin:0 0 0 9px;}
 .twsub{margin:18px 0 8px;font-family:'Cinzel',serif;font-weight:700;font-size:13px;letter-spacing:1px;color:var(--goldD);}
@@ -751,6 +1101,7 @@ button.twmon:hover{border-color:var(--gold);}
 .twgives{display:flex;flex-wrap:wrap;gap:6px;margin-top:-4px;}
 .twgive{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:56px;padding:7px 6px 5px;border-radius:10px;background:#fff;border:1px solid color-mix(in srgb, var(--goldD) 22%, transparent);}
 .twgive b{font-size:10.5px;font-weight:800;color:var(--ink2);}
+.twed-foes{display:flex;flex-direction:column;gap:12px;min-width:0;padding-top:12px;border-top:1px solid color-mix(in srgb, var(--goldD) 18%, transparent);}
 .pickgroups{flex-basis:100%;justify-content:flex-start;}
 .pickbody>.note{margin-bottom:12px;}
 .wgroup h5.twgh{display:flex;align-items:center;justify-content:space-between;gap:10px;}
@@ -819,6 +1170,17 @@ button.twmon:hover{border-color:var(--gold);}
   .help > .tip{position:fixed;position-anchor:--help;inset:auto;position-area:bottom span-all;width:300px;max-width:none;margin:6px 0;
     position-try-fallbacks:flip-block;position-visibility:anchors-visible;}
 }
+
+/* ── Quick Start (ui/quickstart.js; the screen S.screen 'quickstart') ──
+   Drawn with the shell's own pieces — .main / .pad / h1.title, the wizard's .stepper and .wizfoot, .panel, .opt cards,
+   .sect cards with their .line rows, .grid2 / .grid3, .toggle rows, .impv-line status lines, .note, .vchip, .console —
+   inside .qs-shell, the window under the title bar whole (its 708 px; .main scrolls), so both themes and the smallest
+   window follow those rules. Its own: the progress page's two state buttons (.qs-state, styled where they are drawn,
+   side by side in .qs-states, a wrapping flex row styled where it is drawn as well) and their lists (.qs-list, the
+   slide drawn in place). */
+.qs-state{cursor:pointer;}
+.qs-state:hover{filter:brightness(1.025);}
+.qs-state:focus-visible{outline:2px solid var(--gold);outline-offset:2px;}
 
 .toast{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);z-index:40;padding:11px 18px;border-radius:11px;background:var(--dark);color:#e7ebf3;font-size:12.5px;font-weight:700;border:1px solid color-mix(in srgb, var(--gold) 30%, transparent);box-shadow:0 12px 30px rgba(0,0,0,.4);max-width:80%;}
 .toast.bad{border-color:var(--bad);color:#ffd7cf;padding-right:38px;text-align:left;line-height:1.45;}

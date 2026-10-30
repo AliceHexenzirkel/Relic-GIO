@@ -158,9 +158,13 @@ namespace cheat
 			FEAT_INST(NoFog),
 			FEAT_INST(HideUI),
 			FEAT_INST(EnablePeeking),
+#if RELIC_GAME_VERSION != 32   // both act through ESP's SceneEntityAppear hook, which the 3.2 data lacks
 			FEAT_INST(FlycloakModifier),
 			FEAT_INST(SkinModifier),
-			
+#endif
+#if RELIC_DEVTEST   // the dev-only test bed (cheat/misc/DevTest.h, reached through misc/Debug.h)
+			FEAT_INST(DevTest),          // before CameraPath and FreeCamera: the pose it pushes lands in the same tick
+#endif
 			FEAT_INST(ProfileChanger),
 			FEAT_INST(PaimonFollow),
 			FEAT_INST(Browser),
@@ -169,14 +173,14 @@ namespace cheat
 			FEAT_INST(CameraPath),      // Relic: BEFORE FreeCamera on purpose - construction order is GameUpdate handler order, so the
 			                            // pose it pushes is consumed by the camera update of the same tick (its constructor never touches FreeCamera)
 			FEAT_INST(FreeCamera),
+#if RELIC_GAME_VERSION <= 16 || RELIC_GAME_VERSION == 28   // compiled for the builds whose RVAs are known (no 3.2 data)
 			FEAT_INST(RenderResolution),
 			FEAT_INST(RenderDistance),
+#endif
 			FEAT_INST(AnimationChanger),
 			FEAT_INST(EmotionChanger)
-			
 			});
 #undef FEAT_INST
-
 		manager.SetModuleOrder({
 			"About",
 			"Player",
@@ -188,8 +192,6 @@ namespace cheat
 			"Settings",
 			"Debug"
 			});
-
-
 		auto defaultFont = renderer::Font::LoadFontFromResource(IMGUI_FONT, RT_RCDATA, "DefaultFont", renderer::Font::FONT_RANGE_DEFAULT);
 		// Relic: only the Latin default font is embedded (the CJK/Cyrillic faces were 16 MB of the DLL).
 		renderer::AddFont(defaultFont);
@@ -197,12 +199,10 @@ namespace cheat
 		auto& language = feature::Language::GetInstance();
 		Translator::Init(ResourceLoader::Load(R_LANGUAGES, RT_RCDATA));
 		Translator::SetLanguage(language.f_Language.value());
-
 		Translator::LanguageChangedEvent += FUNCTION_HANDLER(OnLanguageChanged);
 		OnLanguageChanged();
 
 		manager.Init();
-
 		InstallEventHooks();
 	}
 

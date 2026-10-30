@@ -102,6 +102,147 @@ function Get-Sha256([string]$path) {
   finally { $sha.Dispose() }
 }
 
+. (Join-Path $PSScriptRoot 'pe_imports.ps1')
+
+# A whole number of payload\manifest.json as a [long]; -1 for anything else (absent, a string, a fraction).
+function Get-ManifestInteger($value) {
+  if ($value -is [int] -or $value -is [long]) { return [long]$value }
+  return [long]-1
+}
+
+# The client payload under $payloadDir, checked against its manifest.json; throws at the first problem
+# and returns the manifest's entries.
+#  - A plain entry: payload\<src> exists and has the entry's sha256.
+#  - A replacement - a plain entry with 'sha256Before', the original file of the game it takes the place
+#    of: 'sha256' and 'sha256Before' are two different sha256 values, 'backup' is true (the original is
+#    kept beside it), and 'sha256Earlier', when given, lists only other sha256 values - the earlier payload
+#    files of the entry, which the launcher replaces; any other content is the player's own file.
+#  - An entry of kind 'bytepatch' ships only the bytes Relic writes into the player's own file. Its
+#    'sha256' is the hash of that file with the bytes in it, which no build machine holds, so what is
+#    checked is what can be without a game file: the span file (its length and spanSha256), the span lying
+#    inside 'size', four well-formed hashes, a "before" that differs from its "after". Any other 'kind'
+#    is refused: the launcher treats such a manifest as unusable.
+#  - 'clients', the table game folders are recognised by: every row well formed - the build's name
+#    included, which the launcher prints when it refuses a folder -, and a byte patch's 'size' the size
+#    of a row of its version that names the same file (when that version has such rows).
+#  - No .exe / .dll of the payload may import a Visual C++ runtime DLL: such a file depends on the Visual
+#    C++ redistributable of the player's PC. Without one (a freshly installed Windows) launcher.exe does
+#    not start - on Windows 11 no client would - and a DLL handed to it is silently absent from the game.
+#    With an old one a mhynot2.dll linked that way faults inside msvcp140.dll at the game's first
+#    DeviceIoControl, after launcher.exe has reported success (its std::mutex needs a newer runtime:
+#    msvcp140.dll 14.31 faults, 14.38 does not). Linked with the static C runtime the files carry what
+#    they need (build\build_dlls.ps1). A replacement is not held to this: it takes the place of a DLL of
+#    the game itself, whose own plugins need the redistributable anyway (Test-PayloadPeEntry).
+function Test-ClientPayload([string]$payloadDir) {
+  $manifestPath = Join-Path $payloadDir 'manifest.json'
+  if (-not (Test-Path $manifestPath)) { throw "payload\manifest.json is missing from the publish output - a client that needs a patched file would not start" }
+  $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+  $entries = @($manifest.common) + @($manifest.versions.PSObject.Properties.Value | ForEach-Object { $_ })
+  $patches = 0; $replacements = 0
+  foreach ($e in $entries) {
+    $kind = "$($e.kind)"
+    if ($kind -and $kind -cne 'bytepatch') { throw "payload entry $($e.src): unknown kind '$kind' (an entry is a plain copy or a 'bytepatch')" }
+    $f = Join-Path $payloadDir ("$($e.src)" -replace '/', '\')
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "payload file missing from the publish output: $($e.src)" }
+    if ($kind -ceq 'bytepatch') {
+      $patches++
+      foreach ($name in 'sha256', 'sha256Before', 'spanSha256', 'spanSha256Before') {
+        if ("$($e.$name)" -notmatch '^[0-9a-fA-F]{64}$') { throw "bytepatch $($e.src): '$name' is not a sha256 (64 hex digits)" }
+      }
+      if ($e.sha256 -eq $e.sha256Before) { throw "bytepatch $($e.src): 'sha256Before' and 'sha256' are the same - the entry changes nothing" }
+      if ($e.spanSha256 -eq $e.spanSha256Before) { throw "bytepatch $($e.src): 'spanSha256Before' and 'spanSha256' are the same - the entry changes nothing" }
+      $size = Get-ManifestInteger $e.size; $offset = Get-ManifestInteger $e.offset; $length = Get-ManifestInteger $e.length
+      if ($size -le 0 -or $offset -lt 0 -or $length -le 0 -or $offset + $length -gt $size) {
+        throw "bytepatch $($e.src): offset '$($e.offset)' + length '$($e.length)' is not a span inside size '$($e.size)'"
+      }
+      $onDisk = (Get-Item -LiteralPath $f).Length
+      if ($onDisk -ne $length) { throw "bytepatch $($e.src): the span file is $onDisk bytes, the manifest says length $length" }
+      $got = Get-Sha256 $f
+      if ($got -ne $e.spanSha256.ToUpperInvariant()) { throw "payload altered: $($e.src) has sha256 $got, the manifest expects spanSha256 $($e.spanSha256)" }
+      continue
+    }
+    if ("$($e.sha256Before)") {
+      $replacements++
+      foreach ($name in 'sha256', 'sha256Before') {
+        if ("$($e.$name)" -notmatch '^[0-9a-fA-F]{64}$') { throw "replacement $($e.src): '$name' is not a sha256 (64 hex digits)" }
+      }
+      if ($e.sha256 -eq $e.sha256Before) { throw "replacement $($e.src): 'sha256Before' and 'sha256' are the same - the entry changes nothing" }
+      if ($e.backup -ne $true) { throw "replacement $($e.src): 'backup' must be true - the original file of the game is kept beside it" }
+      foreach ($h in @($e.sha256Earlier | Where-Object { $null -ne $_ })) {
+        if ("$h" -notmatch '^[0-9a-fA-F]{64}$' -or $h -eq $e.sha256 -or $h -eq $e.sha256Before) {
+          throw "replacement $($e.src): 'sha256Earlier' holds '$h' - only the sha256 values of earlier payload files of this entry belong there"
+        }
+      }
+    }
+    if ($e.sha256) {
+      $got = Get-Sha256 $f
+      if ($got -ne $e.sha256.ToUpperInvariant()) { throw "payload altered: $($e.src) has sha256 $got, the manifest expects $($e.sha256)" }
+    }
+  }
+  $patchTxt = if ($patches -gt 0) { ", $patches of them the bytes of a byte patch (span file, bounds, hashes)" } else { '' }
+  if ($replacements -gt 0) { $patchTxt += ", $replacements a replacement of a game file (original kept, earlier builds listed)" }
+  Write-Host "==> Client payload:    $($entries.Count) files verified (sha256)$patchTxt" -ForegroundColor Yellow
+
+  $clients = @($manifest.clients | Where-Object { $null -ne $_ })
+  foreach ($c in $clients) {
+    $named = @($c.version, $c.build, $c.file | Where-Object { $_ -is [string] -and $_.Trim() }).Count -eq 3
+    $wellFormed = $named -and "$($c.md5)" -match '^[0-9a-fA-F]{32}$' -and
+      (Get-ManifestInteger $c.size) -gt 0 -and ($null -eq $c.exact -or $c.exact -is [bool])
+    if (-not $wellFormed) {
+      throw "payload\manifest.json: a 'clients' row needs a version, a build and a file (the three as text), a 32-hex md5 and a size above 0 ('exact', when given, true or false): $($c | ConvertTo-Json -Compress)"
+    }
+  }
+  foreach ($v in $manifest.versions.PSObject.Properties) {
+    foreach ($e in @($v.Value)) {
+      if ("$($e.kind)" -cne 'bytepatch') { continue }
+      $rows = @($clients | Where-Object { "$($_.version)" -eq $v.Name -and "$($_.file)" -eq "$($e.dst)" })
+      if ($rows.Count -gt 0 -and @($rows | Where-Object { (Get-ManifestInteger $_.size) -eq (Get-ManifestInteger $e.size) }).Count -eq 0) {
+        throw "bytepatch $($e.src): size $($e.size) is the size of no 'clients' row of version $($v.Name) for $($e.dst) ($(@($rows | ForEach-Object { $_.size }) -join ', '))"
+      }
+    }
+  }
+  if ($clients.Count -gt 0) { Write-Host "==> Client identity:   $($clients.Count) build rows well formed" -ForegroundColor Yellow }
+
+  $needRuntime = @(Get-PayloadVcRuntimeProblems $payloadDir $entries)
+  if ($needRuntime.Count -gt 0) {
+    throw "payload imports a Visual C++ runtime DLL: $($needRuntime -join '; '). Build these files with the static C runtime (build\build_dlls.ps1)."
+  }
+  $nativeCount = @($entries | Where-Object { Test-PayloadPeEntry $_ }).Count
+  Write-Host "==> Client payload:    $nativeCount native files, none imports a Visual C++ runtime DLL" -ForegroundColor Yellow
+  $entries
+}
+
+# A DevTest build of the enhancements DLL is the dev-only in-game test bed (docs\ENTERTAINMENT-EXPERIENCE.md)
+# and never ships. The manifest's hashes cannot tell it apart: its sha256 written into the manifest, it
+# passes every check above, and a file the manifest does not list is mirrored all the same. So every file
+# under $dir is read for the marker such a build carries (Test-DevBuildMarker: its ASCII or UTF-16LE text
+# anywhere in the file), and nothing there may be named DevTest* (the dev runner, the dev sources, the
+# test bed's channel folder and its log). Throws with every hit. With -RemoveRefused (the publish output's
+# own check) a refused folder does not stay either: the installer is compiled from it in a step of its own
+# (iscc), which would pack the dev build all the same. Without it nothing is removed.
+function Test-NoDevBuild([string]$dir, [switch]$RemoveRefused) {
+  $root = (Resolve-Path -LiteralPath $dir -ErrorAction Stop).ProviderPath.TrimEnd('\')
+  $hits = @()
+  $files = 0
+  foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force)) {
+    $rel = $item.FullName.Substring($root.Length + 1)
+    if ($item.Name -like 'DevTest*') { $hits += "$rel (named DevTest*)"; continue }
+    if ($item.PSIsContainer) { continue }
+    $files++
+    if (Test-DevBuildMarker -Path $item.FullName) { $hits += "$rel (carries the marker of a DevTest build)" }
+  }
+  if ($hits.Count -gt 0) {
+    $gone = ''
+    if ($RemoveRefused) {
+      $gone = " The publish output $root was removed: no installer can be compiled from it."
+      try { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop }
+      catch { $gone = " The publish output $root could NOT be removed [$($_.Exception.Message)] - delete it before an installer is compiled." }
+    }
+    throw "a DevTest build reached the publish output - the dev-only test bed never ships: $($hits -join '; ').$gone Take these out: payload\ holds Release builds only (build_ee.ps1 -Config Release)."
+  }
+  Write-Host "==> Dev build check:   $files files read, none is a DevTest build" -ForegroundColor Yellow
+}
+
 # i18n gate: every key referenced in code must exist in ui/lang/en.json, index.json must be sane and
 # ui/lang/en.js must match en.json (the script regenerates it). Needs python 3 on the build machine.
 $python = Get-Command python -ErrorAction SilentlyContinue
@@ -195,36 +336,10 @@ if (Test-Path $versionsOut) {
 # ship build would silently lose the Win11 injector. A straight mirror has no such opinions.
 Copy-Item (Join-Path $repo 'payload') -Destination $outDir -Recurse -Force
 
-# The 2.8 client does not start without its patched global-metadata.dat, and on Windows 11 no client
-# starts without the injector. Catch a payload that failed to publish HERE, not on a user's machine
-# after a 30 GB download.
-$manifestPath = Join-Path $outDir 'payload\manifest.json'
-if (-not (Test-Path $manifestPath)) { throw "payload\manifest.json is missing from the publish output - the 2.8 client would not start" }
-$manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
-$entries = @($manifest.common) + @($manifest.versions.PSObject.Properties.Value | ForEach-Object { $_ })
-foreach ($e in $entries) {
-  $f = Join-Path $outDir "payload\$($e.src -replace '/', '\')"
-  if (-not (Test-Path $f)) { throw "payload file missing from the publish output: $($e.src)" }
-  if ($e.sha256) {
-    $got = Get-Sha256 $f
-    if ($got -ne $e.sha256.ToUpperInvariant()) { throw "payload altered: $($e.src) has sha256 $got, the manifest expects $($e.sha256)" }
-  }
-}
-Write-Host "==> Client payload:    $($entries.Count) files verified (sha256)" -ForegroundColor Yellow
-# No .exe / .dll of the payload may import a Visual C++ runtime DLL: such a file depends on the Visual
-# C++ redistributable of the player's PC. Without one (a freshly installed Windows) launcher.exe does not
-# start - on Windows 11 no client would - and a DLL handed to it is silently absent from the game. With
-# an old one a mhynot2.dll linked that way faults inside msvcp140.dll at the game's first
-# DeviceIoControl, after launcher.exe has reported success (its std::mutex needs a newer runtime:
-# msvcp140.dll 14.31 faults, 14.38 does not). Linked with the static C runtime the files carry what they
-# need (build\build_dlls.ps1).
-. (Join-Path $PSScriptRoot 'pe_imports.ps1')
-$needRuntime = @(Get-PayloadVcRuntimeProblems (Join-Path $outDir 'payload') $entries)
-if ($needRuntime.Count -gt 0) {
-  throw "payload imports a Visual C++ runtime DLL: $($needRuntime -join '; '). Build these files with the static C runtime (build\build_dlls.ps1)."
-}
-$nativeCount = @($entries | Where-Object { "$($_.dst)" -match '\.(exe|dll)$' }).Count
-Write-Host "==> Client payload:    $nativeCount native files, none imports a Visual C++ runtime DLL" -ForegroundColor Yellow
+# A client whose manifest entry is required does not start without its patched file, and on Windows 11
+# no client starts without the injector. Catch a payload that failed to publish HERE, not on a user's
+# machine after a download of tens of GB.
+$entries = @(Test-ClientPayload (Join-Path $outDir 'payload'))
 # The in-game enhancements DLL(s) — manifest entries flagged "inject" — are the heaviest optional
 # payload: report their size here so an unexpectedly fat build (debug DLL, un-dieted resources) is
 # noticed at publish time, not after the players downloaded it. Informational only.
@@ -235,8 +350,13 @@ foreach ($e in $entries) {
   Write-Host "==> Inject payload:    $($e.src) = $mb MB" -ForegroundColor Yellow
   if ($mb -gt 80) { Write-Warning "inject payload $($e.src) is $mb MB (> 80 MB) - is the Release, resource-dieted DLL the one in payload\? (see docs\ENTERTAINMENT-EXPERIENCE.md)" }
 }
-if (-not (Test-Path (Join-Path $outDir 'agent\payloads\1.6\manifest.json'))) {
-  Write-Warning "agent\payloads is missing from the publish output - 'Install the agent' could not provision the GAA progress."
+# Every version folder of the agent's payloads that holds a manifest reaches the publish output with it: an agent
+# prepares a server of that version from those files.
+$agentMissing = @(Get-ChildItem (Join-Path $repo 'agent\payloads') -Directory |
+  Where-Object { (Test-Path (Join-Path $_.FullName 'manifest.json')) -and -not (Test-Path (Join-Path $outDir "agent\payloads\$($_.Name)\manifest.json")) } |
+  ForEach-Object { $_.Name })
+if ($agentMissing.Count -gt 0) {
+  Write-Warning "agent\payloads of $($agentMissing -join ', ') is missing from the publish output - 'Install the agent' could not prepare a server of that version."
 }
 
 # The OPTIONAL navmesh bundle for the pathfindingserver (docs\NAVMESH.md): only the files that ADD to or
@@ -252,7 +372,7 @@ if (Test-Path $NavmeshDir) {
     if (-not (Test-Path $nm)) { continue }
     $ver = $verDir.Name
     if (-not (Test-Path (Join-Path $outDir "agent\payloads\$ver\manifest.json"))) {
-      throw "navmesh bundle '$ver': agent\payloads knows no such version (a bundle folder is named after its version: 1.6, 2.8)"
+      throw "navmesh bundle '$ver': agent\payloads knows no such version (a bundle folder is named after the version it is for)"
     }
     $m = [IO.File]::ReadAllText($nm, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
     if ($m.format -ne 1) { throw "navmesh bundle ${ver}: navmesh.json has format '$($m.format)', this build understands format 1" }
@@ -290,6 +410,11 @@ if (Test-Path $NavmeshDir) {
 }
 if ($navmeshShipped.Count -eq 0) { Write-Host "==> Bundled navmesh: none" -ForegroundColor Yellow }
 elseif ($navmeshBytes -gt 400MB) { Write-Warning "the navmesh bundles total $([math]::Round($navmeshBytes / 1MB, 1)) MB (> 400 MB) - a bundle carries only the files the stack does not ship (build\navmesh_tool.py pack --vendor-list), not the vendor's whole set" }
+
+# Last, once every file is in place: the whole publish output - the app, the client payload, the agent's
+# payloads and the navmesh bundle - holds no DevTest build. This output is what the installer packs, so an
+# output that holds one is removed.
+Test-NoDevBuild $outDir -RemoveRefused
 
 Write-Host "==> Fetching WebView2 Evergreen bootstrapper..." -ForegroundColor Cyan
 $redist = Join-Path $repo 'installer\redist'

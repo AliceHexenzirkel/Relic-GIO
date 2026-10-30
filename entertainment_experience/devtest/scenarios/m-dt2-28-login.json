@@ -1,0 +1,21 @@
+{
+  "name": "m-dt2-28-login",
+  "version": "2.8",
+  "description": "M-DT2 on 2.8, experimental: the SDK's login form filled in-process (account and password from the environment) and the door page's 'click to enter', each step answering what it found. Where the slot logs in by itself the form is not there: the login step then says so and the run goes on to enter.",
+  "server": {"expectHost": "${RELIC_DEVTEST_HOST}", "agent": "${RELIC_DEVTEST_AGENT}", "tokenEnv": "RELIC_DEVTEST_TOKEN"},
+  "runner": {"window": "1600x900", "ownFiles": "keep"},
+  "config": {"Debug": {"DevTest": {"Enabled": true}}, "General": {"Logging": {"FileLogging": true}}},
+  "session": {"noFaults": true, "maxPresentStall": 2.0},
+  "steps": [
+    {"label": "the start screen", "op": "wait", "until": {"seconds": 5}, "timeout": 60},
+    {"label": "what the start screen holds", "op": "ui.tree", "root": "/Canvas", "depth": 4, "activeOnly": true, "texts": true, "limit": 2000},
+    {"label": "start screen", "op": "shot", "overlay": false, "out": "start"},
+    {"label": "log in", "op": "login", "account": "${RELIC_DEVTEST_ACCOUNT}", "password": "${RELIC_DEVTEST_PASSWORD}", "timeout": 120, "onFail": "continue"},
+    {"label": "after the login", "op": "shot", "overlay": false, "out": "after-login", "onFail": "continue"},
+    {"label": "enter", "op": "enter", "timeout": 180},
+    {"label": "in the world", "op": "wait", "until": {"inGame": true, "sceneNot": 0}, "timeout": 600},
+    {"label": "who is in", "op": "status", "expect": {"inGame": true, "uid": {"min": 1}}},
+    {"label": "in the world after the login", "op": "shot", "overlay": false, "out": "world"},
+    {"label": "quit", "op": "quit"}
+  ]
+}

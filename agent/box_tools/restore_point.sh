@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# restore_point.sh [1.6|2.8] [folder|latest]
+# restore_point.sh [<version>] [folder|latest]
 #
-# Bring the game progress back to a point saved with save_point.sh:
+# Bring the game progress of the given version (<digits>.<digits>, 1.6 when none is given) back to a
+# point saved with save_point.sh:
 #   hk4e_db_user (DROP + CREATE + import), redis/dump.rdb, sdk/data/sdk.db.
 # Does NOT touch hk4e_db_config (events, advertised IP) nor the txt files -- those stay the
 # way the agent keeps them. Everything played AFTER the saved point is lost -- that is the idea.
@@ -12,8 +13,10 @@ set -euo pipefail
 
 V="${1:-1.6}"
 SEL="${2:-latest}"
-case "$V" in 1.6|2.8) ;; *) echo "Unknown version: $V (expected 1.6 or 2.8)"; exit 1;; esac
-# Stack path: the agent config first (GIO_DIR_16/28), then /home, then /root.
+# A version is <digits>.<digits>; whether this box has it is settled by the folder it resolves to.
+[[ "$V" =~ ^[0-9]+\.[0-9]+$ ]] || { echo "Not a version: $V (expected <digits>.<digits>, e.g. 1.6)"; exit 1; }
+# Stack path: the agent config first (GIO_DIR_<nn>, <nn> = the version without its dot), then /home,
+# then /root.
 D=""
 if [ -f /etc/gio-agent/config ]; then
   D="$(sed -n "s/^GIO_DIR_${V/./}=//p" /etc/gio-agent/config | head -1)"
@@ -73,7 +76,7 @@ if [ "$WAS_UP" = 1 ]; then
   dc down
 else
   if [ -n "$(docker compose ls -q 2>/dev/null | grep -v "^${PROJ}$" || true)" ]; then
-    echo "The $V stack is stopped and the other one is running -- start $V from the app first, then retry."
+    echo "The $V stack is stopped and another one is running -- start $V from the app first, then retry."
     exit 1
   fi
 fi

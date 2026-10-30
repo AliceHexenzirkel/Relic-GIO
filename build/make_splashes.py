@@ -2,25 +2,31 @@
 Renders app/Relic.App/ui/assets/splash/<avatarId>.webp -- the character tiles behind the "Game
 commands" picker (.ptile) and the selected-character banner (.gmhero .art).
 
-Run from anywhere:  python build\\make_splashes.py  [--sheet <path.png>]
+Run from anywhere:
+    python build\\make_splashes.py --source <folder> [--only <id>[,<id>...]] [--sheet <path.png>]
 
-Source art is assets_ref/characters_splash/, a read-only reference folder that is NOT part of the
-build (it is ~170 MB of full-size PNG). The .webp files this writes are COMMITTED, so nothing in
-the normal pipeline needs Pillow or that folder: Relic.App.csproj ships ui/** verbatim. Re-run this
-only when a character is added to config/gamedata.json or the source art changes.
+Source art: the full-size splash PNGs SOURCES names, read from the folder --source names (reference
+material that is NOT part of the build: ~170 MB of full-size PNG), and, for the characters that folder
+does not hold, the wish art Enka.Network mirrors (ENKA_SOURCES, downloaded once into
+build/_gamedata_cache/splash). A run whose --only names ENKA_SOURCES ids alone needs no --source. The
+.webp files this writes are COMMITTED, so nothing in the normal pipeline needs Pillow or the source
+art: Relic.App.csproj ships ui/** verbatim. Re-run this only for a character added to
+config/gamedata.json (--only <its id>) or when the source art changes.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import urllib.request
 from pathlib import Path
 
 from PIL import Image
 
 REPO = Path(__file__).resolve().parent.parent
-SRC = REPO / "assets_ref" / "characters_splash"
 OUT = REPO / "app" / "Relic.App" / "ui" / "assets" / "splash"
+CACHE = REPO / "build" / "_gamedata_cache" / "splash"
+UA = {"User-Agent": "Relic-launcher/1.0"}
 
 # 155x210 is .ptile's aspect-ratio in relic.css. Matching it exactly makes the tile's
 # `object-fit:cover` a no-op, so the framing decided here is the framing the user sees.
@@ -103,6 +109,20 @@ SOURCES: dict[int, str | tuple[str, str]] = {
     10000066: "Kamisato Ayato.png",
 }
 
+# The characters the --source folder does not hold: the wish art Enka.Network mirrors (2048x1024 PNG
+# with transparency), by the part of the avatar's icon name after "UI_AvatarIcon_".
+ENKA_SPLASH = "https://enka.network/ui/UI_Gacha_AvatarImg_{name}.png"
+ENKA_SOURCES: dict[int, str] = {
+    10000067: "Collei",
+    10000068: "Dori",
+    10000069: "Tighnari",
+    10000070: "Nilou",
+    10000071: "Cyno",
+    10000072: "Candace",
+    10000073: "Nahida",
+    10000074: "Layla",
+}
+
 
 def _span(profile: list[int]) -> tuple[int, int]:
     """First and last index whose alpha mass clears TRIM_SHARE of the busiest slice."""
@@ -163,6 +183,25 @@ def card(path: Path, side: str | None) -> Image.Image:
     return im.crop((left, 0, left + OUT_W, OUT_H))
 
 
+def enka_art(name: str) -> Path:
+    """One character's wish art from Enka.Network, downloaded once into CACHE. The bytes go through a
+    .part file renamed into place, so a download that broke off never passes for the picture."""
+    dest = CACHE / f"UI_Gacha_AvatarImg_{name}.png"
+    if dest.is_file():
+        return dest
+    url = ENKA_SPLASH.format(name=name)
+    print(f"  downloading {url} ...", flush=True)
+    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=120) as r:
+        body = r.read()
+    if not body.startswith(b"\x89PNG"):
+        raise SystemExit(f"not a PNG picture: {url}")
+    CACHE.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    part.write_bytes(body)
+    os.replace(part, dest)
+    return dest
+
+
 def contact_sheet(cards: list[tuple[int, Image.Image]], path: Path) -> None:
     """All tiles at their real 155x210 size on the tile's own cream, for eyeballing the framing."""
     tw, th, cols = 155, 210, 9
@@ -176,21 +215,50 @@ def contact_sheet(cards: list[tuple[int, Image.Image]], path: Path) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Render the character splash tiles into ui/assets/splash.")
+    ap.add_argument("--source", metavar="FOLDER", type=Path,
+                    help="the folder that holds the full-size splash art SOURCES names (needed when the run "
+                         "renders one of those characters)")
+    ap.add_argument("--only", metavar="IDS",
+                    help="render only these avatar ids, comma-separated (default: every id of SOURCES and "
+                         "ENKA_SOURCES)")
     ap.add_argument("--sheet", metavar="PATH",
                     help="also render every tile side by side to PATH (visual check only; never written into assets/)")
     args = ap.parse_args()
 
-    # Fail on a typo instead of silently shipping 51 tiles and one broken image element.
-    missing = [f for v in SOURCES.values() for f in [v if isinstance(v, str) else v[0]]
-               if not (SRC / f).is_file()]
-    if missing:
-        raise SystemExit("missing from assets_ref/characters_splash: " + ", ".join(sorted(set(missing))))
+    known = set(SOURCES) | set(ENKA_SOURCES)
+    if args.only:
+        try:
+            wanted = [int(x) for x in args.only.split(",") if x.strip()]
+        except ValueError:
+            raise SystemExit("--only takes avatar ids, comma-separated: " + args.only)
+        unknown = sorted(set(wanted) - known)
+        if unknown or not wanted:
+            raise SystemExit("no source art is named for: " + (", ".join(map(str, unknown)) or args.only))
+    else:
+        wanted = sorted(known)
+
+    # Fail on a typo instead of silently shipping a broken image element -- for the art this run renders.
+    local = [i for i in wanted if i in SOURCES]
+    if local:
+        if args.source is None:
+            raise SystemExit("--source <folder> is needed: the run renders "
+                             + ", ".join(map(str, local)) + " from the full-size art SOURCES names")
+        missing = [f for i in local for f in [SOURCES[i] if isinstance(SOURCES[i], str) else SOURCES[i][0]]
+                   if not (args.source / f).is_file()]
+        if missing:
+            raise SystemExit(f"missing from {args.source}: " + ", ".join(sorted(set(missing))))
 
     OUT.mkdir(parents=True, exist_ok=True)
     cards, total = [], 0
-    for avatar_id, spec in SOURCES.items():
-        name, side = (spec, None) if isinstance(spec, str) else spec
-        c = card(SRC / name, side)
+    for avatar_id in wanted:
+        if avatar_id in SOURCES:
+            spec = SOURCES[avatar_id]
+            name, side = (spec, None) if isinstance(spec, str) else spec
+            path = args.source / name
+        else:
+            path, side = enka_art(ENKA_SOURCES[avatar_id]), None
+            name = path.name
+        c = card(path, side)
         dest = OUT / f"{avatar_id}.webp"
         c.save(dest, "WEBP", quality=QUALITY, method=METHOD)
         size = dest.stat().st_size

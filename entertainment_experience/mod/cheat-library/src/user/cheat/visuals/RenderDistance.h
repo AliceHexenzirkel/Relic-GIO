@@ -2,6 +2,13 @@
 #include <cheat-base/cheat/Feature.h>
 #include <cheat-base/config/config.h>
 
+// Render Distance binds functions and reads raw offsets known for the builds that have a metadata dump, 1.6 and 2.8
+// (RenderDistance.cpp), and is compiled and registered for those only: the 3.2 build (like the 3.3 reference build)
+// has none of them. Any other game version decides here first - never the 2.8 values by default.
+#if RELIC_GAME_VERSION > 16 && RELIC_GAME_VERSION != 28 && RELIC_GAME_VERSION != 32 && RELIC_GAME_VERSION != 33
+#error "RenderDistance: no bindings or raw offsets are known for this game version (see RenderDistance.cpp)"
+#endif
+
 namespace cheat::feature
 {
 	// Relic: "Render Distance" - pushes the game's own streaming / LOD radius, grass draw distance and shadow

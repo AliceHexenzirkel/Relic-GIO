@@ -60,8 +60,9 @@ SIGNATURES              RCDATA                  "signatures.json"
 // Relic: a version only carries the scenes its world has. Enkanomiya (2.4) and the Chasm (2.6) do not
 // exist in 1.6, and the two archipelago events are different worlds: 1.6 "Midsummer Island Adventure"
 // is scene 4 and 2.8 "Summertime Odyssey" is scene 9, each generated from that server's own scene
-// scripts by tools/gen_gaa_map.py (level coordinates, loaded without ApplyScaling). Only the 3.3
-// reference build keeps Akebi's original archipelago file.
+// scripts by tools/gen_gaa_map.py (level coordinates, loaded without ApplyScaling). 3.2 carries
+// Akebi's 3.x Teyvat, Enkanomiya and Chasm data and no archipelago. Only the 3.3 reference build
+// keeps Akebi's original archipelago file.
 #if RELIC_GAME_VERSION != 16
 MAPENKANOMIYADATA       RCDATA                  "map_enkanomiya.json"
 #endif
@@ -76,7 +77,7 @@ MAPUNDEGROUNDMINESDATA  RCDATA                  "map_undeground_mines.json"
 MAPGAA16SCENE4DATA      RCDATA                  "map_gaa16_scene4.json"
 #elif RELIC_GAME_VERSION == 28
 MAPGAA28SCENE9DATA      RCDATA                  "map_gaa28_scene9.json"
-#else
+#elif RELIC_GAME_VERSION != 32
 MAPGOLDENAPPLEARCHIPELAGODATA RCDATA                  "map_golden_apple_archipelago.json"
 #endif
 
@@ -84,11 +85,22 @@ MAPGOLDENAPPLEARCHIPELAGODATA RCDATA                  "map_golden_apple_archipel
 ASSEMBLYCHECKSUMS       RCDATA                  "assembly_checksum-16.json"
 #elif RELIC_GAME_VERSION == 28
 ASSEMBLYCHECKSUMS       RCDATA                  "assembly_checksum-28.json"
+#elif RELIC_GAME_VERSION == 32
+ASSEMBLYCHECKSUMS       RCDATA                  "assembly_checksum-32.json"
 #else
 ASSEMBLYCHECKSUMS       RCDATA                  "assembly_checksum.json"
 #endif
 
 ASCENSIONMATERIALSDATA  RCDATA                  "ascension_materials.json"
+
+#if RELIC_DEVTEST
+// The mark of a DevTest build, the dev-only test bed (src/user/cheat/misc/DevTest.cpp): every release gate
+// refuses a file that carries it (build/pe_imports.ps1 Test-DevBuildMarker).
+DEVTESTMARKER           RCDATA
+BEGIN
+    "RELIC-DEVTEST-BUILD\0"
+END
+#endif
 
 /////////////////////////////////////////////////////////////////////////////
 //

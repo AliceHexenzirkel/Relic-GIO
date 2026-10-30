@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="1.0.0.0" name="Relic.App"/>
+  <assemblyIdentity version="1.2.0.0" name="Relic.App"/>
 
   <!-- asInvoker: the launcher asks for no elevation. A step that needs it (the
        Fiddler installer's fallback, the local agent's firewall rule) starts its own

@@ -33,11 +33,36 @@ public sealed class PlaySession
     /// from here on the game's own window is what the player watches.</summary>
     public event Action? GameAppeared;
 
+    /// <summary>Fired once, the moment the session's client is seen gone — before the settle window, which takes
+    /// seconds: the host says at once what happens next (<see cref="SessionEnd.Closing"/>). Not for a client that
+    /// never appeared, nor when Relic closed the game because Fiddler was closed (that has its own message).</summary>
+    public event Action<SessionNotice>? GameClosed;
+
+    /// <summary>Fired once the post-exit step is done (the settle window, then Fiddler, then the profile), with what
+    /// it did — also <see cref="Result"/>. A restore it deferred is the host's recovery loop's from then on
+    /// (<see cref="RecoveryLoop.SessionEnded"/>). Not fired when that step itself failed: PlayAsync throws then.</summary>
+    public event Action<SessionNotice>? Ended;
+
+    /// <summary>What the post-exit step did (see <see cref="Ended"/>); null until it is done.</summary>
+    public SessionNotice? Result { get; private set; }
+
     /// <summary>True once the game was started through launcher.exe WITH the enhancements DLL(s) —
     /// i.e. the F1 menu really is in the process. False for every other launch, including the plain
     /// start Launch falls back to after a launcher failure. Meaningful from <see cref="GameAppeared"/>
     /// on (the host reads it to word the "game is running" toast).</summary>
     public bool EnhancementsActive { get; private set; }
+
+    /// <summary>The answer the player gave for THIS launch about the game folder's own files — a file of
+    /// theirs in the place of one Relic ships as a replacement (<c>GamePatcher.OwnFiles</c>):
+    /// <see cref="OwnFileChoices.Keep"/> or <see cref="OwnFileChoices.Replace"/>. Anything else (null — no
+    /// question was asked) leaves the version's stored choice in effect (<see cref="RelicSettings.OwnFiles"/>),
+    /// and without one the player's file stays: a launch never waits for an answer.</summary>
+    public string? OwnFilesAnswer { get; set; }
+
+    /// <summary>True in a desktop shortcut's own play process (<c>Program.RunPlay</c>): its state was read when it
+    /// started, so the injector found after the patch is stored in the file alone
+    /// (<see cref="RelicState.RememberInjector"/>), never by a save of that whole state.</summary>
+    public bool StateReadAtStart { get; init; }
 
     public PlaySession(RelicState state) => _state = state;
 
@@ -59,7 +84,7 @@ public sealed class PlaySession
             throw new InvalidOperationException(L.T("core.play.sessionInProgress"));
         try
         {
-            // Only one client may run — 1.6 and 2.8 never together (hardware + isolation).
+            // Only one client may run — never two versions together (hardware + isolation).
             if (ProcessGuard.AnyRunning())
                 throw new InvalidOperationException(L.T("core.play.clientRunning"));
 
@@ -95,6 +120,7 @@ public sealed class PlaySession
             profiles.SwapTo(inst.ProfileId, activeId: profiles.ActiveId());
 
             bool gameNeverAppeared = false;
+            bool clientSeen = false;
             LaunchHandle? handle = null;
             int? ownedFiddlerPid = null;
             try
@@ -181,6 +207,7 @@ public sealed class PlaySession
                     appeared = await GameLauncher.WaitForExitAsync(h, ct,
                         onAppeared: () =>
                         {
+                            clientSeen = true;
                             Log?.Invoke(L.T("core.play.gameRunning"));
                             GameAppeared?.Invoke();
                         });
@@ -207,6 +234,9 @@ public sealed class PlaySession
                 Log?.Invoke(appeared
                     ? L.T("core.play.gameClosed")
                     : L.T("core.play.gameNotDetected"));
+                // Said the moment the client is seen gone: the settle window below takes seconds, and until its end
+                // nothing else would tell the player that Relic is putting things back.
+                if (appeared) Raise(GameClosed, SessionEnd.Closing(versionId, startFiddler));
             }
             finally
             {
@@ -230,41 +260,17 @@ public sealed class PlaySession
                 // Fiddler up, and it is never stopped before the window ends: stopping it in the
                 // respawn gap would let the returning private client reach the official hosts with
                 // the private profile loaded. An unattributable client counts as ours (conservative).
-                var settle = await ProcessGuard.ObserveSustainedAsync(
-                    new[] { inst.GameDir }, handle?.PreExistingPids,
-                    gameNeverAppeared ? TimeSpan.FromSeconds(15) : null);
-                var decision = PostExitDecision(settle.SawOurs, settle.SawForeign, settle.SawUnknown);
-                Util.Log.Info($"post-exit: ours={settle.SawOurs} foreign={settle.SawForeign} unknown={settle.SawUnknown} -> stopFiddler={decision.StopFiddler} restore={decision.RestoreProfile} ({decision.Reason})");
-                if (!decision.RestoreProfile)
+                // The window, the decision and its steps: SessionEnd.FinishAsync — the window's length is its own.
+                Result = await SessionEnd.FinishAsync(new SessionEndSteps
                 {
-                    // Record what actually blocked us, so a future deferral is diagnosable from
-                    // relic.log instead of guessable.
-                    foreach (var g in ProcessGuard.RunningGenshin())
-                        Util.Log.Info($"profile restore deferred: GenshinImpact.exe pid={g.Pid} path='{g.Path}'");
-                }
-
-                if (startFiddler && decision.StopFiddler)
-                {
-                    Log?.Invoke(L.T("core.play.stoppingFiddler"));
-                    Util.Log.Info(ownedFiddlerPid is int pid ? $"stopping Fiddler (own pid {pid})" : "stopping Fiddler (reused instance)");
-                    FiddlerAutomation.StopFiddler();
-                }
-
-                if (decision.RestoreProfile)
-                {
-                    Log?.Invoke(L.T("core.play.savingProfile"));
-                    profiles.SwapTo(LiveProfile, activeId: inst.ProfileId); // save this version out, restore live
-                    Log?.Invoke(L.T("core.play.liveRestored"));
-                }
-                else if (decision.StopFiddler)
-                {
-                    TaintForeign(profiles, inst.ProfileId);
-                    Log?.Invoke(L.T("core.play.deferredForeign"));
-                }
-                else
-                {
-                    Log?.Invoke(L.T("core.play.deferredOwn"));
-                }
+                    OurGameDirs = new[] { inst.GameDir },
+                    PreExistingPids = handle?.PreExistingPids,
+                    StopFiddler = FiddlerAutomation.StopFiddler,
+                    RestoreLive = () => profiles.SwapTo(LiveProfile, activeId: inst.ProfileId), // save this version out, restore live
+                    Taint = () => TaintForeign(profiles, inst.ProfileId),
+                    OwnedFiddlerPid = ownedFiddlerPid,
+                }, versionId, fiddler: startFiddler, clientSeen, clientNeverAppeared: gameNeverAppeared, say: Log);
+                Raise(Ended, Result);
             }
         }
         finally
@@ -309,6 +315,12 @@ public sealed class PlaySession
     /// <summary>What to do once the session's game is gone, given what the settle window saw.</summary>
     public readonly record struct PostExit(bool StopFiddler, bool RestoreProfile, string Reason);
 
+    /// <summary>The reasons of <see cref="PostExitDecision"/>, as relic.log and a deferred recovery pass carry them.</summary>
+    public const string ReasonOwn = "own client still running";
+    public const string ReasonUnknown = "unattributable client running";
+    public const string ReasonForeign = "foreign client running";
+    public const string ReasonNone = "no client running";
+
     /// <summary>
     /// Pure decision table shared by the session end and by the app's background recovery:
     /// our own client (or one we cannot attribute) still running → keep Fiddler AND defer the profile
@@ -317,10 +329,17 @@ public sealed class PlaySession
     /// </summary>
     public static PostExit PostExitDecision(bool sawOurs, bool sawForeign, bool sawUnknown)
     {
-        if (sawOurs) return new PostExit(false, false, "own client still running");
-        if (sawUnknown) return new PostExit(false, false, "unattributable client running");
-        if (sawForeign) return new PostExit(true, false, "foreign client running");
-        return new PostExit(true, true, "no client running");
+        if (sawOurs) return new PostExit(false, false, ReasonOwn);
+        if (sawUnknown) return new PostExit(false, false, ReasonUnknown);
+        if (sawForeign) return new PostExit(true, false, ReasonForeign);
+        return new PostExit(true, true, ReasonNone);
+    }
+
+    /// <summary>A notice to a host's handler: a handler that throws must never break the session end.</summary>
+    private static void Raise(Action<SessionNotice>? handler, SessionNotice notice)
+    {
+        try { handler?.Invoke(notice); }
+        catch (Exception ex) { Util.Log.Error($"play session: the {notice.Kind} notice could not be delivered (non-fatal)", ex); }
     }
 
     /// <summary>
@@ -331,17 +350,21 @@ public sealed class PlaySession
     /// beats "The game was not detected within 90 seconds". The enhancements DLL (manifest
     /// <c>inject</c> entries) is in the plan only while the setting is on: off means never copied,
     /// never verified, never deleted — the launch is then byte-for-byte the plain per-OS one.
+    /// A file of the player's own in the place of a replacement counts here as nothing to do and stays;
+    /// what the launch does with it is <see cref="ReplaceOwnFiles"/>' business, afterwards.
     /// </summary>
     private void ApplyBundledFixes(InstalledVersion inst)
     {
+        bool withInjectables = _state.Settings.Enhancements;
         try
         {
-            bool withInjectables = _state.Settings.Enhancements;
-            if (GamePatcher.IsUpToDate(inst.Id, inst.GameDir, withInjectables: withInjectables)) return;
-            Log?.Invoke(L.T("core.play.applyingPatches"));
-            var report = GamePatcher.Apply(inst.Id, inst.GameDir, m => Util.Log.Info($"patch {inst.Id}: {m}"),
-                withInjectables: withInjectables);
-            Util.Log.Info($"patch {inst.Id}: {report.Summary}");
+            if (!GamePatcher.IsUpToDate(inst.Id, inst.GameDir, withInjectables: withInjectables))
+            {
+                Log?.Invoke(L.T("core.play.applyingPatches"));
+                var report = GamePatcher.Apply(inst.Id, inst.GameDir, m => Util.Log.Info($"patch {inst.Id}: {m}"),
+                    withInjectables: withInjectables);
+                Util.Log.Info($"patch {inst.Id}: {report.Summary}");
+            }
         }
         catch (GamePatchException ex)
         {
@@ -353,6 +376,43 @@ public sealed class PlaySession
         {
             Util.Log.Error($"patch {inst.Id} failed (non-fatal)", ex);
             Log?.Invoke(L.T("core.play.patchCheckFailed"));
+        }
+        ReplaceOwnFiles(inst, withInjectables);
+    }
+
+    /// <summary>
+    /// "Use Relic's file" — the answer of this launch (<see cref="OwnFilesAnswer"/>) or else the version's
+    /// stored choice: a file of the player's own in the place of a replacement is written over, theirs kept
+    /// beside it (<see cref="GamePatcher.ReplaceOwnFiles"/>). Those files alone, once the rest of the plan went
+    /// through the launch's own check: the answer never adds a refusal "Keep mine" would not meet. Nor does a
+    /// failure here stop the launch — the player's file is still in place, and the game starts with it as
+    /// with "Keep mine"; the player is told.
+    /// </summary>
+    private void ReplaceOwnFiles(InstalledVersion inst, bool withInjectables)
+    {
+        string? answer = OwnFileChoices.Answer(OwnFilesAnswer);
+        if ((answer ?? _state.Settings.OwnFilesChoiceFor(inst.Id)) != OwnFileChoices.Replace) return;
+        string why = answer is null ? "the version's stored choice" : "the answer of this launch";
+        try
+        {
+            var report = GamePatcher.ReplaceOwnFiles(inst.Id, inst.GameDir, m => Util.Log.Info($"patch {inst.Id}: {m}"),
+                withInjectables: withInjectables);
+            if (report.ReplacedOwn.Count == 0 && report.Kept.Count == 0 && report.Missing.Count == 0) return;
+            Util.Log.Info($"patch {inst.Id}: Relic's files go over the player's own ({why}): {report.Summary}");
+            if (report.ReplacedOwn.Count > 0)
+                Log?.Invoke(L.T("core.play.ownFilesReplaced", new
+                {
+                    files = string.Join(", ", report.ReplacedOwn),
+                    kept = string.Join(", ", report.ReplacedOwn.Select(d => d + GamePatcher.OwnSuffix)),
+                }));
+            var stayed = report.Kept.Concat(report.Missing).ToList();
+            if (stayed.Count > 0)
+                Log?.Invoke(L.T("core.play.ownFilesKept", new { files = string.Join(", ", stayed) }));
+        }
+        catch (Exception ex)
+        {
+            Util.Log.Error($"patch {inst.Id}: Relic's files could not go over the player's own ({why}) — the game starts with theirs", ex);
+            Log?.Invoke(L.T("core.play.ownFilesNotReplaced", new { reason = ex.Message }));
         }
     }
 
@@ -487,13 +547,20 @@ public sealed class PlaySession
     /// once, at registration, so a version registered before the payload existed would keep launching
     /// the Win10 way on Win11 (and without the enhancements on Win10). Runs after every
     /// ApplyBundledFixes; saved only when it really changed — the --play shortcut runs in its own
-    /// process, and a Save that races the app's is worth doing exactly once per version, not per launch.</summary>
+    /// process, and a Save that races the app's is worth doing exactly once per version, not per launch.
+    /// In that process (<see cref="StateReadAtStart"/>) only the version's injector goes into the state FILE
+    /// (<see cref="RelicState.RememberInjector"/>), never the whole state it read at its start. The record's change
+    /// and its save run under <see cref="RelicState.Gate"/>, the state's one lock.</summary>
     private void RefreshInjector(InstalledVersion inst)
     {
-        string? before = inst.LauncherExe;
-        InstallService.DetectInjector(inst);
-        if (string.Equals(before, inst.LauncherExe, StringComparison.OrdinalIgnoreCase)) return;
-        Util.Log.Info($"injector detected after patch for {inst.Id}: {inst.LauncherExe}");
-        _state.Save();
+        lock (RelicState.Gate)
+        {
+            string? before = inst.LauncherExe;
+            InstallService.DetectInjector(inst);
+            if (string.Equals(before, inst.LauncherExe, StringComparison.OrdinalIgnoreCase)) return;
+            Util.Log.Info($"injector detected after patch for {inst.Id}: {inst.LauncherExe}");
+            if (StateReadAtStart) RelicState.RememberInjector(inst.Id, inst.LauncherExe, inst.InjectDll);
+            else _state.Save();
+        }
     }
 }

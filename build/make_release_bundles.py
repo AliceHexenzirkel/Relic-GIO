@@ -2,7 +2,7 @@
 """Builds the release bundles that go beside the installers on a GitHub release.
 
     python build/make_release_bundles.py [--out dist] [--navmesh-zip <zip>] [--extra <file>]...
-                                         [--versions 1.6 2.8]
+                                         [--versions <ver> ...]
 
 Standard library only, Python 3.9 or newer, Windows or Linux (the workflow .github/workflows/build.yml
 runs it on ubuntu-latest). Everything is read from the repository: agent/payloads/<ver>/ with its
@@ -13,7 +13,8 @@ What it writes into --out (default: <repo>/dist, gitignored):
 
   relic-server-fixes-<ver>.zip   the repaired server data files + the ready-made saves of a version, laid
                                  out for someone who applies them BY HAND to a GIO server stack, without
-                                 the launcher or the agent (the readme.txt inside gives the steps):
+                                 the launcher or the agent (the readme.txt inside gives the steps) -- one
+                                 per version whose agent/payloads/<ver>/manifest.json ships a save:
                                    readme.txt
                                    server/data/txt/<file>              every manifest file of stage
                                                                        txt_fix or config, at its dst
@@ -29,7 +30,9 @@ What it writes into --out (default: <repo>/dist, gitignored):
                                  refused when a file imports a Visual C++ runtime DLL),
                                  Run.bat at the root (extract into the game folder, beside
                                  GenshinImpact.exe), README.txt, and 2.8-only/global-metadata.dat + README.txt
-                                 (the patched metadata the 2.8 client needs to start at all)
+                                 (the patched metadata the 2.8 client needs to start at all); the 3.2 login
+                                 patch is not in it -- the launcher writes it into the player's own file,
+                                 and the README says so
   relic-navmesh-2.8.zip          with --navmesh-zip: the navmesh archive, verified (it must hold
                                  2.8/navmesh.json, and every file the manifest lists with the listed size,
                                  md5 and sha256) and copied under the release asset name
@@ -60,7 +63,6 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 AGENT_PAYLOADS = REPO / "agent" / "payloads"
 CLIENT_PAYLOAD = REPO / "payload"
-VERSIONS = ("1.6", "2.8")
 
 # A fixed timestamp makes the zips reproducible (the same inputs give the same bytes).
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)
@@ -80,12 +82,10 @@ ASSET_NOTES = {
     NAVMESH_ASSET: "The navmesh archive alone (2.8: the archipelago and the quest domains). Put it into the "
                    "agent's payloads folder and the agent adopts it, or let the launcher download it from the "
                    "Pathfinding server card.",
-    "relic-server-fixes-1.6.zip": "The repaired 1.6 server data + the ready-made saves, for applying by hand "
-                                  "to a GIO 1.6 stack without the launcher or the agent (readme.txt inside).",
-    "relic-server-fixes-2.8.zip": "The repaired 2.8 server data + the ready-made saves, for applying by hand "
-                                  "to a GIO 2.8 stack without the launcher or the agent (readme.txt inside).",
-    MHYNOT_ASSET: "The Windows 11 injector (launcher.exe + mhynot2.dll) with a Run.bat for the game folder, "
-                  "and the patched global-metadata.dat the 2.8 client needs. Relic applies both itself.",
+    MHYNOT_ASSET: "The Windows 11 injector of the 1.6 and 2.8 clients (launcher.exe + mhynot2.dll) with a "
+                  "Run.bat for the game folder, and the patched global-metadata.dat the 2.8 client needs. Relic "
+                  "applies both itself. The 3.2 login patch is not in it: Relic writes those bytes into the "
+                  "player's own UserAssembly.dll.",
 }
 
 
@@ -171,6 +171,36 @@ class Zip:
 
 
 # ---------------------------------------------------------------- server fixes
+
+# The release note of a version's fixes bundle (release-notes.md).
+FIXES_NOTE = ("The repaired {v} server data + the ready-made saves, for applying by hand to a GIO {v} stack without "
+              "the launcher or the agent (readme.txt inside).")
+
+
+def ships_save(man) -> bool:
+    """Whether a payload manifest ships a save, by the agent's rule (manifest_ships_save in agent/gio_agent.py): a
+    files[] entry of the save stage -- an entry flagged tsv is a server data file, not progress (effective_stage) --
+    or a dump under mysql[]."""
+    if not isinstance(man, dict):
+        return False
+    files = man.get("files")
+    entries = [e for e in files if isinstance(e, dict)] if isinstance(files, list) else []
+    return any(e.get("stage", "save") == "save" and not e.get("tsv") for e in entries) or bool(man.get("mysql"))
+
+
+def fixes_versions() -> list[str]:
+    """The versions a fixes bundle is built for: every agent/payloads/<ver>/ whose manifest.json ships a save. Such a
+    bundle is a version's save, its player database before and after the quest and its event schedule, laid out
+    for a stack run by hand; the payload of a version that ships no save holds only files the agent puts in place
+    by itself, so it has no bundle."""
+    try:
+        names = sorted(p.name for p in AGENT_PAYLOADS.iterdir() if p.is_dir())
+    except OSError as e:
+        raise BundleError("%s: %s" % (AGENT_PAYLOADS, e))
+    return [ver for ver in names
+            if (AGENT_PAYLOADS / ver / "manifest.json").is_file()
+            and ships_save(read_json(AGENT_PAYLOADS / ver / "manifest.json"))]
+
 
 def _about(note: str) -> str:
     """The sentences of the manifest note up to and including the one naming the source: what the save
@@ -414,6 +444,22 @@ GenshinImpact.exe never gets past its start. launcher.exe starts the game with m
 driver's place: a user-mode emulation of the driver. Windows 10 starts the game directly and does not
 need this; Run.bat works there as well.
 
+What it carries
+---------------
+  ayy\\anime\\build\\launcher.exe, mhynot2.dll   the injector pair (1.6 and 2.8)
+  Run.bat                                     starts the game through it
+  2.8-only\\global-metadata.dat + README.txt   the patched file the 2.8 client does not start without
+
+What it does not carry
+----------------------
+The 3.2 client logs in to a private server only with a patch of its own: a few hundred bytes written into
+GenshinImpact_Data\\Native\\UserAssembly.dll of the game folder. It is not in this archive. The Relic
+launcher writes those bytes into the player's own copy of the file -- only into the unmodified file of the
+3.2.0 build -- when 3.2 is installed or imported, and checks them before every launch. Nor does it carry
+the mhypbase.dll the Relic launcher puts in the 3.2 game folder (a build of RSAPatch, written over the
+original file - over a mhypbase.dll of the player's own only when the player chooses it); this injector does not
+start the 3.2 client on Windows 11 without it.
+
 What the game needs
 -------------------
 launcher.exe and mhynot2.dll need nothing installed. The game's own plugins use the Microsoft Visual C++
@@ -631,7 +677,8 @@ def write_sums_and_notes(out: Path, assets: list[Path]):
     with open(out / "release-notes.md", "w", encoding="utf-8", newline="\n") as f:
         f.write("| Asset | Size | SHA-256 | What it is for |\n|---|---|---|---|\n")
         for name, size, sha in rows:
-            note = ASSET_NOTES.get(name, "")
+            fixes = re.fullmatch(r"relic-server-fixes-(.+)\.zip", name)
+            note = FIXES_NOTE.format(v=fixes.group(1)) if fixes else ASSET_NOTES.get(name, "")
             f.write("| `%s` | %s | `%s` | %s |\n" % (name, mb(size), sha, note))
         f.write("\n`SHA256SUMS.txt` lists the same hashes in `sha256sum -c` format.\n")
     return rows
@@ -645,15 +692,18 @@ def main(argv=None) -> int:
     ap.add_argument("--navmesh-zip", help="the navmesh archive to verify and attach as %s" % NAVMESH_ASSET)
     ap.add_argument("--extra", action="append", default=[],
                     help="a file built elsewhere to copy in and list (RelicSetup.exe, ...); repeatable")
-    ap.add_argument("--versions", nargs="+", default=list(VERSIONS), help="server versions (default: 1.6 2.8)")
+    ap.add_argument("--versions", nargs="+",
+                    help="server versions of the fixes bundles (default: every version whose payload ships a save)")
     ap.add_argument("--no-sums", action="store_true", help="do not write SHA256SUMS.txt / release-notes.md")
     a = ap.parse_args(argv)
     out = Path(a.out).resolve()
     assets: list[Path] = []
     try:
-        for ver in a.versions:
-            if ver not in VERSIONS:
-                raise BundleError("unknown version %r (known: %s)" % (ver, ", ".join(VERSIONS)))
+        known = fixes_versions()
+        for ver in a.versions or known:
+            if ver not in known:
+                raise BundleError("version %r has no fixes bundle: no agent/payloads/%s/manifest.json that ships a "
+                                  "save (one ships for: %s)" % (ver, ver, ", ".join(known) or "none"))
             p = build_server_fixes(ver, out)
             print("  %s: %s" % (p.name, mb(p.stat().st_size)))
             assets.append(p)

@@ -9,6 +9,10 @@
       <Configuration>Release</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="DevTest|x64">
+      <Configuration>DevTest</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
     <ProjectConfiguration Include="Release_WS|x64">
       <Configuration>Release_WS</Configuration>
       <Platform>x64</Platform>
@@ -44,6 +48,7 @@
     <ClInclude Include="src\user\cheat\debugger.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release_WS|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DevTest|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
     </ClInclude>
     <ClInclude Include="src\user\cheat\GenshinCM.h" />
@@ -90,9 +95,14 @@
     <ClInclude Include="src\user\cheat\imap\InteractiveMap.h" />
     <ClInclude Include="src\user\cheat\imap\MapProgress.h" />
     <ClInclude Include="src\user\cheat\misc\Debug.h" />
+    <ClInclude Include="src\user\cheat\misc\DevTest.h" />
+    <ClInclude Include="src\user\cheat\misc\DevTestChannel.h" />
+    <ClInclude Include="src\user\cheat\misc\DevTestCapture.h" />
+    <ClInclude Include="src\user\cheat\misc\DevTestUi.h" />
     <ClInclude Include="src\user\cheat\misc\Hotkeys.h" />
     <ClInclude Include="src\user\cheat\misc\sniffer\PacketSniffer.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DevTest|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release_WS|x64'">false</ExcludedFromBuild>
     </ClInclude>
     <ClInclude Include="src\user\cheat\native.h" />
@@ -153,6 +163,7 @@
     <ClCompile Include="src\user\cheat\world\FakeTime.cpp" />
     <ClCompile Include="src\user\cheat\debugger.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DevTest|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release_WS|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
     </ClCompile>
@@ -179,6 +190,7 @@
     <ClCompile Include="src\framework\dllmain.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='DevTest|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release_WS|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="src\framework\helpers.cpp" />
@@ -186,6 +198,7 @@
     <ClCompile Include="src\framework\pch-il2cpp.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='DevTest|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release_WS|x64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="src\user\cheat\cheat.cpp" />
@@ -197,9 +210,30 @@
     <ClCompile Include="src\user\cheat\ILPatternScanner.cpp" />
     <ClCompile Include="src\user\cheat\imap\InteractiveMap.cpp" />
     <ClCompile Include="src\user\cheat\misc\Debug.cpp" />
+    <ClCompile Include="src\user\cheat\misc\DevTest.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release_WS|x64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\user\cheat\misc\DevTestChannel.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release_WS|x64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\user\cheat\misc\DevTestCapture.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release_WS|x64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\user\cheat\misc\DevTestUi.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release_WS|x64'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\user\cheat\misc\Hotkeys.cpp" />
     <ClCompile Include="src\user\cheat\misc\sniffer\PacketSniffer.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='DevTest|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release_WS|x64'">false</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\user\cheat\native.cpp" />
@@ -1265,7 +1299,7 @@
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <PropertyGroup Label="Relic">
-    <!-- Game version this DLL targets: 16 | 28 | 33 (selects src/appdata-$(GameVersion) and RELIC_GAME_VERSION) -->
+    <!-- Game version this DLL targets: 16 | 28 | 32 | 33 (selects src/appdata-$(GameVersion) and RELIC_GAME_VERSION) -->
     <GameVersion Condition="'$(GameVersion)'==''">33</GameVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -1276,6 +1310,13 @@
     <CharacterSet>MultiByte</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='DevTest|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v145</PlatformToolset>
@@ -1300,6 +1341,9 @@
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='DevTest|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release_WS|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
@@ -1316,6 +1360,15 @@
     </CustomBuildAfterTargets>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <LinkIncremental>false</LinkIncremental>
+    <TargetName>CLibrary</TargetName>
+    <OutDir>$(SolutionDir)bin\v$(GameVersion)\$(Configuration)-$(PlatformShortName)\</OutDir>
+    <IntDir>$(SolutionDir)bin\v$(GameVersion)\$(Configuration)-$(PlatformShortName)\obj\$(ProjectName)\</IntDir>
+    <CustomBuildBeforeTargets>Run</CustomBuildBeforeTargets>
+    <PostBuildEventUseInBuild>true</PostBuildEventUseInBuild>
+    <CustomBuildAfterTargets>FinalizeBuildStatus</CustomBuildAfterTargets>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='DevTest|x64'">
     <LinkIncremental>false</LinkIncremental>
     <TargetName>CLibrary</TargetName>
     <OutDir>$(SolutionDir)bin\v$(GameVersion)\$(Configuration)-$(PlatformShortName)\</OutDir>
@@ -1405,6 +1458,45 @@
     </Link>
     <ResourceCompile>
       <PreprocessorDefinitions>RELIC_GAME_VERSION=$(GameVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DevTest|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>RELIC_DEVTEST=1;RELIC_GAME_VERSION=$(GameVersion);_AMD64_;_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;CHEATLIBRARY_EXPORTS;_WINDOWS;_USRDLL;NDEBUG;CHEATLIBRARYNEW_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/Brepro %(AdditionalOptions)</AdditionalOptions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch-il2cpp.h</PrecompiledHeaderFile>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)src/appdata-$(GameVersion);$(ProjectDir)src/framework;$(ProjectDir)res/;$(ProjectDir)src/user;$(SolutionDir)cheat-base/src/;$(SolutionDir)cheat-base/vendor/imgui/;$(SolutionDir)cheat-base/vendor/json/single_include/;$(SolutionDir)cheat-base/vendor/magic_enum/include/;$(SolutionDir)cheat-base/vendor/fmt/include/;$(SolutionDir)cheat-base/vendor/imgui-notify-v2/;$(SolutionDir)cheat-base/vendor/simpleIni/;$(SolutionDir)cheat-base/vendor/imgui-notify-v2/;$(SolutionDir)cheat-base/vendor/detours/</AdditionalIncludeDirectories>
+      <Optimization>MaxSpeed</Optimization>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
+      <DebugInformationFormat>None</DebugInformationFormat>
+      <SupportJustMyCode>false</SupportJustMyCode>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <AdditionalOptions>/Brepro /PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <EnableUAC>false</EnableUAC>
+      <AdditionalLibraryDirectories>$(OutDir)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>cheat-base.lib;ntdll.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
+      <GenerateMapFile>true</GenerateMapFile>
+    </Link>
+    <ResourceCompile>
+      <PreprocessorDefinitions>RELIC_DEVTEST=1;RELIC_GAME_VERSION=$(GameVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_WS|x64'">

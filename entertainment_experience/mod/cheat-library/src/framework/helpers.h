@@ -360,7 +360,9 @@ std::string il2cppi_to_string(app::Vector vec);
 std::string il2cppi_to_string(app::Vector2 vec);
 std::string il2cppi_to_string(app::Vector3 vec);
 app::String* string_to_il2cppi(std::string input);
+#if RELIC_GAME_VERSION != 32   // Marshal.PtrToStringUni is not in the 3.2 data
 app::String* string_to_il2cppi(std::wstring input);
+#endif
 std::string to_hex_string(app::Byte__Array* barray, int length);
 #endif
 

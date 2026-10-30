@@ -172,7 +172,7 @@ static LGameVersion GetGameVersion()
 
 	for (auto& [moduleName, checksumData] : lVersionChecksum.at("modules").items())
 	{
-		if (!scanner.IsValidModuleHash(moduleName, checksumData))
+		if (!RELIC_MODULE_MATCHES(scanner, moduleName, checksumData))
 		{
 			LOG_ERROR("Module %s does not match the %s build this library was made for.", moduleName.c_str(), version.c_str());
 			return LGameVersion::NONE;

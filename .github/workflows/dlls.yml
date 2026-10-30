@@ -1,15 +1,20 @@
-# Builds Relic's two native components from a clean checkout and offers the results as artifacts:
+# Builds Relic's native components from a clean checkout and offers the results as artifacts:
 #   ee        the in-game enhancements DLL (entertainment_experience/mod, CLibrary.dll), one job per game
 #             version, through entertainment_experience/tools/build_ee.ps1
 #   injector  the Win11 injector (the injector/mhynot2 submodule: launcher.exe + mhynot2.dll) through the
 #             CMake wrapper in injector/, linked with the static C runtime
+#   rsapatch  the RSA key patch (the rsapatch/RSAPatch submodule: RSAPatch.dll -> mhypbase.dll) through
+#             the CMake wrapper in rsapatch/, linked with the dynamic C runtime (the TLS callback uses
+#             std::filesystem before the static CRT would be initialised)
 # The local counterpart is build\build_dlls.ps1. Nothing here is committed or copied into payload/: the
 # step summary compares every hash with the committed payload file, and payload/ is updated by hand
 # (build_dlls.ps1 -CopyToPayload) after an in-game test.
 #
 # No output may depend on the Visual C++ redistributable of the player's PC: a job fails when its file
 # imports a Visual C++ runtime DLL (build/pe_imports.ps1, the rule build/publish.ps1 applies to payload/
-# at every ship build).
+# at every ship build). The enhancements DLL built here is a Release build: the ee job fails when it
+# carries the marker of a DevTest build (the dev-only test bed, build_ee.ps1 -Config DevTest, which no
+# workflow builds), the marker build/publish.ps1 refuses in a ship build.
 #
 # Toolset: the project files name v145 (MSVC 14.5x). A runner without it builds with v143 (the Visual
 # Studio 2022 images); the job picks whichever is installed and names it in the artifact.
@@ -42,6 +47,7 @@ on:
       - 'entertainment_experience/mod/**'
       - 'entertainment_experience/tools/build_ee.ps1'
       - 'injector/**'
+      - 'rsapatch/**'
       - 'build/build_dlls.ps1'
       - 'build/pe_imports.ps1'
       - '.github/workflows/dlls.yml'
@@ -50,6 +56,7 @@ on:
       - 'entertainment_experience/mod/**'
       - 'entertainment_experience/tools/build_ee.ps1'
       - 'injector/**'
+      - 'rsapatch/**'
       - 'build/build_dlls.ps1'
       - 'build/pe_imports.ps1'
       - '.github/workflows/dlls.yml'
@@ -119,7 +126,8 @@ jobs:
 
       # The summary line carries the hash, the comparison with the committed payload file and the
       # imports; a Visual C++ runtime DLL among them fails the job (launcher.exe cannot report a failed
-      # LoadLibrary: on a PC without the Visual C++ redistributable the menu would just be absent).
+      # LoadLibrary: on a PC without the Visual C++ redistributable the menu would just be absent). So
+      # does the marker of a DevTest build: the Release configuration never defines RELIC_DEVTEST.
       - name: Compare with the committed payload, imports
         env:
           GAME_VERSION: ${{ matrix.version }}
@@ -145,6 +153,7 @@ jobs:
           $line >> $env:GITHUB_STEP_SUMMARY
           $vc = @(Get-VcRuntimeImports $dll.FullName)
           if ($vc.Count -gt 0) { throw "CLibrary.dll depends on the Visual C++ redistributable: it imports $($vc -join ', ')" }
+          if (Test-DevBuildMarker -Path $dll.FullName) { throw "CLibrary.dll carries the marker of a DevTest build: the Release configuration defines RELIC_DEVTEST" }
 
       # Kept 7 days: on a private repository artifacts count against the account's Actions storage.
       - uses: actions/upload-artifact@v7
@@ -212,5 +221,52 @@ jobs:
           path: |
             injector/build/launcher.exe
             injector/build/mhynot2.dll
+          retention-days: 7
+          if-no-files-found: error
+
+  rsapatch:
+    name: RSAPatch.dll (mhypbase.dll)
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_injector }}
+    runs-on: ${{ inputs.runner || 'windows-2025' }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Build (rsapatch/CMakeLists.txt, dynamic CRT), hash and imports
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+          if (-not $vs) { throw 'no Visual Studio instance with the MSVC x64 tools on this runner' }
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=amd64 -host_arch=amd64'
+          cmake --version
+          ninja --version
+          cmake -S rsapatch -B rsapatch/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed (exit $LASTEXITCODE)" }
+          cmake --build rsapatch/build
+          if ($LASTEXITCODE -ne 0) { throw "cmake --build failed (exit $LASTEXITCODE)" }
+          . ./build/pe_imports.ps1
+          $f = Get-Item 'rsapatch/build/RSAPatch.dll'
+          $payload = 'payload/3.2/mhypbase.dll.bin'
+          $sha = (Get-FileHash $f -Algorithm SHA256).Hash.ToLowerInvariant()
+          $committed = (Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+          $verdict = if ($committed -eq $sha) { "same as $payload" } else { "differs from $payload (``$committed``)" }
+          $imports = @(Get-PeImports $f.FullName)
+          $line = "- RSAPatch.dll (dynamic CRT): $([math]::Round($f.Length / 1KB)) KB, SHA-256 ``$sha`` - $verdict; imports $($imports -join ', ')"
+          $line
+          $line >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rsapatch-dynamic-crt
+          path: rsapatch/build/RSAPatch.dll
           retention-days: 7
           if-no-files-found: error

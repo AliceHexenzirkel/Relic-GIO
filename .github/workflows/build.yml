@@ -4,7 +4,7 @@
 #   Manual: Actions -> "Build Relic" -> Run workflow. Every field is optional; an empty field falls
 #           back to the repository variable named in its description (Settings -> Secrets and
 #           variables -> Actions -> Variables), else to publish.ps1's own default.
-#   Tag:    git tag v1.0.0 && git push origin v1.0.0 -> the same builds from the variables, plus a DRAFT
+#   Tag:    git tag v1.2.0 && git push origin v1.2.0 -> the same builds from the variables, plus a DRAFT
 #           GitHub Release (made public by hand from the Releases page) with every asset attached:
 #             RelicSetup.exe              the plain installer
 #             RelicSetup-navmesh.exe      the same build with the 2.8 navmesh bundle inside (only when a
@@ -100,7 +100,9 @@ jobs:
 
       # publish.ps1 (the step above) fails on a payload .exe / .dll that imports a Visual C++ runtime
       # DLL: such a file would depend on the Visual C++ redistributable of the player's PC. This step
-      # puts on the run page what the shipped injector and enhancements DLLs import.
+      # puts on the run page what the shipped injector and enhancements DLLs import. An entry of kind
+      # 'bytepatch' is passed over (Test-PayloadPeEntry): its destination is a .dll of the player's own
+      # game, its payload file only the bytes written into it.
       - name: Native payload files (imports)
         run: |
           . ./build/pe_imports.ps1
@@ -108,7 +110,7 @@ jobs:
           $manifest = Get-Content (Join-Path $payload 'manifest.json') -Raw | ConvertFrom-Json
           $entries = @($manifest.common) + @($manifest.versions.PSObject.Properties.Value | ForEach-Object { $_ })
           foreach ($e in $entries) {
-            if ("$($e.dst)" -notmatch '\.(exe|dll)$') { continue }
+            if (-not (Test-PayloadPeEntry $e)) { continue }
             $imports = @(Get-PeImports (Join-Path $payload $e.src))
             "- payload/$($e.src): imports $($imports -join ', ')" >> $env:GITHUB_STEP_SUMMARY
           }
@@ -345,10 +347,90 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  # ------------------------------------------------------------------ the agent selftest
+  # install_agent.sh runs `gio_agent.py --selftest` on every box before it touches it (and the launcher runs it on
+  # its staged copy before it updates the agent on a PC): a selftest that fails there aborts every install and every
+  # upgrade. Run here on Linux, under the oldest Python a box may have (Alma / RHEL 9: 3.9) and a current one, once
+  # plain and once with a box's settings exported -- the selftest neutralises them, and one it missed would abort
+  # the upgrade of every box that has it --, then with the secrets a box may have stored that the agent does not
+  # take (the vendor's published values, values its rules refuse): only a WARNING at import, never a failed run.
+  # No docker and no secret: the selftest fakes every docker call, and the values below are made up or the
+  # vendor's published ones. The configured stack folders hold a file each, which every run must leave as it is.
+  # Both legs run on a named image that setup-python has builds of both Pythons for (3.9 has none for an image newer
+  # than ubuntu-24.04): a runner image that moves on never blocks a release. The draft release needs this job: an
+  # agent that fails its selftest is never shipped.
+  agent-selftest:
+    name: Agent selftest (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.12']
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Selftest
+        env:
+          GIO_PAYLOAD_DIR: ${{ github.workspace }}/agent/payloads
+        run: python -B agent/gio_agent.py --selftest
+
+      - name: Selftest with a box's settings exported
+        env:
+          GIO_PAYLOAD_DIR: ${{ github.workspace }}/agent/payloads
+          GIO_HOTPATCH_DISK_RESERVE: '999999'
+          GIO_AGENT_REGION: 'a&b'
+          GIO_ADVERTISED_HOST: game.example.com
+          GIO_HOTPATCH_URL: http://198.51.100.7:18080/hotpatch
+          GIO_MUIP_KEY: Chosen_Key-12345
+          GIO_MYSQL_ROOT_PASSWORD: Root_Pw-12345
+          GIO_FLASK_SECRET_KEY: Flask_Key-12345
+          GIO_KEEP_ENV: '1'
+        run: |
+          set -eu
+          box="$RUNNER_TEMP/box"
+          for v in 1.6 2.8 3.2; do mkdir -p "$box/${v}_live"; echo "a stack folder of the box" > "$box/${v}_live/kept.txt"; done
+          (cd "$box" && find . | sort && find . -type f -exec sha256sum {} + | sort) > "$RUNNER_TEMP/box.before"
+          GIO_DIR_16="$box/1.6_live" GIO_DIR_28="$box/2.8_live" GIO_DIR_32="$box/3.2_live" \
+            python -B agent/gio_agent.py --selftest
+          (cd "$box" && find . | sort && find . -type f -exec sha256sum {} + | sort) | cmp -s - "$RUNNER_TEMP/box.before" \
+            || { echo "the selftest changed a configured stack folder"; exit 1; }
+
+      # The same box with stored secrets the agent does not take: the vendor's published values, then values its
+      # rules refuse (a MUIP key with a character it does not allow, a MySQL root password that starts with a
+      # digit, a Flask key under 8 characters).
+      - name: Selftest with a vendor default, then an invalid value, in each secret key
+        env:
+          GIO_PAYLOAD_DIR: ${{ github.workspace }}/agent/payloads
+          GIO_HOTPATCH_DISK_RESERVE: '999999'
+          GIO_AGENT_REGION: 'a&b'
+          GIO_ADVERTISED_HOST: game.example.com
+          GIO_HOTPATCH_URL: http://198.51.100.7:18080/hotpatch
+          GIO_KEEP_ENV: '1'
+        run: |
+          set -eu
+          box="$RUNNER_TEMP/box"
+          for secrets in "8JTdsghuAythdHFtjkasiuHbxdjjayYfsvaJ UUshgAUgtGenMihOybO GuaHanbGfasCXCCClol" \
+                         "bad-key! 1abcdefgh short7"; do
+            set -- $secrets
+            GIO_MUIP_KEY="$1" GIO_MYSQL_ROOT_PASSWORD="$2" GIO_FLASK_SECRET_KEY="$3" \
+              GIO_DIR_16="$box/1.6_live" GIO_DIR_28="$box/2.8_live" GIO_DIR_32="$box/3.2_live" \
+              python -B agent/gio_agent.py --selftest
+            (cd "$box" && find . | sort && find . -type f -exec sha256sum {} + | sort) | cmp -s - "$RUNNER_TEMP/box.before" \
+              || { echo "the selftest changed a configured stack folder"; exit 1; }
+          done
+
   # ------------------------------------------------------------------ the draft release (tags only)
   release:
     name: Draft release
-    needs: [build, build-navmesh, bundles]
+    needs: [build, build-navmesh, bundles, agent-selftest]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

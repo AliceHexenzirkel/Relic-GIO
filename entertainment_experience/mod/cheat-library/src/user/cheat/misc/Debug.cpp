@@ -51,7 +51,7 @@ namespace cheat::feature
         return instance;
     }
 
-
+#if RELIC_GAME_VERSION != 32   // PlayerLoginReq is not in the 3.2 data (the hook itself is not installed anywhere)
     // Raise when player start game log in (after press a door)
     // Contains information about player system and game integrity
     static void SendInfo_Hook(app::MoleMole_NetworkManager* __this, app::PlayerLoginReq* info, MethodInfo* method)
@@ -85,7 +85,7 @@ namespace cheat::feature
 
         CALL_ORIGIN(SendInfo_Hook, __this, info, method);
     }
-
+#endif
     static void Lua_xlua_pushasciistring_Hook(void* __this, void* L, app::String* str, MethodInfo* method)
     {
         LOG_DEBUG("Pushed string: %s", il2cppi_to_string(str).c_str());
@@ -243,7 +243,9 @@ namespace cheat::feature
             auto maxHP = app::MoleMole_SafeFloat_get_Value(combatProp->fields.maxHP, nullptr);
             auto HP = app::MoleMole_SafeFloat_get_Value(combatProp->fields.HP, nullptr);
             auto weight = app::MoleMole_SafeFloat_get_Value(combatProp->fields.weight, nullptr);
+#if RELIC_GAME_VERSION != 32   // the 3.2 CombatProperty names no level field
             auto level = app::MoleMole_SafeFloat_get_Value(combatProp->fields.level, nullptr);
+#endif
             auto denyLockOn = combatProp->fields.denyLockOn == nullptr || app::MoleMole_FixedBoolStack_get_value(combatProp->fields.denyLockOn, nullptr);
             auto isLockHp = combatProp->fields.islockHP == nullptr || app::MoleMole_FixedBoolStack_get_value(combatProp->fields.islockHP, nullptr);
             auto isInvincible = combatProp->fields.isInvincible == nullptr || app::MoleMole_FixedBoolStack_get_value(combatProp->fields.isInvincible, nullptr);
@@ -257,7 +259,9 @@ namespace cheat::feature
             ImGui::Text(_TR("Combat Prop: %s"), combatProp == nullptr ? "No" : "Yes");
             ImGui::Text(_TR("HP Curr/Max: %.01f/%.01f"), HP, maxHP);
             ImGui::Text(_TR("Weight: %.01f"), weight);
+#if RELIC_GAME_VERSION != 32
             ImGui::Text(_TR("Level: %.01f"), level);
+#endif
             ImGui::Text(_TR("elementType: %s"), magic_enum::enum_name(combatProp->fields.elemType).data());
             ImGui::Text(_TR("denyLockOn: %s"), denyLockOn ? "Yes" : "No");
             ImGui::Text(_TR("Locked HP: %s"), isLockHp ? "Yes" : "No");
@@ -553,7 +557,6 @@ namespace cheat::feature
         if (!useObjectNameFilter)
             ImGui::EndDisabled();
 
-
         ImGui::Checkbox("Filter by Radius", &useRadius);
         if (!useRadius)
             ImGui::BeginDisabled();
@@ -645,7 +648,6 @@ namespace cheat::feature
 
                                 if (validEntities.size() == 0 && !showEmptyTypes)
                                     continue;
-
 
                                 if (ImGui::BeginTabItem(typeName.data()))
                                 {
@@ -746,7 +748,6 @@ namespace cheat::feature
         DRAW_BOOL(interactionManager, _isManulAttackMode);
         DRAW_BOOL(interactionManager, _canShowAvatarEffectWhenTalkStart);
 
-
         auto keyList = TO_UNI_LINK_LIST(interactionManager->fields._keyInterList, app::InterActionGrp*);
         if (keyList != nullptr && ImGui::TreeNode("KeyList"))
         {
@@ -802,7 +803,6 @@ namespace cheat::feature
 
         auto levelPos = app::Miscs_GenLevelPos_1(avatarPos, nullptr);
         ImGui::Text(_TR("Level position: %s"), il2cppi_to_string(levelPos).c_str());
-
 
         static app::Vector3 teleportPos = {};
         ImGui::InputFloat3("Teleport position", reinterpret_cast<float*>(&teleportPos));

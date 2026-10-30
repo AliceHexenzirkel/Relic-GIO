@@ -26,8 +26,13 @@ namespace cheat::feature
 		ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + ImGui::GetWindowSize().x);
 
 		ImGui::TextColored(ImColor(28, 202, 214, 255), "Relic in-game enhancements");
+#if RELIC_GAME_VERSION == 32
+		ImGui::TextWrapped("A build of Akebi GC for the client versions Relic installs (1.6, 2.8, 3.2). "
+			"Press F1 to open or close this menu. Everything here is client-side and only affects your own game.");
+#else
 		ImGui::TextWrapped("A build of Akebi GC for the classic client versions Relic installs (1.6, 2.8). "
 			"Press F1 to open or close this menu. Everything here is client-side and only affects your own game.");
+#endif
 		ImGui::Spacing();
 
 		ImGui::TextColored(ImColor(28, 202, 214, 255), "Based on Akebi GC (Apache-2.0)");
@@ -44,6 +49,10 @@ namespace cheat::feature
 
 		ImGui::Text("Source of this build:");
 		TextURL("NctimeAza/AnimeGame-Cheat-3.3 v1.2.3", "https://github.com/NctimeAza/AnimeGame-Cheat-3.3", true, false);
+#if RELIC_GAME_VERSION == 32
+		ImGui::Text("Game 3.2 addresses and types:");
+		TextURL("NctimeAza/AnimeGame-Cheat-3.3 ee9258a", "https://github.com/NctimeAza/AnimeGame-Cheat-3.3/tree/ee9258aac2bf1717a1bcec80fa902c7f3db9a8da", true, false);
+#endif
 
 		ImGui::Text("Third-party components: Dear ImGui, Microsoft Detours, {fmt}, nlohmann/json, magic_enum, SimpleIni, stb_image, WinReg, imgui-notify, Font Awesome, Ruda font.");
 		ImGui::PopTextWrapPos();

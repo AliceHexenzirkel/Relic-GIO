@@ -7,7 +7,20 @@ comparisons -- which is all the trigger code of a Spiral Abyss scene consists of
 
     g = parse_text(text)
     g["tables"]["monsters"]              list of dicts, each with "__line" (1-based line of the entry's "{")
-    g["functions"]["action_EVENT_X"]     {"line", "calls": [{"fn", "line", "args"}], "compares": [...]}
+    g["functions"]["action_EVENT_X"]     {"line", "calls": [{"fn", "line", "args"}], "compares": [...],
+                                          "returns_false": count, "ifs": [head text], "shape": text}
+    g["locals"]                          the values the top-level `local` statements give, in script order
+                                          (a local is no table of the script: only unread asks for them)
+
+A function's control flow is not followed. What a caller needs to tell whether that matters comes with the
+function: how many `return false` statements it holds, the condition of every `if` / `elseif` as it is
+written (blanks collapsed; a comparison carries its own "text" the same way, so a head that is one
+comparison and nothing else equals it), and its shape -- the code from the parameter list to the last
+statement as one line of tokens, a blank between two, in which a ScriptLib call with its arguments is
+`@` and the function's name, and a string is `""`:
+
+    ( context , evt ) if 4001 ~= evt . param1 then return false end return true
+    ( context , evt ) @AddExtraGroupSuite if 0 ~= @RefreshGroup then @PrintContextLog return - 1 end return 0
 
 An expression the reader does not model (a call, arithmetic) is kept as Raw source text instead of failing:
 the caller decides what an unreadable value means.
@@ -16,6 +29,7 @@ import re
 
 KEYWORDS_OPEN = {"function", "if", "do", "repeat"}
 KEYWORDS_CLOSE = {"end", "until"}
+KEYWORDS_BRANCH = {"if", "elseif"}
 
 _NUM = re.compile(r"0[xX][0-9a-fA-F]+|\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -111,7 +125,8 @@ def tokenize(text):
     return toks
 
 
-def _num(s):
+def number(s):
+    """The value of a number token: an int, or a float for one written with a fraction or an exponent."""
     if s[:2] in ("0x", "0X"):
         return int(s, 16)
     try:
@@ -172,11 +187,11 @@ class _Parser(object):
             ok = True
         elif t.kind == "number":
             self.i += 1
-            val = _num(t.val)
+            val = number(t.val)
             ok = True
         elif t.kind == "op" and t.val == "-" and self.peek(1) is not None and self.peek(1).kind == "number":
             self.i += 2
-            val = -_num(self.peek(-1).val)
+            val = -number(self.peek(-1).val)
             ok = True
         elif t.kind == "string":
             self.i += 1
@@ -270,7 +285,9 @@ def plain(v):
 
 def unread(g):
     """What parse_text could not turn into a value: [(1-based line, source text)] of the top-level
-    statements it skipped and of every Raw expression in a table or a call."""
+    statements it skipped and of every Raw expression in a table, in what a top-level local is given or in
+    a call. A Raw takes in the code up to the next separator, so one that a local is given may hold the
+    statements behind it."""
     out = list(g["unknown"])
 
     def walk(v, line):
@@ -286,6 +303,7 @@ def unread(g):
                 walk(x, line)
 
     walk(g["tables"], None)
+    walk(g["locals"], None)
     for f in g["functions"].values():
         for c in f["calls"]:
             walk(c["args"], c["line"])
@@ -335,6 +353,7 @@ def _split_args(text, toks, lo, hi):
 
 def _function_info(name, text, code, toks, lo, hi, fstart, fend):
     calls = []
+    shape = []
     k = lo
     while k < hi:
         t = toks[k]
@@ -354,40 +373,53 @@ def _function_info(name, text, code, toks, lo, hi, fstart, fend):
                             break
                 j += 1
             calls.append({"fn": toks[k + 2].val, "line": t.line, "args": _split_args(text, toks, k + 4, j)})
+            shape.append("@" + toks[k + 2].val)
             k = j + 1
             continue
+        shape.append('""' if t.kind == "string" else t.val)
         k += 1
     # the literal comparisons of the body, read from the code with its comments blanked
     body = code[fstart.pos:fend.end]
     base_line = fstart.line
     compares = []
 
-    def line_of(off):
-        return base_line + body.count("\n", 0, off)
+    def compare(m, **what):
+        compares.append(dict(what, text=" ".join(m.group(0).split()),
+                             line=base_line + body.count("\n", 0, m.start())))
 
     for m in re.finditer(r"(-?\d+)\s*" + _CMP + r"\s*evt\.(param\d|source_eid|target_eid|source_name|uid)", body):
-        compares.append({"kind": "evt", "field": m.group(3), "op": m.group(2), "value": int(m.group(1)),
-                         "line": line_of(m.start())})
+        compare(m, kind="evt", field=m.group(3), op=m.group(2), value=int(m.group(1)))
     for m in re.finditer(r"evt\.(param\d|source_eid|target_eid|uid)\s*" + _CMP + r"\s*(-?\d+)", body):
-        compares.append({"kind": "evt", "field": m.group(1), "op": m.group(2), "value": int(m.group(3)),
-                         "line": line_of(m.start())})
+        compare(m, kind="evt", field=m.group(1), op=m.group(2), value=int(m.group(3)))
     for m in re.finditer(r"evt\.source_name\s*" + _CMP + r"\s*\"([^\"]*)\"", body):
-        compares.append({"kind": "evt", "field": "source_name", "op": m.group(1), "value": m.group(2),
-                         "line": line_of(m.start())})
+        compare(m, kind="evt", field="source_name", op=m.group(1), value=m.group(2))
     for m in re.finditer(r"\"([^\"]*)\"\s*" + _CMP + r"\s*evt\.source_name", body):
-        compares.append({"kind": "evt", "field": "source_name", "op": m.group(2), "value": m.group(1),
-                         "line": line_of(m.start())})
+        compare(m, kind="evt", field="source_name", op=m.group(2), value=m.group(1))
     for m in re.finditer(r"ScriptLib\.(GetGroupMonsterCount(?:ByGroupId)?)\(\s*context\s*(?:,\s*(\d+)\s*)?\)\s*"
                          + _CMP + r"\s*(-?\d+)", body):
-        compares.append({"kind": "monster_count", "fn": m.group(1),
-                         "group": int(m.group(2)) if m.group(2) else None, "op": m.group(3),
-                         "value": int(m.group(4)), "line": line_of(m.start())})
+        compare(m, kind="monster_count", fn=m.group(1), group=int(m.group(2)) if m.group(2) else None,
+                op=m.group(3), value=int(m.group(4)))
     for m in re.finditer(r"ScriptLib\.(GetGroupVariableValue(?:ByGroup)?)\(\s*context\s*,\s*\"([^\"]+)\"\s*"
                          r"(?:,\s*(\d+)\s*)?\)\s*" + _CMP + r"\s*(-?\d+)", body):
-        compares.append({"kind": "variable", "fn": m.group(1), "name": m.group(2),
-                         "group": int(m.group(3)) if m.group(3) else None, "op": m.group(4),
-                         "value": int(m.group(5)), "line": line_of(m.start())})
-    return {"name": name, "line": fstart.line, "end_line": fend.line, "calls": calls, "compares": compares}
+        compare(m, kind="variable", fn=m.group(1), name=m.group(2),
+                group=int(m.group(3)) if m.group(3) else None, op=m.group(4), value=int(m.group(5)))
+    # the control flow: the code between an `if` / `elseif` and its `then`, the `return false` statements
+    returns_false = 0
+    ifs = []
+    for k in range(lo, hi):
+        t = toks[k]
+        if t.kind != "name":
+            continue
+        if t.val == "return" and k + 1 < hi and toks[k + 1].kind == "name" and toks[k + 1].val == "false":
+            returns_false += 1
+        elif t.val in KEYWORDS_BRANCH:
+            j = k + 1
+            while j < hi and not (toks[j].kind == "name" and toks[j].val == "then"):
+                j += 1
+            ifs.append(" ".join(code[t.end:toks[j].pos if j < hi else fend.pos].split()))
+    # the last token is the function's own `end`
+    return {"name": name, "line": fstart.line, "end_line": fend.line, "calls": calls, "compares": compares,
+            "returns_false": returns_false, "ifs": ifs, "shape": " ".join(shape[:-1])}
 
 
 def parse_text(text):
@@ -397,6 +429,7 @@ def parse_text(text):
     p = _Parser(text, toks)
     tables = {}
     functions = {}
+    held = []
     unknown = []
     while p.peek() is not None:
         t = p.peek()
@@ -431,7 +464,9 @@ def parse_text(text):
         if t.kind == "name" and p.is_op("=", 1):
             p.i += 2
             val = p.parse_exp(stop=(",", ";", "}"))
-            if not is_local:
+            if is_local:
+                held.append(val)
+            else:
                 tables[t.val] = val
             continue
         if t.kind == "name" and t.val == "require":
@@ -445,4 +480,4 @@ def parse_text(text):
                 continue
         unknown.append((t.line, t.val))
         p.i += 1
-    return {"tables": tables, "functions": functions, "unknown": unknown}
+    return {"tables": tables, "functions": functions, "locals": held, "unknown": unknown}

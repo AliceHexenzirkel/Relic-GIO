@@ -1795,7 +1795,7 @@ namespace cheat::feature
         LoadSceneData(nlohmann::json::parse(ResourceLoader::Load("MapGaa16Scene4Data", RT_RCDATA)), 4);
 #elif RELIC_GAME_VERSION == 28 // Relic: "Summertime Odyssey" - scene 9, regenerated from the 2.8 server scripts
         LoadSceneData(nlohmann::json::parse(ResourceLoader::Load("MapGaa28Scene9Data", RT_RCDATA)), 9);
-#else
+#elif RELIC_GAME_VERSION != 32 // Relic: 3.2 carries no archipelago dataset; the 3.3 reference build loads Akebi's file
         LoadSceneData(nlohmann::json::parse(ResourceLoader::Load("MapGoldenAppleArchipelagoData", RT_RCDATA)), 9);
 #endif
 
@@ -1934,7 +1934,7 @@ namespace cheat::feature
 			"SweetFlowerMedaka", -720.16f, 513.55f);
 #endif
 
-#if RELIC_GAME_VERSION != 16 && RELIC_GAME_VERSION != 28   // only the 3.3 reference build loads Akebi's archipelago file
+#if RELIC_GAME_VERSION != 16 && RELIC_GAME_VERSION != 28 && RELIC_GAME_VERSION != 32   // only the 3.3 reference build loads Akebi's archipelago file
     	APPLY_SCENE_OFFSETS(9,
 			"PaleRedCrab", -396.38f, -253.75f,
 			"GoldenCrab", 145.89f, 215.34f);

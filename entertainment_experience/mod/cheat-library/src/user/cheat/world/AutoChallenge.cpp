@@ -78,11 +78,17 @@ namespace cheat::feature
 				{
 					auto combatProp = combat->fields._combatProperty_k__BackingField;
 					auto maxHP = app::MoleMole_SafeFloat_get_Value(combatProp->fields.maxHP, nullptr);
+#if RELIC_GAME_VERSION == 32
+					// The 3.2 CombatProperty names no level field: upstream's own 3.2 test, the hp alone.
+					// so many entities named "SkillObj_EmptyGadget", but the collection's hp is 99999.f
+					if (maxHP > 99998 && maxHP < 99999.9)
+#else
 					auto level = app::MoleMole_SafeFloat_get_Value(combatProp->fields.level, nullptr);
 
 					// so many entities named "SkillObj_EmptyGadget", but the collection's hp is 99999.f
 					// the Rock is lv.84 . the Electric is lv.90 . cant find wind
                     if (Equ(maxHP, 99999.0f) && (Equ(level, 84.0f) || Equ(level, 90.0f)))
+#endif
 					{
 						entity->setRelativePosition(avatarEntity->relativePosition());
 					}

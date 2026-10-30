@@ -14,7 +14,7 @@ using Relic.Core.State;
 using Relic.Core.Util;
 
 // Spike test runner. Each spike validates one risky mechanism in isolation.
-//   usage: Relic.Spikes [isolation|launch|download|fiddler|commands|agent|extract|state|patch|accounts|server|all]
+//   usage: Relic.Spikes [isolation|launch|download|fiddler|commands|agent|extract|state|patch|accounts|server|stackchoice|devtestgate|import|session|saved|setup|all]
 string spike = args.Length > 0 ? args[0].ToLowerInvariant() : "isolation";
 
 return spike switch
@@ -30,19 +30,34 @@ return spike switch
     "patch" => PatchSpike.Run(),
     "accounts" => AccountsSpike.Run(),
     "server" => ServerSpike.Run(),
+    "stackchoice" => StackChoiceSpike.Run(),
+    "devtestgate" => DevTestGateSpike.Run(),
+    "import" => ImportSpike.Run(),
+    "session" => SessionSpike.Run(),
+    "saved" => SavedSpike.Run(),
+    "setup" => SetupSpike.Run(),
     "deploy" => DeploySpike.Run(),   // opt-in live test (needs RELIC_SSH_* env) — never part of "all"
     "localagent" => LocalAgentSpike.Run(), // opt-in live test (needs RELIC_LOCAL_DIR16) — never part of "all"
     "agentupdate" => AgentUpdateSpike.Run(), // opt-in live test (the real agent on a spare port; needs python, takes a minute) — never part of "all"
-    "all" => new[]
+    "all" => AllCode(new[]
     {
         IsolationSpike.Run(), LaunchSpike.Run(), DownloadSpike.Run(),
         FiddlerSpike.Run(), CommandsSpike.Run(), AgentSpike.Run(), ExtractSpike.Run(),
-        StateSpike.Run(), PatchSpike.Run(), AccountsSpike.Run(), ServerSpike.Run(),
-    }.Max(),
+        StateSpike.Run(), PatchSpike.Run(), AccountsSpike.Run(), ServerSpike.Run(), StackChoiceSpike.Run(), DevTestGateSpike.Run(), ImportSpike.Run(), SessionSpike.Run(),
+        SavedSpike.Run(), SetupSpike.Run(),
+    }),
     _ => Fail($"unknown spike '{spike}'"),
 };
 
 static int Fail(string msg) { Console.Error.WriteLine(msg); return 2; }
+
+// The whole suite's exit code: a failed spike's (any code but 0 and 3) wins; otherwise 3 when the download spike
+// skipped its network half, or the hosts of it this PC could not reach, with every check it ran passed, else 0.
+static int AllCode(int[] codes)
+{
+    var failed = codes.Where(c => c is not 0 and not 3).ToList();
+    return failed.Count > 0 ? failed.Max() : codes.Max();
+}
 
 /// <summary>
 /// Proves the registry + LocalLow profile-swap round-trips losslessly, purges stale values, and
@@ -120,6 +135,35 @@ static class IsolationSpike
             Check("round-trip: live token intact after 5 swaps", RegValue(regKey, "token") == "AAA");
             Check("round-trip: live save intact after 5 swaps", ReadOrNull(Path.Combine(localLow, "save.txt")) == "LIVE");
             Check("marker: live is the clean active profile after round-trip", ps.LiveIsActive());
+
+            // --- the existence check asks HKCU in-process: reg query prints every value, seconds for a key
+            // of the game's size, and a swap asks twice ---
+            Check("exists: the synthetic key is found", ProfileStore.RegistryKeyExists(regKey));
+            Check("exists: the HKEY_CURRENT_USER spelling is found", ProfileStore.RegistryKeyExists(@"HKEY_CURRENT_USER\Software\RelicSpikeTest\Genshin Impact"));
+            Check("exists: a missing key is not", !ProfileStore.RegistryKeyExists(regRoot + @"\NoSuchKey"));
+            // A key of the game's size (40 REG_BINARY values, 300 KB): the check stays instant, and a round
+            // trip through another slot gives every byte back.
+            var big = new Dictionary<string, byte[]>();
+            using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\RelicSpikeTest\Genshin Impact"))
+                for (int i = 0; i < 40; i++)
+                {
+                    var bytes = new byte[7500];
+                    new Random(1000 + i).NextBytes(bytes);
+                    big["blob" + i] = bytes;
+                    k.SetValue("blob" + i, bytes, Microsoft.Win32.RegistryValueKind.Binary);
+                }
+            var existsWatch = System.Diagnostics.Stopwatch.StartNew();
+            bool bigFound = ProfileStore.RegistryKeyExists(regKey);
+            existsWatch.Stop();
+            Check($"exists: answers in under 100 ms on a 300 KB key ({existsWatch.Elapsed.TotalMilliseconds:F2} ms)", bigFound && existsWatch.Elapsed.TotalMilliseconds < 100);
+            ps.SwapTo("priv28", "live");
+            Check("big key: the other slot does not carry the blobs", RegBinary(regKey, "blob0") is null);
+            ps.SwapTo("live", "priv28");
+            Check("big key: every blob comes back byte for byte after a round trip", big.All(kv => RegBinary(regKey, kv.Key) is byte[] b && b.AsSpan().SequenceEqual(kv.Value)));
+            using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\RelicSpikeTest\Genshin Impact", writable: true))
+                foreach (var name in big.Keys) k?.DeleteValue(name, throwOnMissingValue: false);
+            ps.SaveProfile("live");
+            Check("big key: live is back to its own values", RegBinary(regKey, "blob0") is null && RegValue(regKey, "token") == "AAA");
 
             // --- torn-swap recovery: a crash mid-LoadProfile leaves "loading:<id>" + a disk mix ---
             File.WriteAllText(Path.Combine(store, "active"), "loading:priv28");
@@ -228,6 +272,13 @@ static class IsolationSpike
 
     static string? ReadOrNull(string path) => File.Exists(path) ? File.ReadAllText(path) : null;
 
+    /// <summary>A REG_BINARY value of an HKCU key, read in-process (null when the key or value is absent).</summary>
+    static byte[]? RegBinary(string key, string name)
+    {
+        using var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(key[@"HKCU\".Length..]);
+        return k?.GetValue(name) as byte[];
+    }
+
     static bool Throws(Action a)
     {
         try { a(); return false; } catch { return true; }
@@ -252,6 +303,10 @@ static class IsolationSpike
 /// </summary>
 static class LaunchSpike
 {
+    // The Classify / settle-window stand-ins: a name of their own, so a Relic running on this PC never
+    // counts them as game clients (ProcessGuard's processName seam).
+    const string StandIn = "RelicLaunchStandIn";
+
     public static int Run()
     {
         Console.WriteLine("== launch spike: OS detection + find-by-path + wait-for-exit ==");
@@ -409,20 +464,20 @@ static class LaunchSpike
             // GenshinImpact.exe is the only name Classify looks at, so stand-ins must carry that name.
             string oursDir = Path.Combine(tmp, "ours"); Directory.CreateDirectory(oursDir);
             string foreignDir = Path.Combine(tmp, "foreign"); Directory.CreateDirectory(foreignDir);
-            string oursExe = Path.Combine(oursDir, "GenshinImpact.exe"); File.Copy(cmd, oursExe, true);
-            string foreignExe = Path.Combine(foreignDir, "GenshinImpact.exe"); File.Copy(cmd, foreignExe, true);
-            var baseline = ProcessGuard.Classify(new[] { oursDir });
+            string oursExe = Path.Combine(oursDir, StandIn + ".exe"); File.Copy(cmd, oursExe, true);
+            string foreignExe = Path.Combine(foreignDir, StandIn + ".exe"); File.Copy(cmd, foreignExe, true);
+            var baseline = ProcessGuard.Classify(new[] { oursDir }, null, StandIn);
             var pOurs = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(oursExe) { Arguments = "/c ping -n 4 127.0.0.1 >nul", UseShellExecute = false, CreateNoWindow = true })!;
             var pForeign = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(foreignExe) { Arguments = "/c ping -n 4 127.0.0.1 >nul", UseShellExecute = false, CreateNoWindow = true })!;
             try
             {
                 Thread.Sleep(400);
-                var c = ProcessGuard.Classify(new[] { oursDir });
+                var c = ProcessGuard.Classify(new[] { oursDir }, null, StandIn);
                 Check($"classify: one ours + one foreign (got ours={c.Ours - baseline.Ours} foreign={c.Foreign - baseline.Foreign})",
                     c.Ours - baseline.Ours == 1 && c.Foreign - baseline.Foreign == 1);
-                var cNone = ProcessGuard.Classify(new[] { Path.Combine(tmp, "elsewhere") });
+                var cNone = ProcessGuard.Classify(new[] { Path.Combine(tmp, "elsewhere") }, null, StandIn);
                 Check("classify: no registered dir matches -> both foreign", cNone.Ours - baseline.Ours == 0 && cNone.Foreign - baseline.Foreign == 2);
-                var settle = ProcessGuard.ObserveSustainedAsync(new[] { oursDir }, null, TimeSpan.FromSeconds(1)).GetAwaiter().GetResult();
+                var settle = ProcessGuard.ObserveSustainedAsync(new[] { oursDir }, null, TimeSpan.FromSeconds(1), StandIn).GetAwaiter().GetResult();
                 Check("observe: returns early with sawOurs while our stand-in runs", settle.SawOurs);
             }
             finally
@@ -433,7 +488,7 @@ static class LaunchSpike
                 pOurs.Dispose(); pForeign.Dispose();
             }
             Thread.Sleep(300);
-            var after = ProcessGuard.ObserveSustainedAsync(new[] { oursDir }, null, TimeSpan.FromMilliseconds(800)).GetAwaiter().GetResult();
+            var after = ProcessGuard.ObserveSustainedAsync(new[] { oursDir }, null, TimeSpan.FromMilliseconds(800), StandIn).GetAwaiter().GetResult();
             Check("observe: after both exit, a short window sees nothing (unless a real client runs)",
                 !after.SawOurs && (!after.SawForeign || baseline.Foreign > 0));
         }
@@ -574,7 +629,7 @@ static class ServerSpike
         // ── install plan: the config the box actually receives ──
         AgentInstallPlan Plan() => new()
         {
-            Target = AgentInstallPlan.TargetLinux, Dir16 = "/home/raf/1.6_live",
+            Target = AgentInstallPlan.TargetLinux, Dir16 = "/srv/1.6_live",
             Listen = "0.0.0.0:18080", Token = new string('a', 32), Region = "dev_docker",
         };
         string Line(string cfg, string key) => cfg.Split('\n').FirstOrDefault(l => l.StartsWith(key + "=")) ?? "";
@@ -585,14 +640,25 @@ static class ServerSpike
             Line(okPlan.RenderConfig(), "GIO_AGENT_TOKEN") == "GIO_AGENT_TOKEN=" + okPlan.Token);
         Check("plan: a blank stack dir is still emitted, SET AND EMPTY",
             okPlan.ToEnvironment().TryGetValue("GIO_DIR_28", out var d28) && d28 == "");
+        Check("plan: every version of the launcher's list has its folder key, a blank one SET AND EMPTY — GIO_DIR_32 as well, in the config and in the installer environment",
+            ServerVersions.All.All(v => okPlan.ToEnvironment().ContainsKey(ServerVersions.DirKey(v)))
+            && okPlan.ToEnvironment().TryGetValue("GIO_DIR_32", out var d32) && d32 == ""
+            && Line(okPlan.RenderConfig(), "GIO_DIR_32") == "GIO_DIR_32=");
+        var with32 = Plan(); with32.SetDir("3.2", "/srv/3.2_live"); with32.SetFetch("3.2", true);
+        Check("plan: a 3.2 folder is written as GIO_DIR_32, and its choice travels as GIO_STACK_32=download — no GIO_FETCH_ key, nothing of either in the config",
+            with32.Validate().Count == 0 && Line(with32.RenderConfig(), "GIO_DIR_32") == "GIO_DIR_32=/srv/3.2_live"
+            && with32.ToEnvironment().TryGetValue("GIO_STACK_32", out var s32) && s32 == "download"
+            && !with32.ToEnvironment().Keys.Any(k => k.StartsWith("GIO_FETCH_", StringComparison.Ordinal))
+            && with32.FetchVersions().SequenceEqual(new[] { "3.2" }) && !with32.RenderConfig().Contains("GIO_FETCH_")
+            && !with32.RenderConfig().Contains("GIO_STACK_"));
         Check("plan: provision/txt-fix modes are OMITTED when blank (the box keeps its own)",
             !okPlan.ToEnvironment().ContainsKey("GIO_PROVISION_MODE")
             && !okPlan.ToEnvironment().ContainsKey("GIO_TXT_FIXES_MODE"));
 
-        var named = Plan(); named.ServerName = "Raf's \"test\" box";
+        var named = Plan(); named.ServerName = "Admin's \"test\" box";
         string namedCfg = named.RenderConfig();
         Check("plan: an apostrophe in the server name is stripped, not left to span lines",
-            Line(namedCfg, "GIO_SERVER_NAME") == "GIO_SERVER_NAME=Rafs test box");
+            Line(namedCfg, "GIO_SERVER_NAME") == "GIO_SERVER_NAME=Admins test box");
         Check("plan: every other key survives the quoted server name",
             namedCfg.Contains("GIO_STATE_PATH=") || namedCfg.Contains("GIO_AGENT_REGION=dev_docker"));
 
@@ -614,7 +680,7 @@ static class ServerSpike
         var quotedToken = Plan(); quotedToken.Token = "abc'def" + new string('a', 20);
         Check("plan: a quoted token is REFUSED (stripping it would 401 against our own agent)",
             quotedToken.Validate().Count > 0);
-        var quotedDir = Plan(); quotedDir.Dir16 = "/home/raf/it's_live";
+        var quotedDir = Plan(); quotedDir.Dir16 = "/srv/it's_live";
         Check("plan: a quoted stack dir is REFUSED", quotedDir.Validate().Count > 0);
 
         // Listen must spell out host AND port: the agent's parse_listen reads a bare "18080" as
@@ -634,9 +700,10 @@ static class ServerSpike
         // upgrade run would re-mark a version that is long present. ──
         var fetch = Plan(); fetch.Fetch16 = true;
         Check("plan: a fetch-marked version validates", fetch.Validate().Count == 0);
-        Check("plan: the mark travels as GIO_FETCH_16=y in the installer environment (and only for the marked version)",
-            fetch.ToEnvironment().TryGetValue("GIO_FETCH_16", out var f16) && f16 == "y" && !fetch.ToEnvironment().ContainsKey("GIO_FETCH_28"));
-        Check("plan: GIO_FETCH_* never reaches the agent config", !fetch.RenderConfig().Contains("GIO_FETCH_"));
+        Check("plan: the choice travels as GIO_STACK_16=download in the installer environment, GIO_STACK_28=later for the version without a folder — never a GIO_FETCH_ key",
+            fetch.ToEnvironment().TryGetValue("GIO_STACK_16", out var s16) && s16 == "download" && fetch.ToEnvironment().TryGetValue("GIO_STACK_28", out var s28) && s28 == "later"
+            && !fetch.ToEnvironment().Keys.Any(k => k.StartsWith("GIO_FETCH_", StringComparison.Ordinal)));
+        Check("plan: neither GIO_FETCH_* nor GIO_STACK_* reaches the agent config", !fetch.RenderConfig().Contains("GIO_FETCH_") && !fetch.RenderConfig().Contains("GIO_STACK_"));
         Check("plan: a fetch-marked version is skipped by the stack check (its folder is expected absent)",
             fetch.MissingStackEntries(_ => false).Count == 0);
         Check("plan: FetchVersions names the marked version", fetch.FetchVersions().SequenceEqual(new[] { "1.6" }));
@@ -646,9 +713,160 @@ static class ServerSpike
         var fetchNoDir = Plan(); fetchNoDir.Fetch28 = true; fetchNoDir.Dir28 = "";
         Check("plan: a fetch mark without a folder is refused (fetchNeedsDir)",
             fetchNoDir.Validate().Contains(L.T("core.deploy.fetchNeedsDir", new { version = "2.8" })));
-        Check("plan: a fetch mark without a folder is not a fetch version and emits no GIO_FETCH_ key",
-            fetchNoDir.FetchVersions().Count == 0 && !fetchNoDir.ToEnvironment().ContainsKey("GIO_FETCH_28"));
-        Check("plan: no mark = no GIO_FETCH_ key at all", !okPlan.ToEnvironment().Keys.Any(k => k.StartsWith("GIO_FETCH_", StringComparison.Ordinal)));
+        Check("plan: a download chosen without a folder is no download — its choice travels as GIO_STACK_28=download with GIO_DIR_28 set and empty, never a GIO_FETCH_ key",
+            fetchNoDir.FetchVersions().Count == 0 && fetchNoDir.ToEnvironment()["GIO_STACK_28"] == "download" && fetchNoDir.ToEnvironment()["GIO_DIR_28"] == ""
+            && !fetchNoDir.ToEnvironment().Keys.Any(k => k.StartsWith("GIO_FETCH_", StringComparison.Ordinal)));
+        Check("plan: a plan without a choice reads by its folders (GIO_STACK_16=have, the others later) and carries no GIO_FETCH_ key",
+            okPlan.ToEnvironment() is var okEnv && okEnv["GIO_STACK_16"] == "have" && okEnv["GIO_STACK_28"] == "later" && okEnv["GIO_STACK_32"] == "later"
+            && !okEnv.Keys.Any(k => k.StartsWith("GIO_FETCH_", StringComparison.Ordinal)));
+
+        // ── the plan's versions are a LIST: one more id is one more folder line and one more mark, with
+        // nothing written out for it anywhere. "9.9" is a made-up version handed to these plans alone —
+        // the launcher's own list (ServerVersions.All) is not touched. The lists of these plans are
+        // spelled out, the two-version one they are compared with too: what is proven about a list holds
+        // whatever the launcher's own list is. ──
+        AgentInstallPlan PlanOf(params string[] versions) => new()
+        {
+            Target = AgentInstallPlan.TargetLinux, Dir16 = "/srv/1.6_live",
+            Listen = "0.0.0.0:18080", Token = new string('a', 32), Region = "dev_docker",
+            Versions = versions,
+        };
+        AgentInstallPlan Plan3() => PlanOf("1.6", "2.8", "9.9");
+        Check("versions: every per-version name comes from the id — the config key, the choice key, the download mark, the form's two fields, the conventional folder",
+            ServerVersions.DirKey("1.6") == "GIO_DIR_16" && ServerVersions.DirKey("2.8") == "GIO_DIR_28" && ServerVersions.DirKey("9.9") == "GIO_DIR_99"
+            && ServerVersions.FetchKey("1.6") == "GIO_FETCH_16" && ServerVersions.FetchKey("2.8") == "GIO_FETCH_28"
+            && ServerVersions.StackKey("1.6") == "GIO_STACK_16" && ServerVersions.StackKey("2.8") == "GIO_STACK_28"
+            && ServerVersions.FormDir("1.6") == "dir16" && ServerVersions.FormStack("1.6") == "stack16"
+            && ServerVersions.FormDir("2.8") == "dir28" && ServerVersions.FormStack("2.8") == "stack28"
+            && ServerVersions.DirKey("3.2") == "GIO_DIR_32" && ServerVersions.FetchKey("3.2") == "GIO_FETCH_32" && ServerVersions.StackKey("3.2") == "GIO_STACK_32"
+            && ServerVersions.FormDir("3.2") == "dir32" && ServerVersions.FormStack("3.2") == "stack32"
+            && ServerVersions.ConventionalFolder("2.8") == "2.8_live" && ServerVersions.Suffix("1.10") == "110");
+        Check("plan: its versions are the launcher's list unless a caller hands in another", okPlan.Versions.SequenceEqual(ServerVersions.All));
+        var three = Plan3();
+        string threeCfg = three.RenderConfig();
+        Check("plan: a third version's folder key is written SET AND EMPTY, after the others, in the list's order",
+            three.Validate().Count == 0 && Line(threeCfg, "GIO_DIR_99") == "GIO_DIR_99="
+            && threeCfg.Split('\n')[1..5].SequenceEqual(new[] { "GIO_DIR_16=/srv/1.6_live", "GIO_DIR_28=", "GIO_DIR_99=", "GIO_AGENT_LISTEN=0.0.0.0:18080" })
+            && three.ToEnvironment().TryGetValue("GIO_DIR_99", out var d99) && d99 == "");
+        Check("plan: that line is all the third version adds — without it the text is the two-version plan's, byte for byte",
+            threeCfg.Replace("GIO_DIR_99=\n", "") == PlanOf("1.6", "2.8").RenderConfig());
+        three.SetDir("9.9", "/srv/9.9_live");
+        Check("plan: DirFor round-trips a folder given by version id, and Dir16 / Dir28 are that same store",
+            three.DirFor("9.9") == "/srv/9.9_live" && Line(three.RenderConfig(), "GIO_DIR_99") == "GIO_DIR_99=/srv/9.9_live"
+            && three.DirFor("1.6") == "/srv/1.6_live" && three.Dir16 == three.DirFor("1.6") && three.DirFor("2.8") == "" && three.DirFor("7.7") == "");
+        three.SetFetch("9.9", true);
+        var threeEnv = three.ToEnvironment();
+        Check("plan: the third version's choice travels as GIO_STACK_99=download — its own key, one per version, and nothing of it in the config",
+            threeEnv.TryGetValue("GIO_STACK_99", out var s99) && s99 == "download" && threeEnv.Keys.Count(k => k.StartsWith("GIO_STACK_", StringComparison.Ordinal)) == 3
+            && !threeEnv.Keys.Any(k => k.StartsWith("GIO_FETCH_", StringComparison.Ordinal))
+            && three.FetchFor("9.9") && !three.Fetch16 && !three.Fetch28 && three.FetchVersions().SequenceEqual(new[] { "9.9" })
+            && !three.RenderConfig().Contains("GIO_FETCH_") && !three.RenderConfig().Contains("GIO_STACK_"));
+        three.Dir28 = "/home/2.8_live";
+        var threeMissing = three.MissingStackEntries(_ => false);
+        Check("plan: the stack check skips the marked third version and still names the unmarked ones by their id",
+            threeMissing.SequenceEqual(new[] { "1.6: /srv/1.6_live", "2.8: /home/2.8_live" }));
+        three.Fetch16 = true;
+        Check("plan: FetchVersions follows the list's order, whatever the order the marks were made in",
+            three.FetchVersions().SequenceEqual(new[] { "1.6", "9.9" })
+            && three.FetchVersionsReally(p => p == "/srv/9.9_live/docker-compose.yml.tmpl").SequenceEqual(new[] { "1.6" }));
+        var threeNoDir = Plan3(); threeNoDir.SetFetch("9.9", true);
+        Check("plan: a download chosen for the third version without a folder is refused by its name, is no download, and travels as GIO_STACK_99=download with GIO_DIR_99 set and empty",
+            threeNoDir.Validate().SequenceEqual(new[] { L.T("core.deploy.fetchNeedsDir", new { version = "9.9" }) })
+            && threeNoDir.FetchVersions().Count == 0 && threeNoDir.ToEnvironment()["GIO_STACK_99"] == "download" && threeNoDir.ToEnvironment()["GIO_DIR_99"] == ""
+            && !threeNoDir.ToEnvironment().Keys.Any(k => k.StartsWith("GIO_FETCH_", StringComparison.Ordinal)));
+        var threeRelative = Plan3(); threeRelative.SetDir("9.9", "srv/9.9_live");
+        Check("plan: the third version's folder is held to the same rules (an absolute path)",
+            threeRelative.Validate().SequenceEqual(new[] { L.T("core.deploy.dirNotAbsolute", new { version = "9.9", dir = "srv/9.9_live" }) }));
+        var onlyThird = Plan3(); onlyThird.Dir16 = ""; onlyThird.SetDir("9.9", "/srv/9.9_live");
+        var noFolder = Plan3(); noFolder.Dir16 = "";
+        Check("plan: one folder is enough whichever version it is for, and none at all is valid (the Server page adds versions)",
+            onlyThird.Validate().Count == 0 && noFolder.Validate().Count == 0);
+        var unlisted = Plan(); unlisted.SetDir("9.9", "/srv/9.9_live"); unlisted.SetFetch("9.9", true);
+        Check("plan: a folder or a mark given for a version the plan does not list is neither written nor downloaded",
+            unlisted.RenderConfig() == okPlan.RenderConfig() && unlisted.FetchVersions().Count == 0 && unlisted.Validate().Count == 0
+            && !unlisted.ToEnvironment().Keys.Any(k => k.EndsWith("_99", StringComparison.Ordinal)));
+
+        // ── a version's server package, as the build's catalogue names it (ServerVersions.Package):
+        // payloads/<version>/stack.json. Synthetic catalogues in a temp folder; the shipped ones are read
+        // further down. The agent unpacks a .zip itself, so a package takes a 7z tool on the box only when
+        // the catalogue names no .zip — neither as its url nor as an "alt" (the same tree in the other
+        // format). A version without a usable catalogue has no package: nothing to download. ──
+        string catRoot = Path.Combine(Path.GetTempPath(), "relic-server-spike-cat-" + Guid.NewGuid().ToString("n")[..8]);
+        try
+        {
+            void Catalogue(string version, string? json)
+            {
+                Directory.CreateDirectory(Path.Combine(catRoot, version));
+                if (json is not null) File.WriteAllText(Path.Combine(catRoot, version, "stack.json"), json, new UTF8Encoding(false));
+            }
+            string CatalogueJson(string version, string url, long size, string more = "") =>
+                $$"""{"version":"{{version}}","label":"Internet Archive","url":"{{url}}","size":{{size}},"md5":"0123456789abcdef0123456789abcdef",{{more}}"extractedSize":{{size * 6}},"topDir":"{{version}}_pkg","strays":[]}""";
+            const string zipAlt = "\"alt\":[{\"url\":\"https://archive.org/download/item/9.9_pkg.zip\",\"size\":4100000000,\"md5\":\"fedcba9876543210fedcba9876543210\"}],";
+            Catalogue("1.6", CatalogueJson("1.6", "https://archive.org/download/item.7z/1.6_pkg.7z", 1870180624));
+            Catalogue("2.8", CatalogueJson("2.8", "https://archive.org/download/item/2.8_pkg.ZIP", 4100000000));
+            Catalogue("9.9", CatalogueJson("9.9", "https://archive.org/download/item/9.9_pkg.7z", 1100000000, zipAlt));
+            Catalogue("7.0", "\uFEFF" + CatalogueJson("7.0", "https://archive.org/download/item/7.0_pkg.zip", 4100000000));
+            Catalogue("7.1", null);
+            Catalogue("7.2", "{ \"version\": \"7.2\", \"url\": ");
+            Catalogue("7.3", "[1, 2]");
+            Catalogue("7.4", CatalogueJson("7.4", "http://archive.org/download/item/7.4_pkg.7z", 1000));
+            Catalogue("7.5", CatalogueJson("7.5", "https://archive.org/download/item/7.5_pkg.rar", 1000));
+            Catalogue("7.6", CatalogueJson("7.6", "https://archive.org/download/item/7.6_pkg.7z", 0));
+            Catalogue("7.7", CatalogueJson("7.7", "https://archive.org/download/item/7.7_pkg.7z", 1000).Replace("\"size\":1000,", "\"size\":\"1000\","));
+            Catalogue("7.8", CatalogueJson("7.8", "https://archive.org/download/item/7.8_pkg.7z", 1000, "\"alt\":{\"url\":\"https://archive.org/download/item/7.8_pkg.zip\"},"));
+            Catalogue("7.9", CatalogueJson("7.9", "https://archive.org/download/item/7.9_pkg.7z", 1000, "\"alt\":[{\"size\":5}],"));
+            StackPackage Pkg(string version) => ServerVersions.Package(version, catRoot);
+            Check("package: a .7z catalogue — published, the archive's size and format, the label, and unpacking takes a 7z tool",
+                Pkg("1.6") == new StackPackage(true, 1870180624, "7z", true, "Internet Archive") with { ExtractedSize = 1870180624L * 6 });
+            Check("package: a .zip catalogue (any letter case) — published, and the agent needs no tool for it",
+                Pkg("2.8") == new StackPackage(true, 4100000000, "zip", false, "Internet Archive") with { ExtractedSize = 4100000000L * 6, ZipSize = 4100000000 });
+            // The agent opens the file as UTF-8 and parses what it gets: a byte order mark in front is no
+            // JSON to it, so the launcher offers no download for a catalogue that starts with one.
+            Check("package: a catalogue that starts with a byte order mark is no package — the agent could not read it",
+                Pkg("7.0") == StackPackage.None && File.ReadAllBytes(Path.Combine(catRoot, "7.0", "stack.json")).AsSpan(0, 3).SequenceEqual(new byte[] { 0xEF, 0xBB, 0xBF }));
+            Check("package: a .7z with the same tree as a .zip under \"alt\" — the size and format are the url's, and no tool is needed",
+                Pkg("9.9") == new StackPackage(true, 1100000000, "7z", false, "Internet Archive") with { ExtractedSize = 1100000000L * 6, ZipSize = 4100000000 });
+            Check("package: no catalogue — a version folder without one, or no folder at all — is no package",
+                Pkg("7.1") == StackPackage.None && Pkg("6.6") == StackPackage.None
+                && StackPackage.None == new StackPackage(false, 0, "", true, ""));
+            Check("package: a catalogue that is not JSON, or not a JSON object, is no package — and never a throw",
+                Pkg("7.2") == StackPackage.None && Pkg("7.3") == StackPackage.None);
+            Check("package: a url that is not https, or names neither a .7z nor a .zip, is no package",
+                Pkg("7.4") == StackPackage.None && Pkg("7.5") == StackPackage.None);
+            Check("package: a size that is not a positive integer is no package", Pkg("7.6") == StackPackage.None && Pkg("7.7") == StackPackage.None);
+            Check("package: an \"alt\" that is not a list of entries naming a url is no package", Pkg("7.8") == StackPackage.None && Pkg("7.9") == StackPackage.None);
+            // The id goes into a path. Each of these would land on the 1.6 catalogue if it were followed.
+            Directory.CreateDirectory(Path.Combine(catRoot, "sub"));
+            Check("package: an id that is not one plain folder name opens nothing — not even a catalogue that is there",
+                new[] { "", " ", "sub/../1.6", @"sub\..\1.6", "1.6/", @"1.6\", "./1.6", "..", Path.Combine(catRoot, "1.6"), "C:1.6" }
+                    .All(id => ServerVersions.Package(id, catRoot) == StackPackage.None)
+                && ServerVersions.Package(" 1.6 ", catRoot).Published);
+
+            // What the install asks of a plan's marks, with the catalogues above standing in for the ones
+            // that go to the box.
+            var allMarked = Plan3(); allMarked.Dir28 = "/home/2.8_live"; allMarked.SetDir("9.9", "/srv/9.9_live");
+            allMarked.Fetch16 = true; allMarked.Fetch28 = true; allMarked.SetFetch("9.9", true);
+            Check("plan: marks that each have a package raise no problem, and a marked .7z-only package asks for an extractor",
+                allMarked.FetchProblems(Pkg).Count == 0 && allMarked.FetchNeedsExtractor(Pkg));
+            allMarked.Fetch16 = false;
+            Check("plan: marks whose packages can all be read as a .zip ask for no extractor — and no mark asks for none",
+                !allMarked.FetchNeedsExtractor(Pkg) && !Plan().FetchNeedsExtractor(Pkg) && !Plan().FetchNeedsExtractor(_ => StackPackage.None));
+            AgentInstallPlan Unpublished() => new()
+            {
+                Target = AgentInstallPlan.TargetLinux, Dir16 = "/srv/1.6_live", Listen = "0.0.0.0:18080", Token = new string('a', 32),
+                Versions = new[] { "1.6", "7.1", "7.2" },
+            };
+            var noPackage = Unpublished(); noPackage.SetDir("7.1", "/srv/7.1_live"); noPackage.SetFetch("7.1", true); noPackage.Fetch16 = true;
+            Check("plan: a mark on a version without a package is refused by its name (fetchNoPackage) — the marks that have one are not",
+                noPackage.Validate().Count == 0
+                && noPackage.FetchProblems(Pkg).SequenceEqual(new[] { L.T("core.deploy.fetchNoPackage", new { version = "7.1" }) })
+                && L.Has("core.deploy.fetchNoPackage") && L.T("core.deploy.fetchNoPackage", new { version = "7.1" }).Contains("7.1"));
+            var noPackageNoDir = Unpublished(); noPackageNoDir.SetFetch("7.1", true); noPackageNoDir.SetFetch("7.2", true);
+            Check("plan: that refusal needs no folder — a mark is what it answers — and an unmarked version without a package is no problem",
+                noPackageNoDir.FetchProblems(Pkg).Count == 2 && noPackageNoDir.FetchVersions().Count == 0
+                && Unpublished().FetchProblems(Pkg).Count == 0 && Unpublished().FetchProblems(_ => StackPackage.None).Count == 0);
+        }
+        finally { try { Directory.Delete(catRoot, true); } catch { } }
 
         // ── MUIP sign key: written byte-for-byte, SET AND EMPTY when blank (the installer keeps
         // the box's stored one; the agent picks a random key), refused when the agent would ignore it. ──
@@ -797,7 +1015,7 @@ static class ServerSpike
         Check("deploy: with Keep .env settings on the redaction list is the token alone — a value that is not sent can never hide an installer line",
             AgentDeployer.SecretsOf(Stated(true)).SequenceEqual(new[] { okPlan.Token })
             && unsent.Validate().Count == 0 && AgentDeployer.SecretsOf(unsent).SequenceEqual(new[] { okPlan.Token })
-            && !AgentDeployer.LeaksSecret("  1.6 dir : /home/raf/1.6_live", AgentDeployer.SecretsOf(unsent))
+            && !AgentDeployer.LeaksSecret("  1.6 dir : /srv/1.6_live", AgentDeployer.SecretsOf(unsent))
             && AgentDeployer.SecretsOf(Stated(false)).Length == 4);
         Check("deploy: a secret that begins a longer one never leaves the longer one's tail readable",
             AgentDeployer.Redact("root abcdefgh1234 / muip abcdefgh / flask Flask_Key-12345", installSecrets) == "root *** / muip *** / flask ***");
@@ -924,6 +1142,40 @@ static class ServerSpike
             Check("localagent: CanBind — this PC binds 127.0.0.1; not an address it does not have, not a name, a shorthand, an IPv6 address or nothing",
                 LocalAgent.CanBind("127.0.0.1") && !LocalAgent.CanBind("192.0.2.123") && !LocalAgent.CanBind("localhost")
                 && !LocalAgent.CanBind("192.0.2") && !LocalAgent.CanBind("::1") && !LocalAgent.CanBind("") && !LocalAgent.CanBind(null));
+            // The folders are read by version id (DirOf), and with "Keep .env settings" on EVERY stack
+            // folder the config names has its say in the address — the value of each GIO_DIR_<digits> key,
+            // also of a version this launcher does not list (GIO_DIR_99): the agent that reads the file may
+            // know it, and that stack publishes its ports on this PC like the others.
+            string envStack99 = Path.Combine(tmpRoot, "stacks", "9.9_live");
+            Directory.CreateDirectory(envStack99);
+            LocalAgentConfig KeptConfig(params (string Key, string Value)[] folders)
+            {
+                var pairs = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["GIO_AGENT_LISTEN"] = "0.0.0.0:18099", ["GIO_BIND_IP"] = "192.0.2.10", ["GIO_KEEP_ENV"] = "1",
+                };
+                foreach (var (key, value) in folders) pairs[key] = value;
+                return new LocalAgentConfig(pairs);
+            }
+            StackEnv(envStack16, "OUTER_IP=127.0.0.1\n");
+            StackEnv(envStack28, null);
+            StackEnv(envStack99, "OUTER_IP=192.0.2.123\n");
+            var cfg99 = KeptConfig(("GIO_DIR_16", envStack16), ("GIO_DIR_99", envStack99));
+            Check("localagent: DirOf reads a version's folder by its key — a listed version's and any other id's — and Dir16 / Dir28 are that reading",
+                cfg99.DirOf("1.6") == envStack16 && cfg99.Dir16 == envStack16 && cfg99.DirOf("2.8") == "" && cfg99.Dir28 == ""
+                && cfg99.DirOf("9.9") == envStack99 && cfg99.DirOf("7.7") == "");
+            Check("localagent: Keep .env settings on, the stack of a version this launcher does not list names another address -> the stacks disagree, the stored GIO_BIND_IP",
+                cfg99.Host == "192.0.2.10" && KeptConfig(("GIO_DIR_16", envStack16)).Host == "127.0.0.1");
+            StackEnv(envStack99, "OUTER_IP=localhost\n");
+            StackEnv(envStack16, null);
+            Check("localagent: ... and when it is the only stack that names one, that address is the answer",
+                KeptConfig(("GIO_DIR_16", envStack16), ("GIO_DIR_99", envStack99)).Host == "127.0.0.1"
+                && KeptConfig(("GIO_DIR_99", envStack99)).Host == "127.0.0.1" && KeptConfig().Host == "192.0.2.10");
+            Check("localagent: only a GIO_DIR_<digits> key names a stack folder — no other key that holds a path does",
+                new[] { "GIO_DIR_", "GIO_DIR_X9", "GIO_DIR_9_9", "GIO_DIRS_99", "XGIO_DIR_99", "GIO_DIR_99X", "GIO_HOTPATCH_DIR", "gio_dir_99" }
+                    .All(key => KeptConfig((key, envStack99)).Host == "192.0.2.10")
+                && KeptConfig(("GIO_DIR_0110", envStack99)).Host == "127.0.0.1");
+            StackEnv(envStack99, null);
             // "Keep .env settings" as the installed config holds it (what localagent.status hands the
             // re-install form's toggle): the agent's own rule for a switch that is off by default — on for
             // 1 / true / yes / on, trimmed and in any letter case, off for everything else and for a file
@@ -989,6 +1241,61 @@ static class ServerSpike
                 LocalAgent.MergeConfig(rendered, "# c\nGIO_AGENT_TOKEN=x\nGIO_DIR_16=y\n\n", out var none) == rendered && none.Count == 0);
             Check("merge: a rendered text without a final newline still gets the comment on a line of its own",
                 LocalAgent.MergeConfig("GIO_DIR_16=a", "HTTPS_PROXY=b") == "GIO_DIR_16=a\n" + H + "\nHTTPS_PROXY=b\n");
+            // The folder of a version this launcher does not list (GIO_DIR_99, written by an agent or a
+            // launcher that knows it) is a key the form does not render: a re-install keeps the line. A plan
+            // that lists the version renders the key, and the line is then the form's like the other folders
+            // — that plan lists the launcher's own versions and the made-up one after them, so it renders
+            // every key the first one does.
+            string with99 = LocalAgent.MergeConfig(rendered, rendered + "GIO_DIR_99=D:\\servers\\9.9_live\n", out var kept99);
+            Check("merge: the folder line of a version this launcher's list does not render (GIO_DIR_99) is kept, as written, and named",
+                with99 == rendered + H + "\nGIO_DIR_99=D:\\servers\\9.9_live\n" && kept99.SequenceEqual(new[] { "GIO_DIR_99" })
+                && LocalAgent.MergeConfig(rendered, with99) == with99 && !rendered.Contains("GIO_DIR_99"));
+            var winThree = PlanOf([.. ServerVersions.All, "9.9"]); winThree.Target = AgentInstallPlan.TargetWindows; winThree.Dir16 = winPlan.Dir16;
+            winThree.ServerName = winPlan.ServerName; winThree.BindIp = winPlan.BindIp; winThree.MuipKey = winPlan.MuipKey;
+            string renderedThree = winThree.RenderConfig();
+            Check("merge: a plan that lists that version renders its key — the stored folder does not come back behind a blank field",
+                LocalAgent.MergeConfig(renderedThree, with99, out var keptThree) == renderedThree && keptThree.Count == 0
+                && renderedThree.Split('\n').Count(l => l.StartsWith("GIO_DIR_99=")) == 1 && renderedThree.Contains("GIO_DIR_99=\n"));
+            // The install on this PC asks its two questions about a marked version of the catalogues it is
+            // about to copy (<agent folder>\payloads), before it touches anything: no catalogue = refused by
+            // name; a package that comes as a .zip = no extractor asked for, so the install goes on to its
+            // next step. The agent to copy is asked for before either: a folder that holds no script is a
+            // build without an agent, and that is what the refusal names — not a package it has no
+            // catalogue for. The step after the two questions is seen here by the one refusal it can end
+            // in with nothing written: an installed script another program holds open.
+            string shipDir = tmpRoot + "-ship";
+            try
+            {
+                LocalAgent.DriveTypeOverride = _ => 3;
+                Directory.CreateDirectory(Path.Combine(shipDir, "payloads", "1.6"));
+                var marked16 = Plan(); marked16.Target = AgentInstallPlan.TargetWindows;
+                marked16.Dir16 = Path.Combine(tmpRoot, "absent", "1.6_live"); marked16.Fetch16 = true;
+                var anyPython = new LocalAgent.PythonInfo("python", "pythonw", "3.12");
+                string InstallRefusal()
+                {
+                    try { LocalAgent.Install(marked16, anyPython, null, shipDir); return ""; }
+                    catch (InvalidOperationException ex) { return ex.Message; }
+                }
+                bool NothingInstalled() => !File.Exists(LocalAgent.ScriptPath) && !Directory.Exists(LocalAgent.PayloadsDir);
+                Check("install: an agent folder without the agent's script is refused as that — before the package of a marked version is asked about, nothing written",
+                    InstallRefusal() == L.T("core.deploy.agentMissingInBuild", new { path = Path.Combine(shipDir, "gio_agent.py") }) && NothingInstalled());
+                File.WriteAllText(Path.Combine(shipDir, "gio_agent.py"), "# the stand-in agent to copy\n");
+                Check("install: a version marked for download with no catalogue among the payloads to copy is refused by name, nothing written",
+                    InstallRefusal() == L.T("core.deploy.fetchNoPackage", new { version = "1.6" }) && NothingInstalled());
+                File.WriteAllText(Path.Combine(shipDir, "payloads", "1.6", "stack.json"),
+                    "{\"version\":\"1.6\",\"label\":\"Internet Archive\",\"url\":\"https://archive.org/download/item/1.6_pkg.zip\",\"size\":4100000000}");
+                byte[] configAsItWas = File.ReadAllBytes(LocalAgent.ConfigPath);
+                File.WriteAllText(LocalAgent.ScriptPath, "# an installed script, held open\n");
+                string heldRefusal;
+                using (new FileStream(LocalAgent.ScriptPath, FileMode.Open, FileAccess.Read, FileShare.None)) heldRefusal = InstallRefusal();
+                string heldScript = File.ReadAllText(LocalAgent.ScriptPath);
+                File.Delete(LocalAgent.ScriptPath);
+                Check("install: a marked version whose package comes as a .zip passes both questions — the install goes on to its files, and stops at an installed script it cannot replace with nothing changed",
+                    heldRefusal.StartsWith(L.T("core.deploy.scriptInUse", new Dictionary<string, object?> { ["path"] = LocalAgent.ScriptPath, ["error"] = "\u0001" }).Split('\u0001')[0], StringComparison.Ordinal)
+                    && heldScript == "# an installed script, held open\n" && !Directory.Exists(LocalAgent.PayloadsDir)
+                    && File.ReadAllBytes(LocalAgent.ConfigPath).SequenceEqual(configAsItWas));
+            }
+            finally { LocalAgent.DriveTypeOverride = null; try { Directory.Delete(shipDir, true); } catch { } }
             File.WriteAllText(LocalAgent.ConfigPath, merged, new UTF8Encoding(false));
             var mc = LocalAgent.ReadConfig();
             Check("merge: the merged file reads back with the NEW managed values and the kept keys (quotes stripped by the parser)",
@@ -1061,12 +1368,13 @@ static class ServerSpike
             // would hang on its spinner). Reproduced here with a single-threaded context that never pumps: the
             // call must finish anyway, i.e. it must not need that thread back.
             bool healthDone = false, healthPumped = false;
+            int silentPort = FreeLoopbackPort();
             var healthThread = new Thread(() =>
             {
                 var ctx = new NeverPumpingContext(() => healthPumped = true);
                 SynchronizationContext.SetSynchronizationContext(ctx);
                 // a port nothing listens on: the probe fails fast, and the FAILURE path awaits too
-                LocalAgent.IsHealthyAsync(59_997, 400).GetAwaiter().GetResult();
+                LocalAgent.IsHealthyAsync(silentPort, 400).GetAwaiter().GetResult();
                 healthDone = true;
             }) { IsBackground = true };
             healthThread.Start();
@@ -1078,7 +1386,7 @@ static class ServerSpike
             // python listening on a spare port, its pid in the temp root's pid file). Stop finds it by
             // pid, kills the tree and then waits for the port to go quiet — all of it blocking, and all
             // of it driven here from a thread whose SynchronizationContext never pumps.
-            int dummyPort = 59_996;
+            int dummyPort = FreeLoopbackPort();
             System.Diagnostics.Process? dummy = null;
             try
             {
@@ -1113,7 +1421,7 @@ static class ServerSpike
             // named before the install, and says that the configuration it wrote applies only after that
             // agent is restarted. A throwaway python answers /health the way an agent does, its pid in the
             // temp root's pid file; nothing may be started beside it.
-            int healthPort = 59_995;
+            int healthPort = FreeLoopbackPort();
             System.Diagnostics.Process? healthyAgent = null;
             try
             {
@@ -1335,7 +1643,7 @@ static class ServerSpike
                 """;
             static string UpdStub(string mark, int selftest = 0, bool starts = true) =>
                 updStubSource.Replace("@MARK@", mark).Replace("@SELFTEST@", selftest.ToString()).Replace("@START@", starts ? "ok" : "exit");
-            const int updPort = 59_994;
+            int updPort = FreeLoopbackPort();
             var updPython = LocalAgent.FindPython();
             if (updPython is null) Console.WriteLine("        (skipped: no python for the update cases)");
             else
@@ -1778,6 +2086,7 @@ static class ServerSpike
                 string inShip = Path.Combine(inRoot, "agent"), inStack = Path.Combine(inRoot, "stack16");
                 try
                 {
+                    LocalAgent.DriveTypeOverride = _ => 3;
                     Directory.CreateDirectory(Path.Combine(inShip, "payloads", "1.6"));
                     File.WriteAllText(Path.Combine(inShip, "gio_agent.py"), UpdStub("put-in-by-the-form"), new UTF8Encoding(false));
                     File.WriteAllText(Path.Combine(inShip, "payloads", "1.6", "manifest.json"), "from the form");
@@ -1899,6 +2208,7 @@ static class ServerSpike
                 }
                 finally
                 {
+                    LocalAgent.DriveTypeOverride = null;
                     try { if (Directory.Exists(inRoot)) Directory.Delete(inRoot, true); } catch { }
                     try { File.Delete(LocalAgent.PythonPath); } catch { }
                     File.WriteAllText(LocalAgent.ConfigPath, "GIO_AGENT_LISTEN=127.0.0.1:18977\n");
@@ -2074,6 +2384,21 @@ static class ServerSpike
             "server.banner.agentUpdateRestartNow", "agentCfg.updateNote", "agentUpdate.title.local", "agentUpdate.title.running",
             "agentUpdate.done.local", "agentUpdate.done.remote", "confirm.agentUpdate.title", "confirm.agentUpdate.titleRestart",
             "confirm.agentUpdate.body", "confirm.agentUpdate.bodyRestart", "confirm.agentUpdate.yes", "confirm.agentUpdate.yesRestart",
+            // The About card's rows are a table of keys (CREDITS: a row's note, and the name of a row that
+            // describes its component instead of naming it).
+            "about.credit.loginPatch", "about.credit.loginPatchName", "about.credit.metadata", "about.credit.enka",
+            // The pathfinding data download: the job's title (SRVJOBS) and the agent-update text the C# side reads.
+            "server.job.navdata", "core.agent.navdataUnsupported",
+            // The job console's "Stop waiting" (label and hint picked by the job's kind), the agent's refusal of
+            // it, the `unread` note of the gameplay settings (Game rules tab), the login of a version this server
+            // has no ready-made account for (LOGIN_WAY holds its keys), the shortcut splash's row for it, and the
+            // pathfinding switch's question over a package with nothing to load.
+            "server.console.stopWaiting", "server.console.stopWaitingSettings", "server.console.stopWaitingTitle",
+            "server.console.stopWaitingSettingsTitle", "core.agent.tweaksStopUnsupported", "toast.tweaksStopSent", "toast.tweaksStopped",
+            "toast.tweaksStopNone",
+            "tweaks.note.unread", "lib.login.title", "lib.login.badge", "lib.login.create", "lib.creds.lineNone",
+            "lib.login.admin", "lib.login.adminShort", "lib.login.signup", "lib.login.signupShort", "lib.login.ask", "lib.login.askShort",
+            "shell.splash.noLoginHint", "confirm.pathfinding.enableEmpty",
         })
             Check($"i18n: en.json has {uiKey}", L.Has(uiKey));
 
@@ -2081,29 +2406,50 @@ static class ServerSpike
         // their managed list. A heredoc key missing from that list (a lost space fuses two names) comes back
         // with its OLD value after the new one, and the old one wins (last assignment): the list and the
         // heredoc must name exactly the same keys.
+        // The stack folder keys are not written out in either script: each holds ONE list of version rows
+        // and builds its GIO_DIR_<nn> config lines and managed keys from it, handing them to the heredoc and
+        // to the list in a variable. The helper puts what that variable carries in its place — worked out
+        // from the script's own rows, a line and a key per row — and counts afterwards; `generated` says
+        // whether both places take the variable and neither names a folder key by hand.
+        // What the helper puts there is its own reading of the statements that fill the variable, so those
+        // statements are held as text (InstallerBuilders): `unbuilt` names the ones the script does not
+        // carry as written there. With one of them changed the variable carries something else — a key
+        // without its blank fuses with the next name of the list, a line without its newline with the next
+        // line of the config — and the counting would still be of the text worked out here.
         string agentDirCfg = Path.GetDirectoryName(agentPy)!;
-        (List<string> heredoc, List<string> managed, string raw) InstallerKeys(string file, string heredocPattern, string managedPattern, string tokenPattern)
+        (List<string> heredoc, List<string> managed, string raw, bool generated, List<string> unbuilt) InstallerKeys(string file, string heredocPattern, string managedPattern, string tokenPattern, bool bash)
         {
             string path = Path.Combine(agentDirCfg, file);
-            if (!File.Exists(path)) return ([], [], "");
+            if (!File.Exists(path)) return ([], [], "", false, [file]);
             string text = File.ReadAllText(path).Replace("\r\n", "\n");
             var body = System.Text.RegularExpressions.Regex.Match(text, heredocPattern, System.Text.RegularExpressions.RegexOptions.Singleline);
             var list = System.Text.RegularExpressions.Regex.Match(text, managedPattern);
-            var keys = body.Success
-                ? System.Text.RegularExpressions.Regex.Matches(body.Groups[1].Value, @"^(GIO_[A-Z0-9_]+)=", System.Text.RegularExpressions.RegexOptions.Multiline).Select(m => m.Groups[1].Value).ToList()
-                : [];
-            var names = list.Success
-                ? System.Text.RegularExpressions.Regex.Matches(list.Groups[1].Value, tokenPattern).Select(m => m.Groups[1].Value).ToList()
-                : [];
-            return (keys, names, list.Success ? list.Groups[1].Value : "");
+            var dirKeys = InstallerVersionRows(text, bash).Select(r => "GIO_DIR_" + r.Id.Replace(".", "")).ToList();
+            string linesVar = bash ? "${DIR_LINES}" : "$dirLines", keysVar = bash ? "${DIR_KEYS}" : "$dirKeys";
+            string bodyText = body.Success ? body.Groups[1].Value : "", listText = list.Success ? list.Groups[1].Value : "";
+            bool generated = bodyText.Contains(linesVar, StringComparison.Ordinal) && listText.Contains(keysVar, StringComparison.Ordinal)
+                && !(bodyText + listText).Contains("GIO_DIR_", StringComparison.Ordinal);
+            var unbuilt = InstallerBuilders(bash).Where(b => !text.Contains("\n" + b.Text + "\n", StringComparison.Ordinal)).Select(b => b.What).ToList();
+            // bash: every line and every key carries its own separator (a newline, a blank); PowerShell joins them
+            bodyText = bodyText.Replace(linesVar, bash ? string.Concat(dirKeys.Select(k => k + "=\n")) : string.Join("\n", dirKeys.Select(k => k + "=")));
+            listText = listText.Replace(keysVar, bash ? string.Concat(dirKeys.Select(k => k + " ")) : string.Join(",", dirKeys.Select(k => "'" + k + "'")));
+            var keys = System.Text.RegularExpressions.Regex.Matches(bodyText, @"^(GIO_[A-Z0-9_]+)=", System.Text.RegularExpressions.RegexOptions.Multiline).Select(m => m.Groups[1].Value).ToList();
+            var names = System.Text.RegularExpressions.Regex.Matches(listText, tokenPattern).Select(m => m.Groups[1].Value).ToList();
+            return (keys, names, listText, generated, unbuilt);
         }
         foreach (var (file, heredocPattern, managedPattern, tokenPattern, bashCase) in new[]
         {
-            ("install_agent.sh", @"cat > /etc/gio-agent/config <<EOF\n(.*?)\nEOF", "MANAGED=\"([^\"]*)\"", @"(\S+)", true),
-            ("deploy_from_windows.ps1", @"cat > /etc/gio-agent/config <<'EOF'\n(.*?)\nEOF", @"\$managed = @\(([^)]*)\)", @"'([^']*)'", false),
+            ("install_agent.sh", @"\nrender_config\(\) \{\n(?:[^\n]*\n)*?  cat <<EOF\n(.*?)\nEOF\n", "MANAGED=\"([^\"]*)\"", @"(\S+)", true),
+            ("deploy_from_windows.ps1", @"cat > /etc/gio-agent/config <<'EOF'\n(.*?)\nEOF", @"\$managed = ([^\n]*)", @"'([^']*)'", false),
         })
         {
-            var (heredoc, managed, raw) = InstallerKeys(file, heredocPattern, managedPattern, tokenPattern);
+            var (heredoc, managed, raw, generated, unbuilt) = InstallerKeys(file, heredocPattern, managedPattern, tokenPattern, bashCase);
+            Check($"installer: {file} builds the stack folder lines of its config and their managed keys from its one list of versions (no GIO_DIR_<nn> written out by hand)",
+                generated);
+            Check($"installer: {file} fills them by the statements the checks below count from — a key is GIO_DIR_ + the id without its dot, "
+                  + (bashCase ? "every key carries its own blank and every line its own newline" : "the keys are a list and the lines are joined by a newline")
+                  + (unbuilt.Count > 0 ? " — not as written here: " + string.Join("; ", unbuilt) : ""),
+                unbuilt.Count == 0);
             // bash tests membership as `case "$MANAGED" in *" $k "*`: a key counts only with a blank on BOTH
             // sides in the raw string, so a fused pair AND a list that lost its outer padding (first/last key
             // never matched, re-appended with the old value) both show up here; the token split alone
@@ -2133,6 +2479,110 @@ static class ServerSpike
             Check($"installer: {file} never writes GIO_FETCH_* into the config",
                 !heredoc.Any(k => k.StartsWith("GIO_FETCH_", StringComparison.Ordinal)));
         }
+        // One list of versions per file, and the three are one list: the rows of the agent's VERSIONS (the id,
+        // and whether the row names a folder a Linux box is assumed to use), STACK_VERSIONS of install_agent.sh
+        // and $stackVersions of deploy_from_windows.ps1 — the same ids, in the same order, the same rows
+        // implicit. A version the agent has and an installer lacks is never asked about, written or downloaded
+        // by that installer; a row implicit on one side only gets a folder written the agent would not assume,
+        // or none where it assumes one.
+        var agentRows = AgentVersionRows(agentPy);
+        var shRows = InstallerVersionRows(InstallerText("install_agent.sh"), bash: true);
+        var ps1Rows = InstallerVersionRows(InstallerText("deploy_from_windows.ps1"), bash: false);
+        static string RowsText(List<(string Id, bool Implicit)> rows) =>
+            rows.Count == 0 ? "(none read)" : string.Join(" ", rows.Select(r => r.Id + (r.Implicit ? ":implicit" : "")));
+        bool rowsAgree = agentRows.Count >= 2 && agentRows.SequenceEqual(shRows) && agentRows.SequenceEqual(ps1Rows);
+        Check($"installer: the agent's VERSIONS, install_agent.sh's STACK_VERSIONS and deploy_from_windows.ps1's $stackVersions hold the same versions in the same order, the same ones with an assumed Linux folder — {RowsText(agentRows)}"
+              + (rowsAgree ? "" : $" — install_agent.sh: {RowsText(shRows)}; deploy_from_windows.ps1: {RowsText(ps1Rows)}"),
+            rowsAgree);
+        // The launcher's list is the fourth: ServerVersions.All is what its install plan writes folder keys
+        // and download marks for, what the install form draws a row for and what its payload carries. A
+        // version the agent has and the launcher lacks could not be given a folder from the form; one the
+        // launcher has and the agent lacks would be written into a config nothing reads.
+        bool launcherAgrees = agentRows.Count >= 2 && agentRows.Select(r => r.Id).SequenceEqual(ServerVersions.All);
+        Check($"installer: the launcher's ServerVersions.All holds the agent's versions, in the agent's order — {string.Join(" ", ServerVersions.All)}"
+              + (launcherAgrees ? "" : $" — the agent: {RowsText(agentRows)}"),
+            launcherAgrees);
+        // The four lists name a version's folder key by the same derivation, or the same id would be one key
+        // in the config an installer writes and another in the agent that reads it: the agent's
+        // dir_setting_key and the two installers' functions as text (the installers' are among the statements
+        // held above), the launcher's by what it answers.
+        Check("installer: a version's folder key is one derivation in the agent (dir_setting_key), install_agent.sh (dir_key), deploy_from_windows.ps1 (DirKey) and the launcher (ServerVersions.DirKey) — GIO_DIR_ + the id without its dot",
+            AgentDirKeyIsIdWithoutDot(agentPy)
+            && InstallerBuilders(bash: true).Where(b => b.What == "dir_key").All(b => InstallerText("install_agent.sh").Contains("\n" + b.Text + "\n", StringComparison.Ordinal))
+            && InstallerBuilders(bash: false).Where(b => b.What == "DirKey").All(b => InstallerText("deploy_from_windows.ps1").Contains("\n" + b.Text + "\n", StringComparison.Ordinal))
+            && ServerVersions.DirKey("12.34") == "GIO_DIR_1234");
+        // Both installers answer "does unpacking this package take a 7z tool on the box" from the package's
+        // catalogue, each in its own language: the address of a .zip is told by ONE pattern, written out in
+        // both, so the same catalogue cannot get the loud warning from one and the quiet one from the other.
+        const string zipAddress = @"^[^?#]*\.[zZ][iI][pP]([?#]|$)";
+        Check($"installer: both installers tell the address of a .zip package by one pattern — {zipAddress}",
+            InstallerText("install_agent.sh").Contains("re.search(r\"" + zipAddress + "\", u)", StringComparison.Ordinal)
+            && InstallerText("deploy_from_windows.ps1").Contains("-cmatch '" + zipAddress + "'", StringComparison.Ordinal));
+        // ...and the catalogues this build ships for them, read the way the launcher reads them for the
+        // form's rows (the size it quotes, whether there is a download at all, whether it takes a 7z tool).
+        // For every listed version the launcher's reading is held to one made here from the same file: no
+        // file is no package; else the format is the extension of "url", the size is the one beside it, and
+        // unpacking takes a tool unless "url" or an "alt" names a .zip.
+        string shippedPayloads = Path.Combine(agentDirCfg, "payloads");
+        StackPackage CatalogueSays(string version)
+        {
+            string catalogueFile = Path.Combine(shippedPayloads, version, "stack.json");
+            if (!File.Exists(catalogueFile)) return StackPackage.None;
+            try
+            {
+                using var catalogueDoc = JsonDocument.Parse(File.ReadAllBytes(catalogueFile));
+                var catalogue = catalogueDoc.RootElement;
+                static string FormatOf(string address) => Path.GetExtension(new Uri(address).AbsolutePath).TrimStart('.').ToLowerInvariant();
+                static long PositiveSize(JsonElement entry) =>
+                    entry.TryGetProperty("size", out var s) && s.ValueKind == JsonValueKind.Number && s.TryGetInt64(out long n) && n > 0 ? n : 0;
+                var archives = new List<(string Address, long Size)> { (catalogue.GetProperty("url").GetString() ?? "", catalogue.GetProperty("size").GetInt64()) };
+                if (catalogue.TryGetProperty("alt", out var alternates))
+                    archives.AddRange(alternates.EnumerateArray().Select(a => (a.GetProperty("url").GetString() ?? "", PositiveSize(a))));
+                long extracted = catalogue.TryGetProperty("extractedSize", out var unpacked) && unpacked.ValueKind == JsonValueKind.Number
+                    && unpacked.TryGetInt64(out long unpackedBytes) && unpackedBytes >= 0 ? unpackedBytes : 0;
+                return new StackPackage(true, archives[0].Size, FormatOf(archives[0].Address),
+                    !archives.Any(a => FormatOf(a.Address) == "zip"), catalogue.TryGetProperty("label", out var label) ? label.GetString() ?? "" : "")
+                    with { ExtractedSize = extracted, ZipSize = archives.FirstOrDefault(a => FormatOf(a.Address) == "zip" && a.Size > 0).Size };
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException or UriFormatException) { return StackPackage.None; }
+        }
+        foreach (string listedVersion in ServerVersions.All)
+        {
+            var says = CatalogueSays(listedVersion);
+            Check($"package: the launcher reads the catalogue shipped for {listedVersion} as the file says — "
+                  + (says.Published ? $"a .{says.Archive} of {says.Size} bytes, {(says.NeedsExtractor ? "unpacked with a 7z tool" : "read without one")}" : "none: nothing to download"),
+                ServerVersions.Package(listedVersion, shippedPayloads) == says);
+        }
+        // The two packages this build is known to ship, by name: each published, a .7z of more than a
+        // gigabyte, unpacked with a tool.
+        foreach (string shippedVersion in new[] { "1.6", "2.8" })
+        {
+            var shippedPackage = ServerVersions.Package(shippedVersion, shippedPayloads);
+            Check($"package: the shipped catalogue of {shippedVersion} — published, a .7z of {shippedPackage.Size} bytes (the catalogue's own figure) that takes an extractor",
+                shippedPackage is { Published: true, Archive: "7z", NeedsExtractor: true, Label: "Internet Archive" }
+                && shippedPackage.Size == CatalogueSays(shippedVersion).Size && shippedPackage.Size > 1_000_000_000);
+        }
+        // ...and the one that comes in both formats: a .7z under "url" and the same tree as a .zip under
+        // "alt", which the agent reads by itself — so the form asks for no extractor.
+        var package32 = ServerVersions.Package("3.2", shippedPayloads);
+        Check($"package: the shipped catalogue of 3.2 — published, a .7z of {package32.Size} bytes beside the same tree as a .zip, so it takes no extractor",
+            package32 is { Published: true, Archive: "7z", NeedsExtractor: false, Label: "Internet Archive" }
+            && package32.Size == CatalogueSays("3.2").Size && package32.Size > 1_000_000_000);
+        // install_agent.sh has ONE text of the config: render_config. The install writes it, and --plan — the
+        // rehearsal that changes nothing — prints it and stops before the first thing a run changes (the
+        // "Continue?" question, the self-test, the files).
+        string planSh = InstallerText("install_agent.sh");
+        int planAt = planSh.IndexOf("\nif [ \"$PLAN\" = 1 ]; then\n", StringComparison.Ordinal);
+        int planEnd = planAt < 0 ? -1 : planSh.IndexOf("\n  exit 0\nfi\n", planAt, StringComparison.Ordinal);
+        Check("installer: install_agent.sh writes its config from render_config, and --plan prints that same text and stops before anything is changed",
+            planSh.Contains("\nrender_config > /etc/gio-agent/config\n", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(planSh, @"/etc/gio-agent/config <<").Count == 0
+            && planAt >= 0 && planEnd > planAt && planSh[planAt..planEnd].Contains("\n  render_config\n", StringComparison.Ordinal)
+            && planEnd < planSh.IndexOf("read -rp \"Continue? [y/N]: \"", StringComparison.Ordinal)
+            && planEnd < planSh.IndexOf("\"$here/gio_agent.py\" --selftest", StringComparison.Ordinal)
+            && planSh.Contains("if [ \"$PLAN\" != 1 ] && [ \"$(id -u)\" != 0 ]; then", StringComparison.Ordinal)
+            && planSh.Contains("--plan) PLAN=1; NO_DEPS=1 ;;", StringComparison.Ordinal)
+            && planSh.Contains("--plan=*) PLAN=1; NO_DEPS=1;", StringComparison.Ordinal));
         // deploy_from_windows.ps1 is started with `powershell -File`, i.e. Windows PowerShell 5.1, which reads
         // a BOM-less script in the ANSI code page: the last byte of a UTF-8 en / em dash (the texts in en.json
         // are full of them) decodes there to a curly quote that ENDS a double-quoted string — while pwsh 7
@@ -2250,6 +2700,74 @@ static class ServerSpike
             modesCs.Contains("KeepEnv = BoolOrNull(p, \"keepEnv\")", StringComparison.Ordinal));
         Check("form: localagent.status answers keepEnv from the installed config (false without one)",
             modesCs.Contains("keepEnv = c?.KeepEnv ?? false", StringComparison.Ordinal));
+        // The stack rows of the form travel the same way, and under names nobody types: the backend derives
+        // a version's two field names from its id (the init state's stacks), the page draws its fields and
+        // builds its payload from those rows, and ReadPlan reads the payload through the same derivation.
+        // So the page must not spell a per-version field itself — one written out by hand is a field a
+        // further version would not get — and each name of a row has to be one name on both sides.
+        string backendPath = Path.Combine(repoRoot, "app", "Relic.App", "Backend.cs");
+        string backendCs = File.Exists(backendPath) ? File.ReadAllText(backendPath) : "";
+        var handWritten = System.Text.RegularExpressions.Regex.Matches(appJs, @"\b(?:dir|stack|have|fetch)[0-9]{2,}\b").Select(m => m.Value).Distinct().ToList();
+        Check("form: app.js spells no per-version field of the install form — every one comes from a stack row"
+              + (handWritten.Count > 0 ? " — written out: " + string.Join(", ", handWritten) : ""),
+            appJs.Length > 0 && handWritten.Count == 0);
+        foreach (var (rowField, backendText, pageText) in new[]
+        {
+            ("id", "id = v,", "s.id"),
+            ("dirField", "dirField = ServerVersions.FormDir(v),", "s.dirField"),
+            ("stackField", "stackField = ServerVersions.FormStack(v),", "s.stackField"),
+            ("folder", "folder = ServerVersions.ConventionalFolder(v),", "s.folder"),
+            ("size", "size = package.Size,", "sizeGb(s.size)"),
+            ("downloadable", "downloadable = package.Published,", "s.downloadable"),
+            ("archive", "archive = package.Archive,", "s.archive === '7z'"),
+            ("extractedSize", "extractedSize = package.ExtractedSize,", "s.extractedSize"),
+            ("zipSize", "zipSize = package.ZipSize,", "s.zipSize"),
+        })
+            Check($"form: the stack row's \"{rowField}\" is one name on both sides — the init state ({backendText}) and app.js ({pageText})",
+                backendCs.Contains(backendText, StringComparison.Ordinal) && appJs.Contains(pageText, StringComparison.Ordinal));
+        Check("form: the page takes its stack rows from the init state, and ReadPlan reads each version's folder and choice through the names those rows carry — the choice alone says what is downloaded",
+            appJs.Contains("if (Array.isArray(d.stacks)) S.stacks = d.stacks;", StringComparison.Ordinal)
+            && backendCs.Contains("stacks = ServerVersions.All.Select(v =>", StringComparison.Ordinal)
+            && modesCs.Contains("plan.SetDir(v, Str(p, ServerVersions.FormDir(v)).Trim());", StringComparison.Ordinal)
+            && modesCs.Contains("Str(p, ServerVersions.FormStack(v))", StringComparison.Ordinal)
+            && !modesCs.Contains("ServerVersions.FormFetch(v)", StringComparison.Ordinal));
+        Check("form: the installed agent's folders and what stands in them reach the re-install form and the uninstall question by version id (localagent.status dirs, kinds)",
+            modesCs.Contains("dirs = ServerVersions.All.ToDictionary(v => v, v => c?.DirOf(v) ?? \"\"),", StringComparison.Ordinal)
+            && appJs.Contains("st.dirs", StringComparison.Ordinal)
+            && modesCs.Contains("kinds = ", StringComparison.Ordinal) && appJs.Contains("st.kinds", StringComparison.Ordinal));
+        // A row's choice travels as a token the two sides spell alike: the page sends one of its STACK_CHOICES (its
+        // segment control draws no other, deployStack takes no other), ReadPlan parses it with StackChoices.TryParse and
+        // refuses anything else (core.deploy.badStackChoice). A token only one side knows is a choice the form offers and
+        // the install refuses, or one read as another choice.
+        var stackChoicesMatch = System.Text.RegularExpressions.Regex.Match(appJs, @"const STACK_CHOICES = \[([^\]]*)\];");
+        var pageStackChoices = stackChoicesMatch.Success
+            ? System.Text.RegularExpressions.Regex.Matches(stackChoicesMatch.Groups[1].Value, "'([a-z]+)'").Select(m => m.Groups[1].Value).ToList()
+            : new List<string>();
+        var segmentChoices = System.Text.RegularExpressions.Regex.Matches(appJs, @"\bseg\('([a-z]+)'").Select(m => m.Groups[1].Value).Distinct().ToList();
+        Check($"form: a stack row's choices are one vocabulary on both sides — app.js STACK_CHOICES ({string.Join(", ", pageStackChoices)}) and the tokens of its segment control are exactly what StackChoices reads and writes, each choice once",
+            pageStackChoices.Count == Enum.GetValues<StackChoice>().Length && pageStackChoices.Distinct().Count() == pageStackChoices.Count
+            && pageStackChoices.All(choiceToken => StackChoices.TryParse(choiceToken, out var parsedChoice) && StackChoices.Token(parsedChoice) == choiceToken)
+            && segmentChoices.Count > 0 && segmentChoices.All(pageStackChoices.Contains)
+            && appJs.Contains("if (!s || !STACK_CHOICES.includes(choice)) return;", StringComparison.Ordinal)
+            && modesCs.Contains("if (!StackChoices.TryParse(choice, out var c))", StringComparison.Ordinal));
+        // The payload names each row's choice and folder under the row's own two names, and tells the backend that this
+        // page runs the jobs deploy.done hands it (chain: true, read on both install paths): the install's follow-up may
+        // then plan a re-point, then the download, for a version the agent that kept running has no folder for.
+        Check("form: the install payload carries each row's choice and folder under the row's names (stackField, dirField) and chain: true, which both install paths read",
+            appJs.Contains("S.stacks.forEach((s) => { payload[s.stackField] = deployChoice(a, s); payload[s.dirField] = deployDir(a, s); });", StringComparison.Ordinal)
+            && appJs.Contains("const payload = Object.assign({ target: a.target, chain: true }, f, { keepEnv });", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(modesCs, @"bool pageRunsChain = Bool\(p, ""chain""\);").Count == 2);
+        Check("install: both install paths refuse a download mark without a package before anything starts",
+            System.Text.RegularExpressions.Regex.Matches(modesCs, @"var plan = ReadPlan\(p\);\r?\n\s+RequireFetchPackages\(plan\);").Count == 2
+            && modesCs.Contains("plan.FetchProblems(v => ServerVersions.Package(v))", StringComparison.Ordinal));
+        // A build without its agent folder has no catalogue for any version. That refusal answers first on
+        // both paths, so it names the agent that is missing — as the install on this PC does (LocalAgent.Install,
+        // above) — and not a package that is "not published".
+        Check("install: on a build that ships no agent that refusal names the missing agent, not a package without a catalogue",
+            System.Text.RegularExpressions.Regex.IsMatch(modesCs,
+                @"if \(problems\.Count == 0\) return;\r?\n\s+string script = Path\.Combine\(LocalAgent\.ShippedAgentDir, ""gio_agent\.py""\);\r?\n"
+                + @"\s+if \(!File\.Exists\(script\)\) throw new InvalidOperationException\(L\.T\(""core\.deploy\.agentMissingInBuild"", new \{ path = script \}\)\);\r?\n"
+                + @"\s+throw new InvalidOperationException\(string\.Join\(""\\n"", problems\)\);"));
         // With the option on the plan carries no bind IP, so the host saved for the agent on this PC has to
         // come from the config the install just wrote: its stack folders lead to each stack's own OUTER_IP,
         // and the merge kept the stored bind IP line for when they name none — the plan's own field may be
@@ -2266,21 +2784,75 @@ static class ServerSpike
             && modesCs.Contains("if (before.Running && pid == before.Pid) log(L.T(\"backend.localAgent.restartToApply\"));", StringComparison.Ordinal)
             && L.Has("backend.localAgent.restartToApply"));
 
-        // The Gameplay page and the Backend meet under three rpc names and ONE job kind: the page starts the
-        // job with runServerJob('tweaks', …) — rpc "server.tweaks" — and matches the events the Backend streams
-        // back by that kind, which SRVJOBS turns into the job's title. Another word on either side leaves the
-        // page waiting on a job whose log and outcome arrive under another name, or is answered "Unknown
+        // The Windows 11 question is one decision (LaunchSupport, held by the patch spike) with three places
+        // that ask it: the page — the init state hands each version the decision for this PC and PLAY asks it
+        // before anything else —, the shortcut started with the launcher closed (MainForm) and the one
+        // started while it runs (Program.RunPlay), each before its server check, with No as the default.
+        string AppText(string file)
+        {
+            string path = Path.Combine(repoRoot, "app", "Relic.App", file);
+            return File.Exists(path) ? File.ReadAllText(path) : "";
+        }
+        string w11MainForm = AppText("MainForm.cs"), w11Program = AppText("Program.cs"), w11Preflight = AppText("PlayPreflight.cs");
+        int mfAsk = w11MainForm.IndexOf("PlayPreflight.ConfirmWindows11(", StringComparison.Ordinal);
+        int pgAsk = w11Program.IndexOf("if (!ConfirmWindows11OnSplash(splash, versionId)) return;", StringComparison.Ordinal);
+        int pfAsk = w11Preflight.IndexOf("public static bool ConfirmWindows11(", StringComparison.Ordinal);
+        Check("windows 11: the init state hands each version LaunchSupport's decision for this PC, and PLAY asks it before anything else — the own-files question, then the server check (playOwnFiles → playChecked)",
+            backendCs.Contains("windows11Unsupported = LaunchSupport.AskOnWindows11(LaunchSupport.Windows11Unsupported(v.Id), os.IsWindows11),", StringComparison.Ordinal)
+            && appJs.Contains("if (!(versionById(id) || {}).windows11Unsupported) return ACTIONS.playOwnFiles(id);", StringComparison.Ordinal)
+            && appJs.Contains("act: 'playOwnFiles', arg: id,", StringComparison.Ordinal) && appJs.Contains("focusNo: true,", StringComparison.Ordinal));
+        Check("windows 11: both shortcut launches ask before their server check, No being the default answer",
+            mfAsk >= 0 && mfAsk < w11MainForm.IndexOf("PlayPreflight.CheckAsync(", StringComparison.Ordinal)
+            && pgAsk >= 0 && pgAsk < w11Program.IndexOf("PlayPreflight.CheckAsync(", StringComparison.Ordinal)
+            && pfAsk >= 0 && w11Preflight.IndexOf("MessageBoxDefaultButton.Button2", pfAsk, StringComparison.Ordinal) > pfAsk
+            && L.Has("shell.preflight.windows11Title") && L.Has("shell.preflight.windows11Body"));
+
+        // The pathfinding data download meets the page under one job kind and two rpc names, like the navmesh
+        // download: the page starts it with runServerJob('navdata', …) — rpc "server.navdata", behind
+        // RequireAdmin — and stops it with rpc "server.navdata.cancel".
+        int ndCaseAt = backendCs.IndexOf("case \"server.navdata\":", StringComparison.Ordinal);
+        int ndCancelAt = backendCs.IndexOf("case \"server.navdata.cancel\":", StringComparison.Ordinal);
+        Check("navdata: Backend answers server.navdata (behind RequireAdmin, the job under the kind \"navdata\") and server.navdata.cancel; the page uses the same names",
+            ndCaseAt >= 0 && backendCs.IndexOf("RequireAdmin();", ndCaseAt, StringComparison.Ordinal) is int ndAdmin && ndAdmin > ndCaseAt
+            && backendCs.IndexOf("return StartServerJob(\"navdata\", Str(p, \"version\"), (a, v, log) => a.NavdataFetchAsync(v, log));", ndAdmin, StringComparison.Ordinal) > ndAdmin
+            && ndCancelAt > ndCaseAt && backendCs.IndexOf("return await WithAgent(a => a.NavdataCancelAsync(version));", ndCancelAt, StringComparison.Ordinal) > ndCancelAt
+            && appJs.Contains("navdataGo: (id) => runServerJob('navdata', id),", StringComparison.Ordinal)
+            && appJs.Contains("rpc('server.navdata.cancel', { version: id })", StringComparison.Ordinal)
+            && appJs.Contains("navdata: 'server.job.navdata',", StringComparison.Ordinal));
+
+        // The gameplay settings (Game rules tab) and the Backend meet under three rpc names and ONE job kind: the
+        // page starts the job with runServerJob('tweaks', …) — rpc "server.tweaks" — and matches the events the
+        // Backend streams back by that kind, which SRVJOBS turns into the job's title. Another word on either side
+        // leaves the page waiting on a job whose log and outcome arrive under another name, or is answered "Unknown
         // message type". The Backend half also has to hold what cannot be run from here: both agent calls behind
-        // RequireAdmin, and the read's 404 (an agent without the route) coming back as {tooOld: true}.
-        string backendPath = Path.Combine(repoRoot, "app", "Relic.App", "Backend.cs");
-        string backendCs = File.Exists(backendPath) ? File.ReadAllText(backendPath) : "";
+        // RequireAdmin, and the read's 404 (an agent without the route) coming back as {tooOld: true}. The one
+        // job kind carries the three requests of the page — an Apply ({tweaks}), a Revert and a Reset of a card's
+        // files ({revert | reset: [cards]}) —, each with the takenKey of the answer it was built on, branched in
+        // that one case: ONE StartServerJob("tweaks", …), never an rpc of its own (the page's job and its events
+        // are matched by the kind).
         int twCaseAt = backendCs.IndexOf("case \"server.tweaks\":", StringComparison.Ordinal);
         int twAdminAt = twCaseAt < 0 ? -1 : backendCs.IndexOf("RequireAdmin();", twCaseAt, StringComparison.Ordinal);
-        int twJobAt = backendCs.IndexOf("return StartServerJob(\"tweaks\", Str(p, \"version\"), (a, v, log) => a.TweaksSetAsync(v, tweaks, log));", StringComparison.Ordinal);
+        int twKeyAt = twAdminAt < 0 ? -1 : backendCs.IndexOf("string takenKey = Str(p, \"takenKey\");", twAdminAt, StringComparison.Ordinal);
+        // Each request's branch: the payload's own key selects it, and the first work the branch assigns is that
+        // request's call with the cards of that same key (a swapped condition, or a call under another branch, sends
+        // a Revert as a Reset or a document as neither).
+        int twRevertIfAt = twKeyAt < 0 ? -1 : backendCs.IndexOf("if (p.TryGetProperty(\"revert\", out _))", twKeyAt, StringComparison.Ordinal);
+        int twRevertAt = twRevertIfAt < 0 ? -1 : backendCs.IndexOf("work = (a, v, log) => a.TweaksRevertAsync(v, cards, takenKey, log);", twRevertIfAt, StringComparison.Ordinal);
+        int twResetIfAt = twRevertAt < 0 ? -1 : backendCs.IndexOf("else if (p.TryGetProperty(\"reset\", out _))", twRevertAt, StringComparison.Ordinal);
+        int twResetAt = twResetIfAt < 0 ? -1 : backendCs.IndexOf("work = (a, v, log) => a.TweaksResetAsync(v, cards, takenKey, log);", twResetIfAt, StringComparison.Ordinal);
+        int twSetAt = twResetAt < 0 ? -1 : backendCs.IndexOf("work = (a, v, log) => a.TweaksSetAsync(v, tweaks, takenKey, log);", twResetAt, StringComparison.Ordinal);
+        int twJobAt = twSetAt < 0 ? -1 : backendCs.IndexOf("return StartServerJob(\"tweaks\", Str(p, \"version\"), work);", twSetAt, StringComparison.Ordinal);
+        bool TwBranch(int ifAt, int workAt, string key) => ifAt >= 0 && workAt > ifAt
+            && backendCs.IndexOf("work = ", ifAt, StringComparison.Ordinal) == workAt
+            && backendCs.IndexOf($"var cards = Strings(p, \"{key}\");", ifAt, StringComparison.Ordinal) is int cardsAt && cardsAt > ifAt && cardsAt < workAt;
         int twReadAt = modesCs.IndexOf("private async Task<object?> TweaksGetAsync(string version)", StringComparison.Ordinal);
-        Check("tweaks: Backend answers server.tweaks.get, server.tweaks and tweakdata.get — the agent calls behind RequireAdmin, the job under the kind \"tweaks\", a 404 on the read as {tooOld: true}",
+        Check("tweaks: Backend answers server.tweaks.get, server.tweaks and tweakdata.get — the agent calls behind RequireAdmin, ONE job under the kind \"tweaks\" for an Apply, a Revert and a Reset (each with the takenKey, each selected by its own key of the payload), a 404 on the read as {tooOld: true}",
             backendCs.Contains("case \"server.tweaks.get\": RequireAdmin(); return await TweaksGetAsync(Str(p, \"version\"));", StringComparison.Ordinal)
-            && twCaseAt >= 0 && twCaseAt < twAdminAt && twAdminAt < twJobAt
+            && twCaseAt >= 0 && twCaseAt < twAdminAt && twAdminAt < twKeyAt && twKeyAt < twRevertIfAt && twRevertIfAt < twRevertAt && twRevertAt < twResetIfAt
+            && twResetIfAt < twResetAt && twResetAt < twSetAt && twSetAt < twJobAt
+            && TwBranch(twRevertIfAt, twRevertAt, "revert") && TwBranch(twResetIfAt, twResetAt, "reset")
+            && backendCs.IndexOf("work = ", twResetAt + 1, StringComparison.Ordinal) == twSetAt
+            && System.Text.RegularExpressions.Regex.Matches(backendCs, "StartServerJob\\(\"tweaks\"").Count == 1
             && backendCs.Contains("case \"tweakdata.get\":", StringComparison.Ordinal)
             && twReadAt >= 0 && modesCs.IndexOf("catch (AgentHttpException ex) when (ex.Status == 404) { return new { tooOld = true }; }", twReadAt, StringComparison.Ordinal) > twReadAt);
         // The page's half, over every script of the UI folder (the page need not live in app.js).
@@ -2292,6 +2864,488 @@ static class ServerSpike
             UiCalls("rpc", "server.tweaks.get") && UiCalls("rpc", "tweakdata.get")
             && (UiCalls("runServerJob", "tweaks") || UiCalls("rpc", "server.tweaks"))
             && uiJs.Contains("server.job.tweaks", StringComparison.Ordinal));
+        // The page's three requests under that one job: the document with the answer's takenKey (none for an answer
+        // that names none: an agent that answers no takenKey), and a Revert / a Reset of cards with it ("" when none).
+        Check("tweaks: the page sends an Apply as {tweaks, takenKey} and a Revert / a Reset as {revert | reset: [cards], takenKey} under the job kind 'tweaks', the key of the answer it read",
+            uiJs.Contains("runServerJob('tweaks', v, key === null ? { tweaks: doc } : { tweaks: doc, takenKey: key });", StringComparison.Ordinal)
+            && uiJs.Contains("runServerJob('tweaks', v, { [op]: cards.slice(), takenKey: twTakenKey(v) || '' });", StringComparison.Ordinal)
+            && uiJs.Contains("const twTakenKey = (v) => { const d = twDataOf(v); return twKnowsFiles(d) ? d.takenKey : null; };", StringComparison.Ordinal)
+            && uiJs.Contains("const twKnowsFiles = (d) => !!d && typeof d.takenKey === 'string';", StringComparison.Ordinal));
+        // "Stop waiting" in the job console: rpc "server.tweaksStop" behind RequireAdmin → AgentClient.TweaksStopAsync
+        // (POST /server/tweaks {version, cancel: true}, never a job). An agent that cannot stop the waits answers
+        // 400 or 404: the Backend answers that as {unsupported: true} — the page takes its control away and says
+        // why, the followed job goes on — never as a failure of the rpc. The page offers the control for exactly
+        // the job kinds the agent stops (its TWEAKS_STOP_KINDS).
+        int twStopAt = backendCs.IndexOf("case \"server.tweaksStop\":", StringComparison.Ordinal);
+        int twStopAdmin = twStopAt < 0 ? -1 : backendCs.IndexOf("RequireAdmin();", twStopAt, StringComparison.Ordinal);
+        int twStopCall = twStopAdmin < 0 ? -1 : backendCs.IndexOf("try { return await WithAgent(a => a.TweaksStopAsync(version)); }", twStopAdmin, StringComparison.Ordinal);
+        int twStopCatch = twStopCall < 0 ? -1 : backendCs.IndexOf("catch (AgentHttpException ex) when (ex.Status is 400 or 404)", twStopCall, StringComparison.Ordinal);
+        Check("tweaks: Backend answers server.tweaksStop behind RequireAdmin, the agent's 400 / 404 as {unsupported: true}; the page calls rpc 'server.tweaksStop'",
+            twStopAt >= 0 && twStopAdmin > twStopAt && twStopCall > twStopAdmin && twStopCatch > twStopCall
+            && backendCs.IndexOf("return new { ok = false, stopping = false, unsupported = true, message = ex.Message };", twStopCatch, StringComparison.Ordinal) > twStopCatch
+            && UiCalls("rpc", "server.tweaksStop") && uiJs.Contains("if (r && r.unsupported) {", StringComparison.Ordinal));
+        var agentStopKinds = File.Exists(agentPy)
+            ? System.Text.RegularExpressions.Regex.Match(File.ReadAllText(agentPy), @"^TWEAKS_STOP_KINDS = \(([^)]*)\)", System.Text.RegularExpressions.RegexOptions.Multiline)
+            : null;
+        var agentStop = agentStopKinds is { Success: true }
+            ? System.Text.RegularExpressions.Regex.Matches(agentStopKinds.Groups[1].Value, "\"([a-z.-]+)\"").Select(m => m.Groups[1].Value).ToList()
+            : new List<string>();
+        var pageStopKinds = System.Text.RegularExpressions.Regex.Match(uiJs, @"const TW_STOP_KINDS = \[([^\]]*)\];");
+        var pageStop = pageStopKinds.Success
+            ? System.Text.RegularExpressions.Regex.Matches(pageStopKinds.Groups[1].Value, "'([a-z.-]+)'").Select(m => m.Groups[1].Value).ToList()
+            : new List<string>();
+        Check($"tweaks: the job console offers \"Stop waiting\" for exactly the job kinds the agent stops (TWEAKS_STOP_KINDS: {string.Join(", ", agentStop)}; the page: {string.Join(", ", pageStop)})",
+            agentStop.Count > 0 && agentStop.SequenceEqual(pageStop)
+            && uiJs.Contains("const twStop = TW_STOP_KINDS.includes(j.kind) && !twStopRefused()", StringComparison.Ordinal));
+        // The same control for a job this launcher does not follow — another admin's, or one it started before
+        // it was closed: /status names it as busy ({id, kind, version}) and the note that says why the buttons
+        // are dead carries the button, sent through the same request as the console's. An agent that said it
+        // cannot stop the waits is not offered the control again while it runs the same build (per server).
+        Check("tweaks: \"Stop waiting\" also beside the busy note of a job started elsewhere (srvBusyNotes → tweaksStopBusy), one request path for both, no control for an agent that said it cannot",
+            uiJs.Contains("return b && !jobHere() && TW_STOP_KINDS.includes(b.kind) && b.version != null && !twStopRefused() ? b : null;", StringComparison.Ordinal)
+            && uiJs.Contains("twStopButton('tweaksStopBusy', stopJob.kind, stopJob.version,", StringComparison.Ordinal)
+            && uiJs.Contains("if (!(await twStopSend(String(b.version)))", StringComparison.Ordinal)
+            && uiJs.Contains("if (!(await twStopSend(String(id)))", StringComparison.Ordinal)
+            && uiJs.Contains("S.twStop.no[target] = info && !info.public && typeof info.build === 'string' ? info.build : '';", StringComparison.Ordinal)
+            && uiJs.Contains("showToast(t('toast.tweaksStopNone', { version }), 'ok');", StringComparison.Ordinal));
+        // A refusal record whose settings the game server never judged — the wait for its verdict stopped on
+        // request, or a signal that never arrived — is no refusal: the page tells it by the agent's own two
+        // reason texts (_TWEAKS_STOP_ASKED, _TWEAKS_UNASKED) and asks Apply's running-server question then.
+        string AgentText(string name)
+        {
+            if (!File.Exists(agentPy)) return "";
+            var m = System.Text.RegularExpressions.Regex.Match(File.ReadAllText(agentPy), "^" + name + " = \"([^\"]*)\"", System.Text.RegularExpressions.RegexOptions.Multiline);
+            return m.Success ? m.Groups[1].Value : "";
+        }
+        string stopAsked = AgentText("_TWEAKS_STOP_ASKED"), unasked = AgentText("_TWEAKS_UNASKED");
+        var pageUnjudged = System.Text.RegularExpressions.Regex.Match(uiJs, @"const TW_UNJUDGED = \[([^\]]*)\];");
+        var unjudged = pageUnjudged.Success
+            ? System.Text.RegularExpressions.Regex.Matches(pageUnjudged.Groups[1].Value, "'([^']*)'").Select(m => m.Groups[1].Value).ToList()
+            : new List<string>();
+        Check($"tweaks: the page tells a record the game server never judged by the agent's own words (_TWEAKS_STOP_ASKED \"{stopAsked}\", _TWEAKS_UNASKED \"{unasked}\"; the page: {string.Join(" / ", unjudged.Select(s => "\"" + s + "\""))}) and asks Apply's running-server question for it",
+            stopAsked.Length > 0 && unasked.Length > 0 && unjudged.SequenceEqual(new[] { stopAsked, unasked })
+            && uiJs.Contains(": d.refused && !twUnjudged(d.refused) ? t('tweaks.confirm.applyRefused') : t('tweaks.confirm.applyLive');", StringComparison.Ordinal));
+        // The quest kinds a multiplier names and the cards a Revert / a Reset names are the agent's own words: the page
+        // lists exactly the agent's TWEAK_QUEST_KINDS (a kind only one side knows is a multiplier the agent refuses as an
+        // unknown key, or reward rows the page draws with no line and a raw label) and its TWEAK_SECTIONS, in the same
+        // order.
+        List<string> AgentTuple(string name)
+        {
+            if (!File.Exists(agentPy)) return new List<string>();
+            var m = System.Text.RegularExpressions.Regex.Match(File.ReadAllText(agentPy), "^" + name + @" = \(([^)]*)\)", System.Text.RegularExpressions.RegexOptions.Multiline);
+            return m.Success ? System.Text.RegularExpressions.Regex.Matches(m.Groups[1].Value, "\"([a-z]+)\"").Select(x => x.Groups[1].Value).ToList() : new List<string>();
+        }
+        List<string> PageList(string name)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(uiJs, "const " + name + @" = \[([^\]]*)\];");
+            return m.Success ? System.Text.RegularExpressions.Regex.Matches(m.Groups[1].Value, "'([a-z]+)'").Select(x => x.Groups[1].Value).ToList() : new List<string>();
+        }
+        var agentKinds = AgentTuple("TWEAK_QUEST_KINDS"); var pageKinds = PageList("TW_QUEST_KINDS");
+        var agentCards = AgentTuple("TWEAK_SECTIONS"); var pageCards = PageList("TW_SECTIONS");
+        Check($"tweaks: the page's TW_QUEST_KINDS is the agent's TWEAK_QUEST_KINDS, in the same order (agent: {string.Join(", ", agentKinds)}; page: {string.Join(", ", pageKinds)})",
+            agentKinds.Count > 0 && agentKinds.SequenceEqual(pageKinds) && pageKinds.Contains("hangout"));
+        Check($"tweaks: the page's TW_SECTIONS — the cards a Revert / a Reset names — is the agent's TWEAK_SECTIONS, in the same order (agent: {string.Join(", ", agentCards)}; page: {string.Join(", ", pageCards)})",
+            agentCards.Count > 0 && agentCards.SequenceEqual(pageCards));
+        // The take-over facts the agent answers (GET /server/tweaks, inside def tweaks_info) and the page reads: a name
+        // spelled otherwise on one side is a fact that silently never arrives — a note never drawn, a button never
+        // offered, a draft sent against a base the page never saw.
+        string infoTw = PythonFunction(File.Exists(agentPy) ? File.ReadAllText(agentPy) : "", "tweaks_info");
+        var factsOff = new List<string>();
+        foreach (var (fact, agentHas, pageHas) in new[]
+        {
+            ("takenKey", "takenKey=", "typeof d.takenKey === 'string'"),
+            ("changing", "changing=changing", "d.changing === true"),
+            ("ownRefused", "ownRefused=", "d.ownRefused"),
+            ("sections.<card>.reasons", "reasons=reasons", "reasons: map(s.reasons)"),
+            ("sections.<card>.taken", "taken=taken", "(Array.isArray(s.taken) ? s.taken : [])"),
+            ("sections.<card>.taken[].undoOriginal", "\"undoOriginal\":", "e.undoOriginal === false"),
+            ("sections.<card>.kept", "kept=kept", "kept: map(s.kept)"),
+            ("sections.<card>.blocked", "blocked=[path for path in blocked_all", "blocked: list(s.blocked)"),
+            ("sections.<card>.dropped", "dropped=dropped", "dropped: map(s.dropped)"),
+            ("sections.<card>.revertFiles", "revertFiles=", "s.revertFiles"),
+            ("sections.<card>.revertMissing", "revertMissing=", "s.revertMissing"),
+            ("sections.<card>.resetFiles", "resetFiles=", "s.resetFiles"),
+            ("sections.<card>.resetMissing", "resetMissing=", "s.resetMissing"),
+            ("sections.domains.levelFiles", "entry[\"levelFiles\"]", "s.levelFiles"),
+            ("resin.game", "resin[\"game\"]", "was.game"),
+            ("chambers.<lid>.gameLevel", "out_c[\"gameLevel\"]", "ch.gameLevel"),
+            ("halves[i].gameSlots / lineups.<gid>.gameSlots", "[\"gameSlots\"]", "g.gameSlots"),
+            ("domains.<id>.gameCost", "entry[\"gameCost\"]", "Number.isInteger(a.gameCost)"),
+            ("domains.<id>.gameLevel", "entry[\"gameLevel\"]", "a.gameLevel"),
+            ("domains.<id>.gamePreview", "entry[\"gamePreview\"]", "a.gamePreview"),
+            ("domains.<id>.kept", "in drop_kept:", "a.kept === true"),
+            ("quests.rewards.<rid>.kept", "if rid in quest_kept:", "row.kept === true"),
+            ("quests.rewards.<rid>.game", "entry[\"game\"]", "Array.isArray(row.game)"),
+            ("quests.rewards.<rid>.tier", "entry[\"tier\"]", "rewards[rid].tier"),
+        })
+        {
+            if (!infoTw.Contains(agentHas, StringComparison.Ordinal)) factsOff.Add($"the agent does not answer {fact} (looked inside def tweaks_info for {agentHas})");
+            if (!uiJs.Contains(pageHas, StringComparison.Ordinal)) factsOff.Add($"the page does not read {fact} (looked in app/Relic.App/ui/*.js for {pageHas})");
+        }
+        Check("tweaks: the page reads the take-over facts the agent answers — takenKey, changing, ownRefused, per card what it does with its files, the original game's values beside the files', kept rows, hangout tiers"
+              + (factsOff.Count > 0 ? " — " + string.Join("; ", factsOff) : ""),
+            infoTw.Length > 0 && factsOff.Count == 0);
+
+        // The question about the game folder's own files — a file of the player's own in the place of one Relic
+        // ships as a replacement: one look (GamePatcher.OwnFiles) and one stored answer per version
+        // (RelicSettings.OwnFiles), both held by the patch spike. It is asked in the three places the Windows 11
+        // question is, right after it and before the server check, "Keep mine" being the default, and its
+        // answer goes into the launch (PlaySession.OwnFilesAnswer) — it never stops one.
+        int pgOwn = w11Program.IndexOf("session.OwnFilesAnswer = AskOwnFilesOnSplash(", StringComparison.Ordinal);
+        int mfOwn = w11MainForm.IndexOf("string? ownFiles = await AskOwnFilesAsync(splash, versionId);", StringComparison.Ordinal);
+        int pfOwn = w11Preflight.IndexOf("public static OwnFilesAnswer AskOwnFiles(", StringComparison.Ordinal);
+        Check("own files: both shortcut launches ask after their Windows 11 question and before their server check, Keep mine being the default, and hand the answer to the session",
+            pgOwn > pgAsk && pgOwn < w11Program.IndexOf("PlayPreflight.CheckAsync(", StringComparison.Ordinal)
+            && mfOwn > mfAsk && mfOwn < w11MainForm.IndexOf("PlayPreflight.CheckAsync(", StringComparison.Ordinal)
+            && w11MainForm.Contains("ownFiles: ownFiles);", StringComparison.Ordinal)
+            && pfOwn >= 0 && w11Preflight.IndexOf("DefaultButton = keep,", pfOwn, StringComparison.Ordinal) > pfOwn
+            && w11Preflight.IndexOf("new TaskDialogVerificationCheckBox(L.T(\"confirm.ownFiles.dontAsk\"))", pfOwn, StringComparison.Ordinal) > pfOwn);
+        int uiOwnAt = uiJs.IndexOf("playOwnFiles: async (id) => {", StringComparison.Ordinal);
+        int uiOwnChecked = uiOwnAt < 0 ? -1 : uiJs.IndexOf("return ACTIONS.playChecked(id);", uiOwnAt, StringComparison.Ordinal);
+        Check("own files: the page asks after the Windows 11 question and before the server check, both answers go on with PLAY (Keep mine has the keyboard, Esc answers it), and play.start carries the answer",
+            uiOwnAt > 0 && uiJs.IndexOf("rpc('play.ownFiles', { versionId: id })", uiOwnAt, StringComparison.Ordinal) > uiOwnAt
+            && uiOwnChecked > uiOwnAt
+            && uiJs.Contains("act: 'playOwnReplace', noAct: 'playOwnKeep', arg: id,", StringComparison.Ordinal)
+            && uiJs.Contains("if (c.noAct && ACTIONS[c.noAct]) ACTIONS[c.noAct](c.arg, c.checkbox ? !!c.checkbox.checked : undefined, c.selected);", StringComparison.Ordinal)
+            && uiJs.Contains("rpc('play.start', own ? { versionId: id, ownFiles: own } : { versionId: id })", StringComparison.Ordinal)
+            && backendCs.Contains("StartPlay(Str(p, \"versionId\"), Str(p, \"ownFiles\"));", StringComparison.Ordinal)
+            && backendCs.Contains("var session = new PlaySession(_state) { OwnFilesAnswer = answer };", StringComparison.Ordinal));
+        Check("own files: Backend answers play.ownFiles, settings.ownFiles and patch.applyAll and the page calls them by the same names; settings.save never writes the answers",
+            backendCs.Contains("case \"play.ownFiles\": return await OwnFilesReplyAsync(Str(p, \"versionId\"));", StringComparison.Ordinal)
+            && backendCs.Contains("case \"settings.ownFiles\": return SetOwnFilesChoice(Str(p, \"versionId\"), Str(p, \"choice\"));", StringComparison.Ordinal)
+            && backendCs.Contains("case \"patch.applyAll\": return await ApplyAllGameFilesAsync();", StringComparison.Ordinal)
+            && UiCalls("rpc", "play.ownFiles") && UiCalls("rpc", "settings.ownFiles") && UiCalls("rpc", "patch.applyAll")
+            && UiCalls("on", "settings.ownFiles")
+            && !backendCs.Contains("TryGetProperty(\"ownFiles\"", StringComparison.Ordinal));
+        int applyAllAt = backendCs.IndexOf("private async Task<object> ApplyAllGameFilesAsync()", StringComparison.Ordinal);
+        int applyOneAt = backendCs.IndexOf("private static GameFilesResult ApplyGameFiles(string versionId, string gameDir, bool withInjectables)", StringComparison.Ordinal);
+        int applyPlanAt = applyOneAt < 0 ? -1 : backendCs.IndexOf("plan = GamePatcher.Apply(versionId, gameDir, Note, withInjectables: withInjectables);", applyOneAt, StringComparison.Ordinal);
+        int applyOwnAt = applyPlanAt < 0 ? -1 : backendCs.IndexOf("own = GamePatcher.ReplaceOwnFiles(versionId, gameDir, Note, withInjectables: withInjectables);", applyPlanAt, StringComparison.Ordinal);
+        Check("own files: patch.applyAll holds the install guard (and says so to a PLAY meanwhile), refuses under a play session (the session gate, cross-process) "
+              + "and while a client runs, and puts each plan in place, then Relic's file over the player's own — that step outside the plan's try, so a plan that fails stops it not",
+            applyAllAt > 0 && backendCs.IndexOf("if (Interlocked.Exchange(ref _installBusy, 1) != 0)", applyAllAt, StringComparison.Ordinal) > applyAllAt
+            && backendCs.IndexOf("Volatile.Write(ref _filesApplying, 1);", applyAllAt, StringComparison.Ordinal) > applyAllAt
+            && backendCs.IndexOf("if (!gate.WaitOne(0)) throw new InvalidOperationException(L.T(\"backend.patch.gameRunning\"));", applyAllAt, StringComparison.Ordinal) > applyAllAt
+            && backendCs.IndexOf("if (ProcessGuard.AnyRunning()) throw new InvalidOperationException(L.T(\"backend.patch.clientRunning\"));", applyAllAt, StringComparison.Ordinal) > applyAllAt
+            && applyPlanAt > applyOneAt && applyOwnAt > applyPlanAt
+            && backendCs.IndexOf("catch (Exception ex)", applyPlanAt, StringComparison.Ordinal) is int planCatch && planCatch > applyPlanAt && planCatch < applyOwnAt);
+        // A PLAY refused while the files are applied names that cause, in both launches this process runs.
+        int startPlayAt = backendCs.IndexOf("private void StartPlay(string versionId, string? ownFiles = null)", StringComparison.Ordinal);
+        int shortcutPlayAt = backendCs.IndexOf("public void StartPlayFromShortcut(", StringComparison.Ordinal);
+        bool NamesFilesFirst(int at) => at > 0
+            && backendCs.IndexOf("if (Volatile.Read(ref _filesApplying) != 0)", at, StringComparison.Ordinal) is int files && files > at
+            && backendCs.IndexOf("throw new InvalidOperationException(L.T(\"backend.play.filesApplying\"));", files, StringComparison.Ordinal) > files
+            && files < backendCs.IndexOf("if (Volatile.Read(ref _installBusy) != 0)", at, StringComparison.Ordinal);
+        Check("own files: a PLAY (the page's, the shortcut's in this process) while the game files are applied is refused under its own words, not the install's",
+            NamesFilesFirst(startPlayAt) && NamesFilesFirst(shortcutPlayAt) && L.Has("backend.play.filesApplying"));
+        // The launch: the plan by the launch's own check first, then Relic's file over the player's own alone —
+        // never a full run with replaceOwn, which would judge every other file by the stricter rules of an install
+        // (a byte patch hashed whole) and refuse a launch "Keep mine" starts. A failure of that step is a warning.
+        string playSessionCs = File.Exists(Path.Combine(repoRoot, "app", "Relic.Core", "Play", "PlaySession.cs"))
+            ? File.ReadAllText(Path.Combine(repoRoot, "app", "Relic.Core", "Play", "PlaySession.cs")) : "";
+        int fixesAt = playSessionCs.IndexOf("private void ApplyBundledFixes(InstalledVersion inst)", StringComparison.Ordinal);
+        int fixesCheckAt = fixesAt < 0 ? -1 : playSessionCs.IndexOf("if (!GamePatcher.IsUpToDate(inst.Id, inst.GameDir, withInjectables: withInjectables))", fixesAt, StringComparison.Ordinal);
+        int fixesOwnAt = fixesCheckAt < 0 ? -1 : playSessionCs.IndexOf("ReplaceOwnFiles(inst, withInjectables);", fixesCheckAt, StringComparison.Ordinal);
+        int ownStepAt = playSessionCs.IndexOf("var report = GamePatcher.ReplaceOwnFiles(inst.Id, inst.GameDir,", StringComparison.Ordinal);
+        Check("own files: a launch runs its own check of the plan first, then ReplaceOwnFiles alone for \"Use Relic's file\" — never Apply with replaceOwn — and a failure there only warns",
+            fixesAt > 0 && fixesCheckAt > fixesAt && fixesOwnAt > fixesCheckAt && !playSessionCs.Contains("replaceOwn", StringComparison.Ordinal)
+            && ownStepAt > 0 && playSessionCs.IndexOf("catch (Exception ex)", ownStepAt, StringComparison.Ordinal) is int ownCatch && ownCatch > ownStepAt
+            && playSessionCs.IndexOf("Log?.Invoke(L.T(\"core.play.ownFilesNotReplaced\", new { reason = ex.Message }));", ownCatch, StringComparison.Ordinal) > ownCatch);
+        Check("own files: the page shows the pre-check splash while the backend looks at the folder (its token, Hide gives the start up), and a stored answer "
+              + "never re-renders Settings under a caret; the shortcut's dialog says where \"Don't ask again\" is taken back",
+            uiOwnAt > 0 && uiJs.IndexOf("S.playing = { versionId: id, msg: t('play.checkingFiles'), check: true, tok };", uiOwnAt, StringComparison.Ordinal) is int splashAt
+            && splashAt > uiOwnAt && splashAt < uiJs.IndexOf("rpc('play.ownFiles', { versionId: id })", uiOwnAt, StringComparison.Ordinal)
+            && uiJs.IndexOf("if (!S.playing || S.playing.tok !== tok) {", splashAt, StringComparison.Ordinal) > splashAt
+            && uiJs.Contains("if (S.screen === 'settings' && !typingNow()) render();", StringComparison.Ordinal)
+            && pfOwn >= 0 && w11Preflight.IndexOf("Footnote = new TaskDialogFootnote(L.T(\"confirm.ownFiles.dontAskSub\"))", pfOwn, StringComparison.Ordinal) > pfOwn);
+        Check("own files: the texts the page and the shortcut pick by a condition are in en.json",
+            new[] { "confirm.ownFiles.reason", "settings.files.result.applied", "settings.files.result.ownKept", "settings.files.result.kept",
+                    "settings.files.result.missing", "settings.files.result.current", "settings.files.applying", "settings.files.apply",
+                    "settings.files.hintRows", "shell.preflight.ownFilesTitle", "backend.patch.filesMissing", "core.play.ownFilesReplaced",
+                    "core.play.ownFilesKept", "core.play.ownFilesNotReplaced", "core.patch.ownCopyMismatch", "toast.filesGameStarting" }.All(L.Has));
+        // The entry of a monster-group script is described twice, in Python: the catalogue generator lists
+        // a script only when every entry of its monsters table fits its pattern (ENTRY), and the agent's
+        // slot editor reads and rewrites an entry with its own (_TWEAK_SLOT_RE). The two must be one text
+        // but for the final anchor ($ in the generator, \Z in the agent): a field only the generator knows
+        // lists scripts the agent refuses to edit, one only the agent knows is rewritten without the
+        // generator ever having looked at it. Text-level: each pattern is the rb"..." literals of its
+        // re.compile( call, in order. A pattern is read whole or not at all — the literals have to reach the
+        // call's closing parenthesis and end with the pattern's own anchor: a comment between two literals,
+        // a flags argument or a literal written another way ends the run early, and two patterns cut at
+        // the same place would compare equal whatever follows.
+        var slotLiteral = new System.Text.RegularExpressions.Regex("\\G\\s*rb\"((?:[^\"\\\\]|\\\\.)*)\"");
+        var slotCallEnd = new System.Text.RegularExpressions.Regex("\\G\\s*\\)");
+        string SlotPattern(string path, string name, string anchor)
+        {
+            string source = File.Exists(path) ? File.ReadAllText(path) : "";
+            var call = System.Text.RegularExpressions.Regex.Match(source, "^" + System.Text.RegularExpressions.Regex.Escape(name) + @" = re\.compile\(", System.Text.RegularExpressions.RegexOptions.Multiline);
+            if (!call.Success) return "";
+            var pattern = new System.Text.StringBuilder();
+            int end = call.Index + call.Length;
+            for (var literal = slotLiteral.Match(source, end); literal.Success; literal = literal.NextMatch())
+            {
+                pattern.Append(literal.Groups[1].Value);
+                end = literal.Index + literal.Length;
+            }
+            string text = pattern.ToString();
+            return slotCallEnd.IsMatch(source, end) && text.EndsWith(anchor, StringComparison.Ordinal) ? text[..^anchor.Length] : "";
+        }
+        string slotGenerator = SlotPattern(Path.Combine(repoRoot, "build", "tweaks_catalog", "abyss.py"), "ENTRY", "$");
+        string slotAgent = SlotPattern(Path.Combine(repoRoot, "agent", "gio_agent.py"), "_TWEAK_SLOT_RE", @"\Z");
+        int slotSame = slotGenerator.Zip(slotAgent).TakeWhile(pair => pair.First == pair.Second).Count();
+        string slotOff = slotGenerator.Length == 0 ? "ENTRY is not read whole (rb\"...\" literals up to the call's closing parenthesis, the last one ending with $)"
+            : slotAgent.Length == 0 ? "_TWEAK_SLOT_RE is not read whole (rb\"...\" literals up to the call's closing parenthesis, the last one ending with \\Z)"
+            : slotGenerator != slotAgent ? $"they part at character {slotSame}: \"{slotGenerator[slotSame..]}\" (ENTRY) and \"{slotAgent[slotSame..]}\" (_TWEAK_SLOT_RE)"
+            : "";
+        Check("tweaks: the generator and the agent write one slot pattern" + (slotOff.Length > 0 ? " — " + slotOff : ""),
+            slotGenerator.Length > 0 && slotGenerator == slotAgent && slotAgent.Contains("vision_level", StringComparison.Ordinal));
+        // A spawn slot of a monster group has ONE name in the document, whichever card it belongs to:
+        // <section>.slots.<group id>.<config id> — the halves of the Abyss chambers under "abyss", the
+        // line-ups of the domains under "domains". The page builds the path of a setting from its parts
+        // (['abyss', 'slots', group, slot]); the agent's normalise_tweaks takes under ".<section>" only the
+        // keys of the tuple it names there and answers "unknown key" for any other. A page that writes a
+        // line-up under another name is refused at every Apply; an agent whose tuple lacks the key refuses
+        // what the page shows. Text-level, per section: the page names the two path parts side by side, and
+        // the agent's tuple of that section holds "slots".
+        string tweaksAgentPath = Path.Combine(repoRoot, "agent", "gio_agent.py");
+        string tweaksAgent = File.Exists(tweaksAgentPath) ? File.ReadAllText(tweaksAgentPath) : "";
+        var keysOff = new List<string>();
+        foreach (string section in new[] { "abyss", "domains" })
+        {
+            var accepted = Regex.Match(tweaksAgent, "obj\\(doc\\[\"" + section + "\"\\], \"\\." + section + "\", \\(([^()]*)\\)\\)");
+            if (!accepted.Success || !accepted.Groups[1].Value.Split(',').Select(key => key.Trim()).Contains("\"slots\""))
+                keysOff.Add($"normalise_tweaks does not take \"slots\" under \".{section}\" (looked in agent/gio_agent.py for obj(doc[\"{section}\"], \".{section}\", (…)) with \"slots\" among its keys)");
+            if (!Regex.IsMatch(uiJs, "['\"]" + section + "['\"]\\s*,\\s*['\"]slots['\"]"))
+                keysOff.Add($"the page does not name the path parts '{section}', 'slots' (looked in app/Relic.App/ui/*.js for the two side by side, as in ['{section}', 'slots', group, slot])");
+        }
+        // The enemy level of a domain is a key of that domain's own entry: domains.byId.<dungeon id>.level.
+        // The agent walks the entries under ".domains.byId" and takes in each only the keys of the tuple it
+        // names there — obj(own, at, (…)) —, "unknown key" for any other. The page names the key in four
+        // places that each have to hold: the canonical document (what is read out of a domain's entry and
+        // sent) and, as the template `domains.byId.${id}.level`, the field (the name a typed level is kept
+        // under — under another one it never reaches the document), the "Original" chip (the entry it
+        // takes out) and the range check (the name a refused level is marked and found by). Each is pinned
+        // by its own text: the template alone is found in any one of its three places. The same two
+        // failures as for a slot: a page that writes the level under another name, an agent whose tuple
+        // lacks the key.
+        int byIdAt = tweaksAgent.IndexOf("obj(sec[\"byId\"], \".domains.byId\")", StringComparison.Ordinal);
+        var ownKeys = Regex.Match(byIdAt < 0 ? "" : tweaksAgent[byIdAt..], "obj\\(own, at, \\(([^()]*)\\)\\)");
+        if (!ownKeys.Success || !ownKeys.Groups[1].Value.Split(',').Select(key => key.Trim()).Contains("\"level\""))
+            keysOff.Add("normalise_tweaks does not take \"level\" in a domain's own entry (looked in agent/gio_agent.py for the first obj(own, at, (…)) after obj(sec[\"byId\"], \".domains.byId\"), with \"level\" among its keys)");
+        foreach (var (levelUse, text) in new[]
+        {
+            ("the canonical document", "level = twNum(own.level)"),
+            ("the field", "const path = `domains.byId.${id}.level`, cap = twDomainLevelCap(v, id);"),
+            ("the \"Original\" chip", "twPresetChips(`domains.byId.${id}.level`, "),
+            ("the range check", "range(`domains.byId.${id}.level`, own.level, "),
+        })
+            if (!uiJs.Contains(text, StringComparison.Ordinal))
+                keysOff.Add($"the page does not name a domain's key \"level\" in {levelUse} (looked in app/Relic.App/ui/*.js for {text})");
+        Check("tweaks: the page and the agent name the same document keys" + (keysOff.Count > 0 ? " — " + string.Join("; ", keysOff) : ""),
+            keysOff.Count == 0);
+        // The page draws and sends a domain's enemy level by what the answer SAYS: the level field only for
+        // a domain whose entry carries `levels` (the range the agent enforces for it), the sentence about a
+        // shorter range from the line-up's `top` and from `limits.domainLevel`, no `level` in the document
+        // for any other domain — the agent refuses the key there —, and the note that the agent has to be
+        // updated only for an answer without `limits.domainLevel`: an agent that can set the level answers
+        // the limit whatever its catalogue lists. A different spelling of one of those names fails without
+        // a sound: no field on any domain, a note about an update that would change nothing, or a document
+        // the agent refuses at every Apply. Text-level, each name in the place the other side depends on:
+        // where the agent answers it (the function that composes the GET, the limits it reports) or
+        // refuses by it (normalise_tweaks itself — the agent's selftest spells that refusal once more), and
+        // where the page reads it.
+        string infoSrc = PythonFunction(tweaksAgent, "tweaks_info"), normaliseSrc = PythonFunction(tweaksAgent, "normalise_tweaks");
+        var levelOff = new List<string>();
+        foreach (var (levelFact, agentHas, agentWhere, pageHas, pageWhere) in new[]
+        {
+            ("domains.<id>.levels", infoSrc.Contains("\"levels\"", StringComparison.Ordinal), "\"levels\" inside def tweaks_info(",
+                uiJs.Contains("Array.isArray(e.levels)", StringComparison.Ordinal), "Array.isArray(e.levels)"),
+            ("lineups.<group>.top", infoSrc.Contains("\"top\"", StringComparison.Ordinal), "\"top\" inside def tweaks_info(",
+                uiJs.Contains("Number(lu.top)", StringComparison.Ordinal), "Number(lu.top)"),
+            ("limits.domainLevel", Regex.IsMatch(tweaksAgent, "TWEAK_LIMITS = \\{[^}]*\"domainLevel\""), "\"domainLevel\" inside TWEAK_LIMITS = {…}",
+                uiJs.Contains("d.limits.domainLevel", StringComparison.Ordinal), "d.limits.domainLevel"),
+        })
+        {
+            if (!agentHas) levelOff.Add($"the agent does not answer {levelFact} (looked in agent/gio_agent.py for {agentWhere})");
+            if (!pageHas) levelOff.Add($"the page does not read {levelFact} (looked in app/Relic.App/ui/*.js for {pageWhere})");
+        }
+        if (!normaliseSrc.Contains("\"the enemy level of this domain cannot be set\"", StringComparison.Ordinal))
+            levelOff.Add("the agent does not refuse the key for a domain without a range (looked in agent/gio_agent.py for \"the enemy level of this domain cannot be set\" inside def normalise_tweaks()");
+        if (!Regex.IsMatch(uiJs, "\\(twDomainLevels\\(e\\) \\|\\| twLevelLocked\\(e, [^\\n]*entry\\.level = level;"))
+            levelOff.Add("the page's canonical document keeps the key without asking the answer for the domain's range, or drops the level a locked line-up's domain holds (looked in app/Relic.App/ui/*.js for (twDomainLevels(e) || twLevelLocked(e, on the line that sets entry.level)");
+        // (a level the page keeps for a domain of a locked line-up is one the agent refuses: a document that holds
+        //  it cannot be brought into effect, as one that changes a slot of that line-up cannot)
+        if (!uiJs.Contains("&& !twLockedLevels(v, src).length;", StringComparison.Ordinal))
+            levelOff.Add("the page takes a document that holds the level of a locked line-up's domain for one a Start can apply (looked in app/Relic.App/ui/*.js for && !twLockedLevels(v, src).length; in twCanStart)");
+        if (!uiJs.Contains("!twDomainLevelLimit(d) ? T('tweaks.domains.enemyLevelNeedsAgent')", StringComparison.Ordinal))
+            levelOff.Add("the page says that the agent has to be updated without asking the answer for limits.domainLevel (looked in app/Relic.App/ui/*.js for !twDomainLevelLimit(d) ? T('tweaks.domains.enemyLevelNeedsAgent'))");
+        Check("tweaks: a domain's enemy level is drawn and sent by what the answer says — its range, a line-up's top, the limit of all domains" + (levelOff.Count > 0 ? " — " + string.Join("; ", levelOff) : ""),
+            levelOff.Count == 0);
+        // A server package is judged by one rule in two places. The agent refuses a zip as a whole before
+        // it unpacks anything (zip_member_problem, windows_name_problem, zip_tree_problem, zip_refusal), and
+        // build/stack_package.py tells beforehand what the agent would refuse — it cannot run the agent, so
+        // it carries the rule again. A rule kept twice drifts, and then the tool passes a package that every
+        // box refuses after downloading it. Text-level, by whole statements (PythonStatements): a test is
+        // the CONDITION of an `if` of the function that puts it — all of it, so that a test is not found
+        // inside a longer one: another flag bit that begins with the same digits, a sum with one more term,
+        // a test of the name put to a part of the name. Each test of a name is spelled once here and has to
+        // be a condition on both sides, under the side's own name of the value it tests with: the agent
+        // joins the tests into one condition, the tool puts them one by one. A function the tool carries
+        // whole — the tree a zip's members have to fit in, the characters Windows counts twice — is held to
+        // the agent's statement for statement. The functions that hold nothing but the rule are held to
+        // exactly these conditions: a refusal one of them gains is one the other script has to learn, and
+        // this check with it. The tool's listing tests much else; of it, each test of the rule with what
+        // follows it — the list that keeps what the test finds, and that list counted as blocking. Then
+        // which of a member's two names is judged, the values the tests work with (the flag bits, the
+        // characters and the device names Windows cannot hold, the two path lengths Windows refuses, the
+        // name of the folder the agent unpacks into) and the two sides of each sum that holds a path to
+        // such a length. Text pins hold what is written: a statement added beside a pinned one is not seen
+        // by them.
+        string packageToolPath = Path.Combine(repoRoot, "build", "stack_package.py");
+        string packageTool = File.Exists(packageToolPath) ? File.ReadAllText(packageToolPath) : "";
+        // What a script assigns to a name at the start of a line, without a comment after it.
+        static string Assigned(string source, string name)
+        {
+            var assignment = Regex.Match(source, "^" + Regex.Escape(name) + @" = (.+?)(?:\s+#.*)?\r?$", RegexOptions.Multiline);
+            return assignment.Success ? assignment.Groups[1].Value.Trim() : "";
+        }
+        var packageOff = new List<string>();
+        const string agentScript = "agent/gio_agent.py", toolScript = "build/stack_package.py";
+        // A function of one of the two scripts tests exactly these conditions, in this order...
+        void Tests(string script, string source, string function, params string[] conditions)
+        {
+            var tested = PythonConditions(source, function);
+            if (!tested.SequenceEqual(conditions))
+                packageOff.Add($"{script} {function}() tests [{string.Join(", ", tested.Select(test => $"`{test}`"))}] where this check knows [{string.Join(", ", conditions.Select(test => $"`{test}`"))}]");
+        }
+        // ...and holds each of these statements.
+        void Says(string script, string source, string function, params string[] statements)
+        {
+            var said = PythonStatements(source, function);
+            foreach (string statement in statements)
+                if (!said.Contains(statement)) packageOff.Add($"{script} {function}() has no statement `{statement}`");
+        }
+        // A function of the agent and the one the tool carries in its place are one function: the same
+        // statements in the same order, the def line and the docstring apart.
+        void Same(string agentFunction, string toolFunction)
+        {
+            static List<string> Body(string source, string function) =>
+                [.. PythonStatements(source, function).Skip(1).SkipWhile(statement => statement.StartsWith('"'))];
+            var (agentBody, toolBody) = (Body(tweaksAgent, agentFunction), Body(packageTool, toolFunction));
+            int same = agentBody.Zip(toolBody).TakeWhile(pair => pair.First == pair.Second).Count();
+            if (agentBody.Count == 0 || same < Math.Max(agentBody.Count, toolBody.Count))
+                packageOff.Add($"{agentScript} {agentFunction}() and {toolScript} {toolFunction}() are not one function: they part at `{agentBody.ElementAtOrDefault(same) ?? "(the end)"}` and `{toolBody.ElementAtOrDefault(same) ?? "(the end)"}`");
+        }
+        // Several tests as the agent writes them: one condition, the tests joined by `or`, a test that is
+        // itself an `and` in parentheses.
+        static string Joined(params string[] tests) =>
+            "(" + string.Join(" or ", tests.Select(test => test.Contains(" and ", StringComparison.Ordinal) ? "(" + test + ")" : test)) + ")";
+        // The name of a member: what reaches outside the folder the tree is unpacked into...
+        static string[] NameTests(string driveRe) =>
+            ["name.startswith(\"/\")", "\"\\\\\" in name", "\"..\" in name", driveRe + ".match(name)", "any(ord(c) < 32 or c == \"\\x7f\" for c in name)"];
+        Tests(agentScript, tweaksAgent, "zip_member_problem", Joined(NameTests("_ZIP_DRIVE_RE")));
+        Tests(toolScript, packageTool, "member_name_problem", NameTests("DRIVE_RE"));
+        // ...and what Windows cannot hold, of each component of the name.
+        static string[] WindowsTests(string nameChars, string deviceRe) =>
+            ["any(c in " + nameChars + " for c in part)", "part.endswith((\".\", \" \")) and part != \".\"", deviceRe + ".match(part)"];
+        Tests(agentScript, tweaksAgent, "windows_name_problem", Joined(WindowsTests("_WINDOWS_NAME_CHARS", "_WINDOWS_DEVICE_RE")));
+        Tests(toolScript, packageTool, "windows_name_problem", WindowsTests("WINDOWS_NAME_CHARS", "WINDOWS_DEVICE_RE"));
+        Says(agentScript, tweaksAgent, "windows_name_problem", "for part in name.split(\"/\"):");
+        Says(toolScript, packageTool, "windows_name_problem", "for part in name.split(\"/\"):");
+        // ...what cannot lie in one tree with the members before it, and the count of a path as Windows
+        // counts it: the tool carries both functions whole.
+        Same("zip_tree_problem", "tree_problem");
+        Same("_counted_twice", "counted_twice");
+        // The listing: the name as the archive stores it put to the three rules, the flag bits of a member
+        // zipfile opens for no method — the agent tests the numbers, the tool the names it gives them —, a
+        // symbolic link, and on Windows the length of a member's path and of its folder's.
+        const string linkTest = "info.external_attr >> 28 == 0xA";
+        Tests(agentScript, tweaksAgent, "zip_refusal",
+            "problem", "info.flag_bits & (0x1 | 0x40)", "info.flag_bits & 0x20", linkTest, "problem", "IS_WINDOWS", "problem",
+            "base + 1 + len(name.rstrip(\"/\")) >= WINDOWS_PATH_MAX - _counted_twice(name)",
+            "folder and base + 1 + len(folder) >= WINDOWS_FOLDER_MAX - _counted_twice(folder)");
+        Says(agentScript, tweaksAgent, "zip_refusal", "name = info.orig_filename", "problem = zip_member_problem(name)",
+            "problem = zip_tree_problem(tree, name, IS_WINDOWS)", "problem = windows_name_problem(name)");
+        Says(toolScript, packageTool, "list_zip", "stored = info.orig_filename",
+            "clash, fold = tree_problem(exact, stored, False), tree_problem(folded, stored, True)");
+        var listing = PythonStatements(packageTool, "list_zip");
+        // (the statement right after the first one of the listing that reads `statement`)
+        string After(string statement) { int at = listing.IndexOf(statement); return at >= 0 && at + 1 < listing.Count ? listing[at + 1] : ""; }
+        foreach (var (toolTest, kept) in new[]
+        {
+            ("if member_name_problem(stored):", "refused"), ("elif windows_name_problem(stored):", "windows"),
+            ("if clash:", "clashes"), ("elif fold:", "folds"),
+            ("if info.flag_bits & ZIP_FLAGS_ENCRYPTED:", "encrypted"), ("if info.flag_bits & ZIP_FLAG_PATCHED:", "patched"),
+            ("if " + linkTest + ":", "links"),
+        })
+            if (!After(toolTest).StartsWith(kept + ".append(", StringComparison.Ordinal) || !After("if " + kept + ":").StartsWith("pkg.blocking.append(", StringComparison.Ordinal))
+                packageOff.Add($"{toolScript} list_zip() does not put `{toolTest}` to a member, keep what it finds in `{kept}` and count that list as blocking");
+        // The two sums. The agent refuses  the folder it unpacks into + 1 + a path >= a length - what the
+        // path counts twice,  for a member's own path and for the folder it is or lies in; the tool says how
+        // long the folder the agent unpacks into may be: the length - 2 - the path - what it counts twice, of
+        // the member path and of the folder that count the most, the smaller of the two — and how long that
+        // leaves the stack folder, beside which the agent unpacks into a folder named by a prefix and the
+        // stack folder's own name. One sum each, and a change of either side is a change of both.
+        static string FolderOf(string member) => $"folder = {member}.rstrip(\"/\") if {member}.endswith(\"/\") else {member}.rpartition(\"/\")[0]";
+        Says(agentScript, tweaksAgent, "zip_refusal", "root = os.path.abspath(dest)", "base, tree = len(root) + _counted_twice(root), {}", FolderOf("name"));
+        Says(toolScript, packageTool, "list_zip", FolderOf("stored"),
+            "room = WINDOWS_PATH_MAX - 2 - len(longest) - counted_twice(longest)",
+            "folder_room = WINDOWS_FOLDER_MAX - 2 - len(deepest) - counted_twice(deepest)",
+            "deep = bool(deepest) and folder_room < room", "stack_room = room - len(UNPACK_PREFIX)");
+        Says(toolScript, packageTool, "windows_length", "return len(text) + counted_twice(text)");
+        foreach (var (toolTest, then) in new[]
+        {
+            ("if windows_length(stored.rstrip(\"/\")) > windows_length(longest):", "longest = stored.rstrip(\"/\")"),
+            ("if windows_length(folder) > windows_length(deepest):", "deepest = folder"),
+            ("if deep:", "room = folder_room"),
+        })
+            if (After(toolTest) != then)
+                packageOff.Add($"{toolScript} list_zip() does not say `{toolTest}` with `{then}` right after it");
+        string unpackPrefix = Assigned(packageTool, "UNPACK_PREFIX");
+        if (unpackPrefix.Length == 0 || !PythonStatements(tweaksAgent, "extract_tmp").Contains("return os.path.join(os.path.dirname(d), " + unpackPrefix + " + os.path.basename(d))"))
+            packageOff.Add($"the folder the agent unpacks into: {toolScript} has UNPACK_PREFIX = {unpackPrefix}, and {agentScript} extract_tmp() does not name the folder by that prefix and the stack folder's own name");
+        foreach (var (ruleValue, agentName, toolName) in new[]
+        {
+            ("the drive letter a member's name may not start with", "_ZIP_DRIVE_RE", "DRIVE_RE"),
+            ("the characters Windows takes in no name", "_WINDOWS_NAME_CHARS", "WINDOWS_NAME_CHARS"),
+            ("the device names of Windows", "_WINDOWS_DEVICE_RE", "WINDOWS_DEVICE_RE"),
+            ("the path length Windows refuses", "WINDOWS_PATH_MAX", "WINDOWS_PATH_MAX"),
+            ("the path length Windows refuses for a folder", "WINDOWS_FOLDER_MAX", "WINDOWS_FOLDER_MAX"),
+            ("the bytes one part of a name may have", "PART_BYTES_MAX", "PART_BYTES_MAX"),
+        })
+        {
+            string agentValue = Assigned(tweaksAgent, agentName), toolValue = Assigned(packageTool, toolName);
+            if (agentValue.Length == 0 || agentValue != toolValue)
+                packageOff.Add($"{ruleValue}: agent/gio_agent.py has {agentName} = {agentValue}, build/stack_package.py has {toolName} = {toolValue}");
+        }
+        // (the bits the agent tests as numbers are the values of the names the tool tests)
+        foreach (var (flagBits, toolName) in new[] { ("0x1 | 0x40", "ZIP_FLAGS_ENCRYPTED"), ("0x20", "ZIP_FLAG_PATCHED") })
+            if (Assigned(packageTool, toolName) != flagBits)
+                packageOff.Add($"the flag bits: {agentScript} tests {flagBits}, {toolScript} has {toolName} = {Assigned(packageTool, toolName)}");
+        // (the tree a listing is held to is made ONCE, before the loop over the members: made anew for each
+        //  member it would find no clash)
+        foreach (var (treeScript, treeSource, treeFunction, treeMade) in new[]
+        {
+            (agentScript, tweaksAgent, "zip_refusal", "base, tree = len(root) + _counted_twice(root), {}"),
+            (toolScript, packageTool, "list_zip", "exact, folded = {}, {}"),
+        })
+        {
+            var treeStatements = PythonStatements(treeSource, treeFunction);
+            int madeAt = treeStatements.IndexOf(treeMade), loopAt = treeStatements.IndexOf("for info in infos:");
+            if (madeAt < 0 || loopAt < 0 || madeAt > loopAt)
+                packageOff.Add($"{treeScript} {treeFunction}() does not make its tree (`{treeMade}`) before `for info in infos:`");
+        }
+        // (everything the tool catalogues and every list it keeps is of the name the archive stores, as the
+        //  agent judges and writes it: the name zipfile hands out may be another one)
+        Says(toolScript, packageTool, "list_zip", "is_dir = stored.endswith(\"/\")", "pkg.add(stored, info.file_size, info, is_dir, info.CRC)",
+            "encrypted.append(stored)", "patched.append(stored)", "links.append(stored)");
+        // (no stack folder of a box that runs Windows fits: the shortest one there is, a folder right below a
+        //  drive's root, and the listing counted as blocking when not even that one does)
+        if (Assigned(packageTool, "WINDOWS_STACK_MIN") != "len(\"C:\\\\x\")" || After("if infos and stack_room < WINDOWS_STACK_MIN:") != "held = deepest if deep else longest"
+            || !After("held = deepest if deep else longest").StartsWith("pkg.blocking.append(", StringComparison.Ordinal))
+            packageOff.Add($"{toolScript} list_zip() does not count a package as blocking when not even the shortest stack folder (WINDOWS_STACK_MIN = len(\"C:\\\\x\")) leaves room for it");
+        Check("package: the package tool and the agent refuse a zip by one rule — the tests of a member's name, the flag bits, a symbolic link, the one tree its members fit in, what Windows cannot hold, the longest path and the deepest folder" + (packageOff.Count > 0 ? " — " + string.Join("; ", packageOff) : ""),
+            packageOff.Count == 0);
         // The agent update: three rpc names and one family of events between the page and the Backend. The
         // start screen offers the update of the agent on this PC before any mode is chosen, so agent.build
         // and localagent.update cannot sit behind RequireAdmin (the files on this PC are the boundary, as
@@ -2306,7 +3360,7 @@ static class ServerSpike
         // Over SSH only the Linux installer can run: a Windows agent that is not this PC's is updated by the
         // launcher on the PC it runs on. The page never offers it the SSH form (a note without a button),
         // and the Backend asks the agent before anything is uploaded — its platform, and a job in progress.
-        int updRefuseAt = modesCs.IndexOf("await RefuseRemoteUpdateAsync(cfg);", StringComparison.Ordinal);
+        int updRefuseAt = modesCs.IndexOf("await RefuseRemoteUpdateAsync(cfg", StringComparison.Ordinal);
         Check("agent update: a Windows agent elsewhere is not offered the update over SSH — the page gates the offer on the platform, the Backend refuses it (and a busy agent) before the upload",
             appJs.Contains("(!S.admin.openKey && S.srv.info.platform !== 'windows')", StringComparison.Ordinal)
             && appJs.Contains("T('server.banner.agentUpdateWindows')", StringComparison.Ordinal)
@@ -2323,6 +3377,29 @@ static class ServerSpike
             && modesCs.Contains("PostEvent(\"agentupdate.error\", new { target = \"remote\", message = ex.Message, replaced = replacing });", StringComparison.Ordinal)
             && appJs.Contains("on('agentupdate.error', (d) => agentUpdateFailed(d && d.message, !!(d && d.replaced)));", StringComparison.Ordinal)
             && updPrevLineAt >= 0 && updPrevLineAt < updInstallerSrc.IndexOf("install -m 0644 \"$here/gio_agent.py\" /opt/gio-agent/gio_agent.py", StringComparison.Ordinal));
+        // ...except a run the installer stopped there itself: a stack folder of its configuration was relocated while it
+        // ran (its refusal, read from the run's lines by the rule of AgentDeployer.DirsChangedRefusal). Stopped once the new
+        // files are in place but before the configuration is written and the agent restarted, the agent that answers is
+        // the one that ran before: the page keeps what it read from it (replaced: false), and the text asks for the
+        // update again. That text is the Core's one reading of the run's lines (AgentDeployer.UpdateStoppedText, which
+        // the stackchoice spike plays); the Backend keeps no reading of its own.
+        string deployerPath = Path.Combine(repoRoot, "app", "Relic.Core", "Server", "AgentDeployer.cs");
+        string deployerCs = File.Exists(deployerPath) ? File.ReadAllText(deployerPath) : "";
+        int updRunAt = modesCs.IndexOf("private object StartRemoteAgentUpdate(JsonElement p)", StringComparison.Ordinal);
+        int updRunEnd = updRunAt < 0 ? -1 : modesCs.IndexOf("private static async Task RefuseRemoteUpdateAsync(", updRunAt, StringComparison.Ordinal);
+        string updRun = updRunAt >= 0 && updRunEnd > updRunAt ? modesCs[updRunAt..updRunEnd] : "";
+        string updStopFn = MemberText(deployerCs, "public static string? UpdateStoppedText(string? message, IReadOnlyList<string>? lines)");
+        int updStopCatch = updRun.IndexOf("catch (InvalidOperationException ex) when (AgentDeployer.UpdateStoppedText(ex.Message, lines) is { } stopped)", StringComparison.Ordinal);
+        Check("agent update: a run over SSH that the installer stopped with the new files in place, a folder having been relocated meanwhile, has its own text and replaced: false (the agent that answers is the previous one); every other failure keeps the rule above — the text read by AgentDeployer.UpdateStoppedText, the Backend reading the run's lines no other way",
+            updStopCatch > 0 && updRun.IndexOf("catch (Exception ex)", updStopCatch, StringComparison.Ordinal) > updStopCatch
+            && updRun.Contains("lines.Add(s);", StringComparison.Ordinal)
+            && updRun.Contains("PostEvent(\"agentupdate.error\", new { target = \"remote\", message = stopped, replaced = false });", StringComparison.Ordinal)
+            && updStopFn.Contains("if (DirsChangedRefusal(1, output) is not { } refusal || refusal != message) return null;", StringComparison.Ordinal)
+            && updStopFn.Contains("line.Contains(DirsChangedFilesIn, StringComparison.Ordinal)", StringComparison.Ordinal)
+            && updStopFn.Contains("L.T(\"backend.agent.updateDirsChangedFilesIn\"", StringComparison.Ordinal)
+            && !CodeOf(modesCs).Contains("UpdateStoppedBeforeConfig", StringComparison.Ordinal)
+            && !CodeOf(modesCs).Contains("DirsChangedFilesIn", StringComparison.Ordinal)
+            && L.Has("backend.agent.updateDirsChangedFilesIn"));
         // A finished run on this PC is about the status target's agent only when the admin server IS the
         // agent on this PC: an update of another agent here must not drop that server's cards and drafts.
         Check("agent update: a finished run drops the admin server's cards only when it was about that server's agent — a run over SSH, or one on this PC while the admin server is the agent on this PC",
@@ -2339,8 +3416,6 @@ static class ServerSpike
         // installer-only switch — a configuration key in it would replace the box's own value (a token the
         // box then no longer accepts, a listen address) —, the box must prove it has an agent first, and
         // no package is installed.
-        string deployerPath = Path.Combine(repoRoot, "app", "Relic.Core", "Server", "AgentDeployer.cs");
-        string deployerCs = File.Exists(deployerPath) ? File.ReadAllText(deployerPath) : "";
         Check("agent update: over SSH install.env carries no configuration key, the box must already have an agent, and the installer runs with --yes --no-deps",
             deployerCs.Contains("UploadText(session.Sftp, \"GIO_RELIC_ENV=1\\n\" + (force ? \"GIO_UPGRADE_FORCE=y\\n\" : \"\"), envFile);", StringComparison.Ordinal)
             && deployerCs.Contains("[ -f /etc/gio-agent/config ] && [ -f /opt/gio-agent/gio_agent.py ] || exit {NoAgentExit}; ", StringComparison.Ordinal)
@@ -2377,33 +3452,48 @@ static class ServerSpike
             backendCs.Contains("case \"admin.openEnter\": return await OpenAdminEnterAsync();", StringComparison.Ordinal)
             && backendCs.Contains("case \"admin.openForget\": return OpenAdminForget(out _);", StringComparison.Ordinal)
             && CaseFreeOfRequireAdmin(backendCs, oeAt) && CaseFreeOfRequireAdmin(backendCs, ofAt));
-        // The revocation posts its event only for a key it really forgot: the configured server may have changed
-        // while the refused call was in flight, and the forget then has nothing to forget — the 401 is the old
-        // server's own error, and an event would name the new one.
+        // The revocation forgets only the key the refused call carried, and only while it is still the bearer in effect:
+        // the configured server may have changed while the call was in flight (the start screen logged into another one,
+        // maybe entered there with a key of its own, which a forget of "the configured host's key" would take) — the 401
+        // is then the old server's own error, rethrown, and an event would name the new server. It posts its event only
+        // for a key it really forgot.
         int withAgentAt = backendCs.IndexOf("private async Task<object?> WithAgent(", StringComparison.Ordinal);
         int revokeAt = withAgentAt < 0 ? -1 : backendCs.IndexOf("catch (AgentHttpException ex) when (ex.Status == 401 && cfg.OpenKey)", withAgentAt, StringComparison.Ordinal);
         int forgotAt = revokeAt < 0 ? -1 : backendCs.IndexOf("var state = OpenAdminForget(out bool forgot);", revokeAt, StringComparison.Ordinal);
         int rethrowAt = forgotAt < 0 ? -1 : backendCs.IndexOf("if (!forgot) throw;", forgotAt, StringComparison.Ordinal);
         int eventAt = rethrowAt < 0 ? -1 : backendCs.IndexOf("PostEvent(\"admin.revoked\", new { state });", rethrowAt, StringComparison.Ordinal);
-        Check("open admin: a 401 on an open key inside WithAgent forgets the key, and only a real forget posts admin.revoked and throws backend.openKeyRevoked — else the call's own 401 is rethrown",
+        string revokeHead = revokeAt >= 0 && forgotAt > revokeAt ? CodeOf(backendCs[revokeAt..forgotAt]) : "";
+        int bearerAt = revokeHead.IndexOf("if (AdminServer() is not { OpenKey: true } now", StringComparison.Ordinal);
+        int bearerSameAt = bearerAt < 0 ? -1 : revokeHead.IndexOf("|| !ServerConfig.SameHost(now.Host, cfg.Host) || now.AgentToken != cfg.AgentToken)", bearerAt, StringComparison.Ordinal);
+        Check("open admin: a 401 on an open key inside WithAgent forgets the key only while that very key (its host and value) is still the bearer in effect — else the call's own 401 is rethrown — and only a real forget posts admin.revoked and throws backend.openKeyRevoked",
             revokeAt > withAgentAt && forgotAt > revokeAt && rethrowAt > forgotAt && eventAt > rethrowAt
+            && bearerAt >= 0 && bearerSameAt > bearerAt && revokeHead.IndexOf("throw;", bearerSameAt, StringComparison.Ordinal) > bearerSameAt
             && backendCs.IndexOf("throw new InvalidOperationException(L.T(\"backend.openKeyRevoked\"));", eventAt, StringComparison.Ordinal) > eventAt);
-        // The forget itself: memory first (the mode and the connection in effect are what every following call
-        // reads), then the two files, each inside a try and never fatal — a state file that cannot be written
-        // right now would otherwise reject the rpc and swallow the revocation (WithAgent posts its event only
-        // once the forget returns) while the backend already runs in Player mode; a leftover record lends no
-        // token and is ignored.
-        int forgetAt = modesCs.IndexOf("private object OpenAdminForget(out bool forgot)", StringComparison.Ordinal);
-        int forgetModeAt = forgetAt < 0 ? -1 : modesCs.IndexOf("_state.Settings.Mode = \"player\";", forgetAt, StringComparison.Ordinal);
-        int forgetSaveAt = forgetModeAt < 0 ? -1 : modesCs.IndexOf("try { _state.Save(); }", forgetModeAt, StringComparison.Ordinal);
-        int forgetSaveCatchAt = forgetSaveAt < 0 ? -1 : modesCs.IndexOf("catch (Exception ex) { Log.Error(\"persisting the return to Player mode\", ex); }", forgetSaveAt, StringComparison.Ordinal);
-        int forgetDeleteAt = forgetSaveCatchAt < 0 ? -1 : modesCs.IndexOf("try { ServerConfigStore.Delete(); }", forgetSaveCatchAt, StringComparison.Ordinal);
-        int forgetDeleteCatchAt = forgetDeleteAt < 0 ? -1 : modesCs.IndexOf("catch (Exception ex) { Log.Error(\"forgetting the open key's file\", ex); }", forgetDeleteAt, StringComparison.Ordinal);
-        int forgetEndAt = forgetDeleteCatchAt < 0 ? -1 : modesCs.IndexOf("return BuildInitState();", forgetDeleteCatchAt, StringComparison.Ordinal);
-        Check("open admin: OpenAdminForget answers whether it forgot, forgets in memory first, then saves the state and deletes the key's file — each inside a try, no bare save",
-            forgetAt >= 0 && forgetModeAt > forgetAt && forgetSaveAt > forgetModeAt && forgetSaveCatchAt > forgetSaveAt
-            && forgetDeleteAt > forgetSaveCatchAt && forgetDeleteCatchAt > forgetDeleteAt && forgetEndAt > forgetDeleteCatchAt
-            && !modesCs[forgetAt..forgetEndAt].Replace("try { _state.Save(); }", "", StringComparison.Ordinal).Contains("_state.Save(", StringComparison.Ordinal));
+        // The forget itself, in this order: the configured host's open-key record out of memory first (the connection in
+        // effect is what every following call reads), the mode, the state, then that host's open-key record out of
+        // server.json — ServerConfigStore.ForgetWhere(host, r => r.OpenKey): a real token saved for that host meanwhile
+        // stays, and so do the records of every other host, so never Forget(host) or Delete(). The host is the configured
+        // one, read once at the start: memory and the file lose the same host's key. Each file inside a try and never
+        // fatal — a state file that cannot be written right now would otherwise reject the rpc and swallow the revocation
+        // (WithAgent posts its event only once the forget returns) while the backend already runs in Player mode; a
+        // leftover record lends no token and is ignored. Read inside OpenAdminForget's own text: the same lines elsewhere
+        // in the file (Delete all ends with a try around a forget of the file) cannot stand in for them.
+        string forgetCs = MemberText(modesCs, "private object OpenAdminForget(out bool forgot)");
+        int forgetHostAt = forgetCs.IndexOf("string host = _state.Settings.ServerHost;", StringComparison.Ordinal);
+        int forgetMemoryAt = forgetHostAt < 0 ? -1 : forgetCs.IndexOf("DropRecords(r => r.OpenKey && ServerConfig.SameHost(r.Host, host))", forgetHostAt, StringComparison.Ordinal);
+        int forgetModeAt = forgetMemoryAt < 0 ? -1 : forgetCs.IndexOf("_state.Settings.Mode = \"player\";", forgetMemoryAt, StringComparison.Ordinal);
+        int forgetSaveAt = forgetModeAt < 0 ? -1 : forgetCs.IndexOf("try { _state.Save(); }", forgetModeAt, StringComparison.Ordinal);
+        int forgetSaveCatchAt = forgetSaveAt < 0 ? -1 : forgetCs.IndexOf("catch (Exception ex) { Log.Error(\"persisting the return to Player mode\", ex); }", forgetSaveAt, StringComparison.Ordinal);
+        int forgetFileAt = forgetSaveCatchAt < 0 ? -1 : forgetCs.IndexOf("try { ServerConfigStore.ForgetWhere(host, r => r.OpenKey); }", forgetSaveCatchAt, StringComparison.Ordinal);
+        int forgetFileCatchAt = forgetFileAt < 0 ? -1 : forgetCs.IndexOf("catch (Exception ex) { Log.Error(\"forgetting the open key's file\", ex); }", forgetFileAt, StringComparison.Ordinal);
+        int forgetEndAt = forgetFileCatchAt < 0 ? -1 : forgetCs.IndexOf("return BuildInitState();", forgetFileCatchAt, StringComparison.Ordinal);
+        string forgetCode = CodeOf(forgetCs);
+        Check("open admin: OpenAdminForget answers whether it forgot, then takes the configured host's open key out of memory first, the mode, saves the state and last takes that host's open-key record out of server.json (ForgetWhere(host, r => r.OpenKey) — never Forget(host) or Delete()) — each file inside a try, no bare save",
+            forgetCs.Contains("forgot = AdminServer() is { OpenKey: true };", StringComparison.Ordinal)
+            && forgetHostAt > 0 && forgetMemoryAt > forgetHostAt && forgetModeAt > forgetMemoryAt && forgetSaveAt > forgetModeAt && forgetSaveCatchAt > forgetSaveAt
+            && forgetFileAt > forgetSaveCatchAt && forgetFileCatchAt > forgetFileAt && forgetEndAt > forgetFileCatchAt
+            && !forgetCode.Replace("try { _state.Save(); }", "", StringComparison.Ordinal).Contains("_state.Save(", StringComparison.Ordinal)
+            && !System.Text.RegularExpressions.Regex.IsMatch(forgetCode, @"\bServerConfigStore\.(?:Forget|Delete)\("));
         // The entry: a real token saved for the same host enters with that token — validated, nothing fetched,
         // nothing saved, openKey false in the reply — before the key is ever asked for. A 401 on that token is a
         // dead record (the agent's token was rotated since; nothing else in the launcher drops one) and falls
@@ -2446,16 +3536,2484 @@ static class ServerSpike
             backendCs.Contains("openKey = AdminServer()?.OpenKey == true,", StringComparison.Ordinal));
         Check("open admin: the UI calls both rpcs and handles the admin.revoked event",
             UiCalls("rpc", "admin.openEnter") && UiCalls("rpc", "admin.openForget") && UiCalls("on", "admin.revoked"));
-        // Two label tables of the UI hold translation KEYS, which check_i18n.py does not see (it reads only a
-        // key written as the literal argument of a translation call): SRVJOBS (job kind → title) and CATS (the
-        // Game commands cards: name + hint). A job or a card added there without its text draws the raw key,
-        // so every such key the scripts spell has to be in en.json.
-        var tableKeys = System.Text.RegularExpressions.Regex.Matches(uiJs, @"'((?:server\.job|cmd\.cat)\.[A-Za-z.]+)'")
+
+        // ── saved servers (the start screen), and server.json's records per host ──
+        // server.json keeps one record per host, and the Backend holds them as ONE list: loaded whole in the constructor,
+        // replaced whole under the file's lock (RecordSaved, DropRecords — a reader on any thread sees one whole list) and
+        // read by host. The configured host's record is the connection in effect (StoredServer), a login lends the record
+        // of the host it logs in to, AgentPortFor takes the record of the host it resolves as its witness. Nothing reads
+        // "the" record of the file (ServerConfigStore.Load answers whichever host was saved last), and a state that names
+        // no server adopts a host only from a file that names exactly one. What the Core's store does is the saved spike's;
+        // here the Backend's half (Relic.App, which the spikes do not reference) and the page's are read from their source,
+        // their whole-line comments left out (CodeOf) where a word is looked for anywhere.
+        static string CodeOf(string src) => System.Text.RegularExpressions.Regex.Replace(src, @"(?m)^[ \t]*//.*(?:\r?\n|$)", "");
+        static string NameOf(string signature) { string head = signature[..signature.IndexOf('(')]; return head[(head.LastIndexOf(' ') + 1)..]; }
+        // What a lock guards is read from the C# text itself, not from the order of the lines: a call placed after the
+        // lock's block, in the same member, is not under the lock. CsPast steps over a token that is no code — a comment,
+        // a character, a string (plain, verbatim or interpolated, an interpolation's holes read as code) — and answers the
+        // index just past it (i when none starts at i); CsClose answers the index of the bracket that closes the one opened
+        // just before `at`, every such token skipped (-1 when it never closes, or another kind of bracket closes it).
+        static int CsPast(string cs, int i)
+        {
+            if (i >= cs.Length) return i;
+            if (cs[i] == '/' && i + 1 < cs.Length && cs[i + 1] == '/') { int nl = cs.IndexOf('\n', i); return nl < 0 ? cs.Length : nl; }
+            if (cs[i] == '/' && i + 1 < cs.Length && cs[i + 1] == '*') { int end = cs.IndexOf("*/", i + 2, StringComparison.Ordinal); return end < 0 ? cs.Length : end + 2; }
+            if (cs[i] == '\'')
+            {
+                for (int j = i + 1; j < cs.Length; j++) { if (cs[j] == '\\') { j++; continue; } if (cs[j] == '\'' || cs[j] == '\n') return j + 1; }
+                return cs.Length;
+            }
+            int q = i;
+            bool verbatim = false, interpolated = false;
+            while (q < cs.Length && q - i < 2 && (cs[q] is '@' or '$')) { if (cs[q] == '@') verbatim = true; else interpolated = true; q++; }
+            if (q >= cs.Length || cs[q] != '"') return i;
+            for (int j = q + 1; j < cs.Length; j++)
+            {
+                char d = cs[j];
+                if (!verbatim && d == '\\') { j++; continue; }
+                if (d == '"') { if (verbatim && j + 1 < cs.Length && cs[j + 1] == '"') { j++; continue; } return j + 1; }
+                if (interpolated && (d == '{' || d == '}') && j + 1 < cs.Length && cs[j + 1] == d) { j++; continue; }
+                if (interpolated && d == '{') { int hole = CsClose(cs, j + 1, '}'); if (hole < 0) return cs.Length; j = hole; continue; }
+                if (!verbatim && d == '\n') return j;
+            }
+            return cs.Length;
+        }
+        static int CsClose(string cs, int at, char close)
+        {
+            for (int depth = 1, i = at; i < cs.Length; i++)
+            {
+                int past = CsPast(cs, i);
+                if (past > i) { i = past - 1; continue; }
+                char c = cs[i];
+                if (c is '(' or '{' or '[') depth++;
+                else if ((c is ')' or '}' or ']') && --depth == 0) return c == close ? i : -1;
+            }
+            return -1;
+        }
+        // Where a text starts in a member's code: never inside a comment, a character or a string (each stepped over whole —
+        // the texts looked for begin with code, a string they hold included).
+        static List<int> CodeIndexes(string member, string text)
+        {
+            var at = new List<int>();
+            for (int i = 0; i < member.Length; )
+            {
+                int past = CsPast(member, i);
+                if (past > i) { i = past; continue; }
+                if (string.CompareOrdinal(member, i, text, 0, text.Length) == 0) at.Add(i);
+                i++;
+            }
+            return at;
+        }
+        // The spans a lock guards in a member's text, (start, end) indexes into it, its head (`lock (…)`, ending with its own
+        // closing parenthesis) found in code alone: from the head to the brace that closes its block — or, a lock without
+        // braces, to the end of its one statement (its `;`, the braces of an expression such as `new[] { cfg }` stepped
+        // over; a statement that opens a block after a `)` ends with that block).
+        static List<(int start, int end)> LockSpans(string member, string head)
+        {
+            var spans = new List<(int start, int end)>();
+            foreach (int at in CodeIndexes(member, head))
+            {
+                int i = at + head.Length;
+                while (i < member.Length) { int past = CsPast(member, i); if (past > i) i = past; else if (char.IsWhiteSpace(member[i])) i++; else break; }
+                if (i >= member.Length) continue;
+                if (member[i] == '{') { int end = CsClose(member, i + 1, '}'); if (end > i) spans.Add((at, end)); continue; }
+                for (int depth = 0, j = i; j < member.Length; j++)
+                {
+                    int past = CsPast(member, j);
+                    if (past > j) { j = past - 1; continue; }
+                    char c = member[j];
+                    if (c is '(' or '[') depth++;
+                    else if (c is ')' or ']') depth--;
+                    else if (c == '{')
+                    {
+                        int end = CsClose(member, j + 1, '}');
+                        if (end < 0) break;
+                        if (depth == 0 && member[i..j].TrimEnd().EndsWith(')')) { spans.Add((at, end)); break; }
+                        j = end;
+                    }
+                    else if (c == ';' && depth == 0) { spans.Add((at, j)); break; }
+                }
+            }
+            return spans;
+        }
+        // Whether a text stands in a member's code at least once, and every place it stands lies inside a span of the lock.
+        static bool InsideLock(string member, string head, string text) =>
+            LockSpans(member, head) is var spans && CodeIndexes(member, text) is var at && at.Count > 0
+            && at.All(i => spans.Any(s => i > s.start && i + text.Length <= s.end + 1));
+        string backendBoth = CodeOf(backendCs) + CodeOf(modesCs);
+        var listOff = new List<string>();
+        foreach (var (file, src) in new[] { ("Backend.cs", backendCs), ("Backend.Modes.cs", modesCs) })
+            foreach (System.Text.RegularExpressions.Match assign in System.Text.RegularExpressions.Regex.Matches(src, @"\b_records = "))
+            {
+                int lineAt = src.LastIndexOf('\n', assign.Index) + 1;
+                if (src[lineAt..assign.Index].TrimStart().StartsWith("//", StringComparison.Ordinal)) continue;
+                int memberAt = new[] { "\n    private ", "\n    public ", "\n    internal " }.Max(head => src.LastIndexOf(head, assign.Index, StringComparison.Ordinal));
+                string upTo = memberAt < 0 ? "" : src[memberAt..assign.Index];
+                // (the member's own text, as MemberText cuts it, and the assignment's place in it)
+                int signatureEnd = memberAt < 0 ? -1 : src.IndexOf('\n', memberAt + 1);
+                string member = signatureEnd < 0 ? "" : MemberText(src, src[(memberAt + 1)..signatureEnd].TrimEnd('\r'));
+                int assignIn = memberAt < 0 ? -1 : assign.Index - (memberAt + 1);
+                bool ok = upTo.StartsWith("\n    public Backend(MainForm form)", StringComparison.Ordinal)
+                    ? src.AsSpan(assign.Index).StartsWith("_records = ServerConfigStore.LoadAll();", StringComparison.Ordinal)
+                    : assignIn >= 0 && assignIn < member.Length
+                      && LockSpans(member, "lock (ServerConfigStore.Gate)").Any(s => assignIn > s.start && assignIn < s.end);
+                if (!ok) listOff.Add($"{file}: {src[assign.Index..Math.Min(src.Length, assign.Index + 70)].Split('\n')[0].Trim()}");
+            }
+        int recordsLoadAt = backendCs.IndexOf("_records = ServerConfigStore.LoadAll();", StringComparison.Ordinal);
+        Check("saved servers: the Backend holds server.json's records as one list — loaded whole in the constructor, every other assignment made whole under lock (ServerConfigStore.Gate), RecordSaved putting the saved record first in its host's place — and reads it by host: StoredServer = the configured host's record, the admin login lends the record of the host it logs in to, AgentPortFor's witness is the resolved host's record; no single-record read (ServerConfigStore.Load), no _server / _serverSaved left, a host adopted only when the state names none and the file exactly one"
+              + (listOff.Count > 0 ? " — assigned another way: " + string.Join("; ", listOff) : ""),
+            backendCs.Contains("private volatile IReadOnlyList<ServerConfig> _records;", StringComparison.Ordinal)
+            && recordsLoadAt > 0 && listOff.Count == 0
+            && backendCs.IndexOf("if (string.IsNullOrWhiteSpace(_state.Settings.ServerHost) && _records.Count == 1", recordsLoadAt, StringComparison.Ordinal) > recordsLoadAt
+            && MemberText(modesCs, "private void RecordSaved(ServerConfig cfg)")
+                .Contains("_records = new[] { cfg }.Concat(_records.Where(r => !ServerConfig.SameHost(r.Host, cfg.Host))).ToList();", StringComparison.Ordinal)
+            && modesCs.Contains("private ServerConfig? RecordFor(string? host) => _records.FirstOrDefault(r => ServerConfig.SameHost(r.Host, host));", StringComparison.Ordinal)
+            && modesCs.Contains("private ServerConfig? StoredServer() => RecordFor(_state.Settings.ServerHost);", StringComparison.Ordinal)
+            && modesCs.Contains("var storedForHost = RecordFor(r.Host) is { } st && ServerConfig.SameHost(st.Host, r.Host) && !st.OpenKey ? st : null;", StringComparison.Ordinal)
+            && MemberText(modesCs, "private int AgentPortFor(ServerAddress.Resolved r)")
+                .Contains("if (RecordFor(r.Host) is { AgentPort: > 0 } rec) return rec.AgentPort;", StringComparison.Ordinal)
+            && !System.Text.RegularExpressions.Regex.IsMatch(backendBoth, @"\bServerConfigStore\.Load\(|\b_server\b|\b_serverSaved\b"));
+        // Each writer of server.json saves its host's record and takes it into memory on the very next line — the five of
+        // them (the admin login, the open key's entry, the agent on this PC entered, the two agent installs), once each,
+        // and nothing else saves a record.
+        var savePair = new System.Text.RegularExpressions.Regex(@"ServerConfigStore\.Save\(cfg\);\r?\n[ \t]*RecordSaved\(cfg\);");
+        string[] saveWriters =
+        {
+            "private async Task<object> AdminLoginAsync(string address, string token, int agentPort = 0)", "private async Task<object> OpenAdminEnterAsync()",
+            "private async Task<object> LocalAgentEnterAsync()", "private object StartLocalAgentInstall(JsonElement p)", "private object StartRemoteAgentInstall(JsonElement p)",
+        };
+        var writersOff = saveWriters.Where(w => savePair.Matches(MemberText(modesCs, w)).Count != 1).Select(NameOf).ToList();
+        Check("saved servers: each writer of server.json — the admin login, the open key's entry, the agent on this PC, the two agent installs — saves its host's record and takes it into memory on the next line (ServerConfigStore.Save(cfg); then RecordSaved(cfg);), once each, and nothing else saves a record"
+              + (writersOff.Count > 0 ? " — not so in: " + string.Join(", ", writersOff) : ""),
+            writersOff.Count == 0
+            && System.Text.RegularExpressions.Regex.Matches(backendBoth, @"\bServerConfigStore\.Save\(").Count == saveWriters.Length
+            && savePair.Matches(backendBoth).Count == saveWriters.Length
+            && System.Text.RegularExpressions.Regex.Matches(backendBoth, @"\bRecordSaved\(cfg\);").Count == saveWriters.Length);
+        // The admin login moves nothing until its record is saved. A token it borrowed from the host's record is asked for
+        // again once the agent answered: gone meanwhile (a Delete of that host's saved server, another login's token) it is
+        // never saved back — backend.tokenRequired, the page asks for one. Then the record is saved FIRST — a server.json
+        // another program holds refuses the save, and the previous server, its ports and the mode stay — and only then the
+        // address and the mode.
+        string loginCs = CodeOf(MemberText(modesCs, "private async Task<object> AdminLoginAsync(string address, string token, int agentPort = 0)"));
+        int lgEnterAt = loginCs.IndexOf("warning = L.T(\"backend.agentUnreachableEnter\"", StringComparison.Ordinal);
+        int lgGoneAt = lgEnterAt < 0 ? -1 : loginCs.IndexOf("if (!typed && storedForHost is not null", lgEnterAt, StringComparison.Ordinal);
+        int lgStillAt = lgGoneAt < 0 ? -1 : loginCs.IndexOf("!(RecordFor(r.Host) is { OpenKey: false } now && now.AgentToken == storedForHost.AgentToken)", lgGoneAt, StringComparison.Ordinal);
+        int lgAskAt = lgStillAt < 0 ? -1 : loginCs.IndexOf("throw new InvalidOperationException(L.T(\"backend.tokenRequired\"));", lgStillAt, StringComparison.Ordinal);
+        int lgSaveAt = lgAskAt < 0 ? -1 : loginCs.IndexOf("ServerConfigStore.Save(cfg);", lgAskAt, StringComparison.Ordinal);
+        int lgAddressAt = lgSaveAt < 0 ? -1 : loginCs.IndexOf("ApplyAddress(r, explicitPort);", lgSaveAt, StringComparison.Ordinal);
+        int lgModeAt = lgAddressAt < 0 ? -1 : loginCs.IndexOf("_state.Settings.Mode = \"admin\";", lgAddressAt, StringComparison.Ordinal);
+        Check("admin login: transactional to its end — a borrowed saved token asked for again once the agent answered (gone meanwhile: backend.tokenRequired, never saved back), then the host's record saved FIRST, and only then the address and the mode",
+            lgEnterAt > 0 && lgGoneAt > lgEnterAt && lgStillAt > lgGoneAt && lgAskAt > lgStillAt && lgSaveAt > lgAskAt && lgAddressAt > lgSaveAt && lgModeAt > lgAddressAt
+            && System.Text.RegularExpressions.Regex.Matches(loginCs, @"\bApplyAddress\(").Count == 1
+            && System.Text.RegularExpressions.Regex.Matches(loginCs, @"_state\.Settings\.Mode = ").Count == 1);
+        // The three rpcs of the saved servers: this PC's own list, so none sits behind the admin gate (the start screen calls
+        // them before any mode is entered), and nothing secret crosses the bridge — servers.save reads no token, neither in
+        // its case nor in SaveServerEntry: a token reaches server.json only through an admin login, the agent on this PC
+        // entered, an open-administration entry or an agent install the agent accepted.
+        int svSaveAt = backendCs.IndexOf("case \"servers.save\":", StringComparison.Ordinal);
+        int svDeleteAt = backendCs.IndexOf("case \"servers.delete\":", StringComparison.Ordinal);
+        int svAllAt = backendCs.IndexOf("case \"servers.deleteAll\":", StringComparison.Ordinal);
+        string saveEntryCs = MemberText(modesCs, "private object SaveServerEntry(string address, string mode, string label, int agentPort)");
+        Check("saved servers: Backend answers servers.save, servers.delete and servers.deleteAll, none behind RequireAdmin; servers.save reads no token (neither its case nor SaveServerEntry); the page calls all three",
+            backendCs.Contains("case \"servers.save\": return SaveServerEntry(Str(p, \"address\"), Str(p, \"mode\"), Str(p, \"label\"), Int(p, \"agentPort\", 0));", StringComparison.Ordinal)
+            && backendCs.Contains("case \"servers.delete\": return DeleteServerEntry(Str(p, \"id\"));", StringComparison.Ordinal)
+            && backendCs.Contains("case \"servers.deleteAll\": return DeleteAllServerEntries();", StringComparison.Ordinal)
+            && CaseFreeOfRequireAdmin(backendCs, svSaveAt) && CaseFreeOfRequireAdmin(backendCs, svDeleteAt) && CaseFreeOfRequireAdmin(backendCs, svAllAt)
+            && CodeOf(CaseText(backendCs, svSaveAt)).IndexOf("token", StringComparison.OrdinalIgnoreCase) < 0
+            && saveEntryCs.Length > 0 && CodeOf(saveEntryCs).IndexOf("token", StringComparison.OrdinalIgnoreCase) < 0
+            && UiCalls("rpc", "servers.save") && UiCalls("rpc", "servers.delete") && UiCalls("rpc", "servers.deleteAll"));
+        // Each of them changes the state and saves it under RelicState.Gate — the one lock of every writer of the state —
+        // and awaits nothing there: every place each of these calls stands lies inside the lock's block (LockSpans).
+        string deleteEntryCs = MemberText(modesCs, "private object DeleteServerEntry(string id)");
+        string deleteAllCs = MemberText(modesCs, "private object DeleteAllServerEntries()");
+        string forgetHostCs = MemberText(modesCs, "private bool ForgetHost(string host, bool save = true)");
+        static bool UnderStateLock(string member, params string[] inside) =>
+            inside.All(x => InsideLock(member, "lock (RelicState.Gate)", x))
+            && !System.Text.RegularExpressions.Regex.IsMatch(CodeOf(member), @"\bawait\b");
+        int unknownAt = deleteEntryCs.IndexOf("_state.SavedServerById(id) ?? throw new InvalidOperationException(L.T(\"backend.servers.unknown\"))", StringComparison.Ordinal);
+        Check("saved servers: Save, Delete and Delete all change the state and save it under RelicState.Gate, awaiting nothing — Save through RelicState.SaveServer (one entry per host), Delete refusing an id the list no longer holds (backend.servers.unknown) before it forgets the host",
+            UnderStateLock(saveEntryCs, "_state.SaveServer(entry)", "_state.Save();")
+            && UnderStateLock(deleteEntryCs, "ForgetHost(entry.Host);") && unknownAt > 0 && deleteEntryCs.IndexOf("ForgetHost(entry.Host);", StringComparison.Ordinal) > unknownAt
+            && UnderStateLock(deleteAllCs, "ForgetHost(host, save: false);", "_state.Save();")
+            && UnderStateLock(forgetHostCs, "_state.ForgetServer(host)", "_state.Save();"));
+        // What a Delete forgets of a host (ForgetHost), in this order under the state's lock: its entry, the game logins
+        // and SSH host keys kept for it (RelicState.ForgetServer); its records in memory, then in server.json (Forget, inside
+        // a try); the mode, when the configured host's Server Admin mode is left without a token (the start screen asks
+        // again); then the state saved. Never the configured host (S2: only a host writer moves it), a baked token or the
+        // ClientSecret, and never the whole file.
+        int fhGateAt = forgetHostCs.IndexOf("lock (RelicState.Gate)", StringComparison.Ordinal);
+        int fhStateAt = fhGateAt < 0 ? -1 : forgetHostCs.IndexOf("bool any = _state.ForgetServer(host);", fhGateAt, StringComparison.Ordinal);
+        int fhMemoryAt = fhStateAt < 0 ? -1 : forgetHostCs.IndexOf("DropRecords(r => ServerConfig.SameHost(r.Host, host))", fhStateAt, StringComparison.Ordinal);
+        int fhFileAt = fhMemoryAt < 0 ? -1 : forgetHostCs.IndexOf("try { any |= ServerConfigStore.Forget(host); }", fhMemoryAt, StringComparison.Ordinal);
+        int fhModeAt = fhFileAt < 0 ? -1 : forgetHostCs.IndexOf("if (ServerConfig.SameHost(host, _state.Settings.ServerHost) && IsAdminMode && AdminServer() is null)", fhFileAt, StringComparison.Ordinal);
+        int fhModeSetAt = fhModeAt < 0 ? -1 : forgetHostCs.IndexOf("_state.Settings.Mode = \"\";", fhModeAt, StringComparison.Ordinal);
+        int fhSaveAt = fhModeSetAt < 0 ? -1 : forgetHostCs.IndexOf("if (save) _state.Save();", fhModeSetAt, StringComparison.Ordinal);
+        Check("saved servers: ForgetHost forgets, in this order, the host's entry, game logins and SSH host keys (RelicState.ForgetServer), its records in memory, then in server.json (ServerConfigStore.Forget inside a try), sets the mode back to the start screen's question when the configured host's Server Admin mode is left without a token, then saves the state — never the configured host, a baked token, the ClientSecret or the whole file",
+            fhGateAt >= 0 && fhStateAt > fhGateAt && fhMemoryAt > fhStateAt && fhFileAt > fhMemoryAt && fhModeAt > fhFileAt && fhModeSetAt > fhModeAt && fhSaveAt > fhModeSetAt
+            && !System.Text.RegularExpressions.Regex.IsMatch(CodeOf(forgetHostCs), @"\b(?:ServerHost|AgentPort)\s*=(?!=)|ClientSecret|BuildDefaults|ServerConfigStore\.Delete\("));
+        // Delete all: ForgetHost — everything kept for a host — for every saved entry's host and for every host server.json
+        // still names (an admin login, the agent on this PC entered, an open-administration entry or an agent install keeps a
+        // record without an entry: every saved token and key goes, and the game logins and SSH host keys of those hosts too),
+        // the records in memory emptied, then server.json itself with the kept copies of unreadable files
+        // (ServerConfigStore.Delete inside a try: forgetting a host never removes those), and the state saved once. That is
+        // the one place the Backend deletes the file: OpenAdminForget and the local agent's uninstall forget their own records.
+        int daGateAt = deleteAllCs.IndexOf("lock (RelicState.Gate)", StringComparison.Ordinal);
+        int daEntriesAt = daGateAt < 0 ? -1 : deleteAllCs.IndexOf("foreach (var entry in _state.SavedServerList()) Add(entry.Host);", daGateAt, StringComparison.Ordinal);
+        int daRecordsAt = daGateAt < 0 ? -1 : deleteAllCs.IndexOf("foreach (var record in ServerConfigStore.LoadAll()) Add(record.Host);", daGateAt, StringComparison.Ordinal);
+        int daForgetAt = daEntriesAt < 0 || daRecordsAt < 0 ? -1
+            : deleteAllCs.IndexOf("foreach (string host in hosts) ForgetHost(host, save: false);", Math.Max(daEntriesAt, daRecordsAt), StringComparison.Ordinal);
+        int daMemoryAt = daForgetAt < 0 ? -1 : deleteAllCs.IndexOf("DropRecords(_ => true);", daForgetAt, StringComparison.Ordinal);
+        int daFileAt = daMemoryAt < 0 ? -1 : deleteAllCs.IndexOf("try { ServerConfigStore.Delete(); }", daMemoryAt, StringComparison.Ordinal);
+        int daSaveAt = daFileAt < 0 ? -1 : deleteAllCs.IndexOf("_state.Save();", daFileAt, StringComparison.Ordinal);
+        Check("saved servers: Delete all forgets every saved entry's host and every host server.json still names (ForgetHost), empties the records in memory, then deletes server.json with the kept copies of unreadable files (ServerConfigStore.Delete inside a try) and saves the state once — the Backend's one ServerConfigStore.Delete",
+            daGateAt >= 0 && daEntriesAt > daGateAt && daRecordsAt > daGateAt && daForgetAt > 0 && daMemoryAt > daForgetAt && daFileAt > daMemoryAt && daSaveAt > daFileAt
+            && System.Text.RegularExpressions.Regex.Matches(backendBoth, @"\bServerConfigStore\.Delete\(").Count == 1
+            && System.Text.RegularExpressions.Regex.Matches(CodeOf(deleteAllCs), @"\bServerConfigStore\.Delete\(").Count == 1
+            && System.Text.RegularExpressions.Regex.Matches(CodeOf(deleteAllCs), @"\b_state\.Save\(").Count == 1);
+        // A server.json another program holds cannot lose what a Delete forgets: memory forgets all the same (the session
+        // runs on it), and the answer says so — fileKept, never a silent success. ForgetHost notes a failed file step
+        // (_forgetFileFailed, cleared before the forget and read after it by Delete, under the state's lock); Delete all, a
+        // server.json it could not delete.
+        int dkClearAt = deleteEntryCs.IndexOf("_forgetFileFailed = false;", StringComparison.Ordinal);
+        int dkForgetAt = dkClearAt < 0 ? -1 : deleteEntryCs.IndexOf("ForgetHost(entry.Host);", dkClearAt, StringComparison.Ordinal);
+        int dkReadAt = dkForgetAt < 0 ? -1 : deleteEntryCs.IndexOf("fileKept = _forgetFileFailed;", dkForgetAt, StringComparison.Ordinal);
+        Check("saved servers: Delete and Delete all answer fileKept when server.json could not lose what they forgot — ForgetHost's failed file step (_forgetFileFailed, cleared and read under the state's lock), a server.json Delete all could not delete — never a silent success",
+            dkClearAt > 0 && dkForgetAt > dkClearAt && dkReadAt > dkForgetAt
+            && UnderStateLock(deleteEntryCs, "_forgetFileFailed = false;", "fileKept = _forgetFileFailed;")
+            && deleteEntryCs.Contains("return new { servers = SavedServersForPage(), state = BuildInitState(), fileKept };", StringComparison.Ordinal)
+            && forgetHostCs.Contains("catch (Exception ex) { _forgetFileFailed = true;", StringComparison.Ordinal)
+            && deleteAllCs.Contains("catch (Exception ex) { fileKept = true;", StringComparison.Ordinal)
+            && deleteAllCs.Contains("return new { servers = SavedServersForPage(), state = BuildInitState(), fileKept };", StringComparison.Ordinal));
+        // The local agent's uninstall forgets every record of THAT agent (IsThisPcsAgent: its token, or its host and port) —
+        // memory first, then the file host by host, each inside a try, the file's own records of it that memory does not
+        // hold included (a server.json that could not be read when the launcher started) — before it leaves admin mode when
+        // no token is left; the records of other servers stay.
+        string uninstallCs = MemberText(modesCs, "private async Task<object> LocalAgentUninstallAsync(JsonElement p)");
+        int unRunAt = uninstallCs.IndexOf("LocalAgent.Uninstall(port, firewall,", StringComparison.Ordinal);
+        int unMineAt = unRunAt < 0 ? -1 : uninstallCs.IndexOf("var mine = _records.Where(r => IsThisPcsAgent(r, c, port)).ToList();", unRunAt, StringComparison.Ordinal);
+        int unMemoryAt = unMineAt < 0 ? -1 : uninstallCs.IndexOf("var gone = DropRecords(mine.Contains);", unMineAt, StringComparison.Ordinal);
+        int unFileOwnAt = unMemoryAt < 0 ? -1 : uninstallCs.IndexOf("foreach (var record in ServerConfigStore.LoadAll())", unMemoryAt, StringComparison.Ordinal);
+        int unFileMineAt = unFileOwnAt < 0 ? -1 : uninstallCs.IndexOf("if (IsThisPcsAgent(record, c, port)", unFileOwnAt, StringComparison.Ordinal);
+        int unHostsAt = unFileMineAt < 0 ? -1 : uninstallCs.IndexOf("foreach (string host in gone.Select(r => r.Host)", unFileMineAt, StringComparison.Ordinal);
+        int unFileAt = unHostsAt < 0 ? -1 : uninstallCs.IndexOf("try { ServerConfigStore.Forget(host); }", unHostsAt, StringComparison.Ordinal);
+        int unModeAt = unFileAt < 0 ? -1 : uninstallCs.IndexOf("if (IsAdminMode && AdminServer() is null)", unFileAt, StringComparison.Ordinal);
+        Check("local agent uninstall: every record of the agent on this PC (IsThisPcsAgent) is forgotten — in memory first, then in server.json host by host (ServerConfigStore.Forget inside a try), the file's own records of it included — before admin mode is left when no token remains; the records of other servers stay (no ServerConfigStore.Delete)",
+            unRunAt > 0 && unMineAt > unRunAt && unMemoryAt > unMineAt && unFileOwnAt > unMemoryAt && unFileMineAt > unFileOwnAt && unHostsAt > unFileMineAt
+            && unFileAt > unHostsAt && unModeAt > unFileAt
+            && !System.Text.RegularExpressions.Regex.IsMatch(CodeOf(uninstallCs), @"\bServerConfigStore\.Delete\("));
+        Check("saved servers: server.setAddress takes an optional agentPort (Int(p, \"agentPort\", 0)) that beats every inference, as on admin.login — a saved server connects with the port saved with it",
+            backendCs.Contains("case \"server.setAddress\": return await SetServerAddressAsync(Str(p, \"address\"), Int(p, \"agentPort\", 0));", StringComparison.Ordinal)
+            && MemberText(modesCs, "private async Task<object> SetServerAddressAsync(string input, int agentPort = 0)")
+                .Contains("ApplyAddress(r, ExplicitAgentPort(agentPort));", StringComparison.Ordinal));
+        // The init state tells the page which hosts have a saved agent token (host names alone, never an open key's host:
+        // ServerConfig.TokenHosts, played by the saved spike) and carries the saved list — an address, a mode, a name and
+        // booleans per entry, never a token or a key.
+        int initAdminAt = backendCs.IndexOf("admin = new", StringComparison.Ordinal);
+        int initHostsAt = initAdminAt < 0 ? -1 : backendCs.IndexOf("tokenHosts = ServerConfig.TokenHosts(_records),", initAdminAt, StringComparison.Ordinal);
+        int initOpenKeyAt = initHostsAt < 0 ? -1 : backendCs.IndexOf("openKey = AdminServer()?.OpenKey == true,", initHostsAt, StringComparison.Ordinal);
+        string forPageCs = MemberText(modesCs, "private List<object> SavedServersForPage()");
+        Check("saved servers: the init state carries admin.tokenHosts (ServerConfig.TokenHosts of the records — host names alone) and savedServers (SavedServersForPage: an address, a mode, a name and the booleans hasToken / openKey / current per entry — never a token or a key)",
+            initHostsAt > initAdminAt && initOpenKeyAt > initHostsAt
+            && backendCs.IndexOf("savedServers = SavedServersForPage(),", initOpenKeyAt, StringComparison.Ordinal) > initOpenKeyAt
+            && forPageCs.Contains("hasToken = tokenHosts.Any(h => ServerConfig.SameHost(h, s.Host)),", StringComparison.Ordinal)
+            && forPageCs.Contains("openKey = records.Any(r => r.OpenKey && ServerConfig.SameHost(r.Host, s.Host)),", StringComparison.Ordinal)
+            && forPageCs.Contains("current = ServerConfig.SameHost(s.Host, configured) && string.Equals(s.Mode, mode, StringComparison.OrdinalIgnoreCase),", StringComparison.Ordinal)
+            && !System.Text.RegularExpressions.Regex.IsMatch(forPageCs, @"AgentToken|Password|\.User\b"));
+        // The page. Save beside Test and the saved list are drawn on BOTH tabs: parts of the panel's own template, none
+        // inside a part drawn for one tab (TemplateLevel reads the template's own level, a nested template — a conditional
+        // part — being one part of it).
+        static int TemplateClose(string js, int open)
+        {
+            for (int i = open + 1; i < js.Length; i++)
+            {
+                if (js[i] == '\\') { i++; continue; }
+                if (js[i] == '`') return i;
+                if (js[i] == '$' && i + 1 < js.Length && js[i + 1] == '{')
+                {
+                    int end = ExprEnd(js, i + 2);
+                    if (end < 0) return -1;
+                    i = end - 1;
+                }
+            }
+            return -1;
+        }
+        // (the index just past the brace that closes a ${…} part opened at `at`: strings, nested templates and braces
+        //  skipped; -1 when it never closes)
+        static int ExprEnd(string js, int at)
+        {
+            for (int depth = 1, i = at; i < js.Length; i++)
+            {
+                char c = js[i];
+                if (c == '`') { i = TemplateClose(js, i); if (i < 0) return -1; }
+                else if (c is '\'' or '"') { for (i++; i < js.Length && js[i] != c; i++) if (js[i] == '\\') i++; }
+                else if (c == '{') depth++;
+                else if (c == '}' && --depth == 0) return i + 1;
+            }
+            return -1;
+        }
+        static (string text, List<string> parts) TemplateLevel(string js, int open)
+        {
+            var text = new StringBuilder();
+            var parts = new List<string>();
+            int close = TemplateClose(js, open);
+            for (int i = open + 1; close > open && i < close; i++)
+            {
+                if (js[i] == '\\') { text.Append(js, i, Math.Min(2, close - i)); i++; continue; }
+                if (js[i] == '$' && i + 1 < close && js[i + 1] == '{')
+                {
+                    int end = ExprEnd(js, i + 2);
+                    if (end < 0) break;
+                    parts.Add(js[(i + 2)..(end - 1)].Trim());
+                    i = end - 1;
+                    continue;
+                }
+                text.Append(js[i]);
+            }
+            return (text.ToString(), parts);
+        }
+        string loginPanelJs = JsFunction(appJs, "function loginPanel() {");
+        int panelOpen = loginPanelJs.IndexOf("return `", StringComparison.Ordinal);
+        var (panelText, panelParts) = panelOpen < 0 ? ("", new List<string>()) : TemplateLevel(loginPanelJs, panelOpen + "return ".Length);
+        int lpRowAt = panelText.IndexOf("<div class=\"lg-row\">", StringComparison.Ordinal);
+        int lpTestAt = lpRowAt < 0 ? -1 : panelText.IndexOf("data-act=\"loginTest\"", lpRowAt, StringComparison.Ordinal);
+        int lpSaveAt = lpTestAt < 0 ? -1 : panelText.IndexOf("data-act=\"loginSave\"", lpTestAt, StringComparison.Ordinal);
+        int lpStatusPart = panelParts.IndexOf("loginStatusLine()"), lpSavingPart = panelParts.IndexOf("loginSavingRow()"), lpListPart = panelParts.IndexOf("loginSavedList()");
+        string savedListJs = JsFunction(appJs, "function loginSavedList() {"), savingRowJs = JsFunction(appJs, "function loginSavingRow() {");
+        Check("saved servers page: loginPanel draws Save beside Test in the address row, then the Save row and the saved list, as parts of its own template — on both tabs, none inside a part drawn for one tab — and neither loginSavingRow nor loginSavedList asks the tab or the mode",
+            lpRowAt >= 0 && lpTestAt > lpRowAt && lpSaveAt > lpTestAt && panelText.IndexOf("</div>", lpRowAt, StringComparison.Ordinal) > lpSaveAt
+            && lpStatusPart >= 0 && lpSavingPart > lpStatusPart && lpListPart > lpSavingPart
+            && System.Text.RegularExpressions.Regex.Matches(loginPanelJs, @"\bloginSavedList\(\)").Count == 1
+            && System.Text.RegularExpressions.Regex.Matches(loginPanelJs, @"\bloginSavingRow\(\)").Count == 1
+            && savedListJs.Length > 0 && savingRowJs.Length > 0
+            && !System.Text.RegularExpressions.Regex.IsMatch(savedListJs + savingRowJs, @"\bisAdmin\b|\bisAdminMode\(|S\.login\.panel|S\.mode\b"));
+        // Save sends the address, the tab's mode, the name and the admin tab's typed agent port — never a token; Connect is
+        // the start screen's own path with the entry's values (a player entry writes the host through server.setAddress
+        // BEFORE mode.set, an admin entry logs in with token '' — the token saved for that host, or the build's), never
+        // settings.save; Delete asks nothing, Delete all asks once; a row's pick fills the panel and sends nothing.
+        string saveGoJs = CodeOf(ActionBody("loginSaveGo")), connectJs = CodeOf(ActionBody("savedConnect")), pickJs = CodeOf(ActionBody("savedPick"));
+        string deleteJs = CodeOf(ActionBody("savedDelete")), allAskJs = CodeOf(ActionBody("savedDeleteAllAsk")), allGoJs = CodeOf(ActionBody("savedDeleteAllGo"));
+        Check("saved servers page: Save (loginSaveGo) sends servers.save {address, mode, label, agentPort} — no token — and draws the list the reply carries",
+            saveGoJs.Contains("rpc('servers.save', { address, mode, label, agentPort: agentPort || 0 })", StringComparison.Ordinal)
+            && saveGoJs.Contains("if (r && Array.isArray(r.servers)) S.savedServers = r.servers;", StringComparison.Ordinal)
+            && !System.Text.RegularExpressions.Regex.IsMatch(saveGoJs, @"\btoken\b"));
+        int cnAdminAt = connectJs.IndexOf("if (admin) { const r = await rpc('admin.login', { address, token: '', agentPort }); d = r && r.state; warning = r && r.warning; }", StringComparison.Ordinal);
+        int cnAddressAt = cnAdminAt < 0 ? -1 : connectJs.IndexOf("else { await rpc('server.setAddress', { address, agentPort });", cnAdminAt, StringComparison.Ordinal);
+        int cnModeAt = cnAddressAt < 0 ? -1 : connectJs.IndexOf("d = await rpc('mode.set', { mode: 'player' }); }", cnAddressAt, StringComparison.Ordinal);
+        int cnRefusedAt = cnModeAt < 0 ? -1 : connectJs.IndexOf("if (admin && err.message === t('backend.tokenRequired')) {", cnModeAt, StringComparison.Ordinal);
+        int cnShellAt = cnRefusedAt < 0 ? -1 : connectJs.IndexOf("enterShell(d);", cnRefusedAt, StringComparison.Ordinal);
+        int cnWarnAt = cnShellAt < 0 ? -1 : connectJs.IndexOf("if (warning) showToast(warning, 'bad');", cnShellAt, StringComparison.Ordinal);
+        Check("saved servers page: Connect (savedConnect) is the start screen's own path with the entry's values — an admin entry admin.login {address, token: '', agentPort}, a player entry server.setAddress {address, agentPort} BEFORE mode.set {player}, no other rpc, never settings.save or a typed token; the shell entered on the reply's state with the login's warning as its toast; a refusal for want of a token opens the admin tab for one (toast.savedNeedToken)",
+            cnAdminAt >= 0 && cnAddressAt > cnAdminAt && cnModeAt > cnAddressAt && cnRefusedAt > cnModeAt
+            && connectJs.IndexOf("S.login.panel = 'admin';", cnRefusedAt, StringComparison.Ordinal) > cnRefusedAt
+            && connectJs.IndexOf("t('toast.savedNeedToken'", cnRefusedAt, StringComparison.Ordinal) > cnRefusedAt
+            && cnShellAt > cnRefusedAt && cnWarnAt > cnShellAt
+            && System.Text.RegularExpressions.Regex.Matches(connectJs, @"\benterShell\(").Count == 1
+            && System.Text.RegularExpressions.Regex.Matches(connectJs, @"\brpc\(").Count == 3
+            && !connectJs.Contains("settings.save", StringComparison.Ordinal) && !connectJs.Contains("S.login.token", StringComparison.Ordinal));
+        Check("saved servers page: Delete (savedDelete) asks nothing and sends servers.delete {id}; Delete all asks once (savedDeleteAllAsk sets S.confirm, Yes = savedDeleteAllGo, which sends servers.deleteAll); a row's pick (savedPick) sends nothing",
+            deleteJs.Contains("rpc('servers.delete', { id: e.id })", StringComparison.Ordinal) && !deleteJs.Contains("S.confirm", StringComparison.Ordinal)
+            && allAskJs.Contains("S.confirm = {", StringComparison.Ordinal) && allAskJs.Contains("act: 'savedDeleteAllGo'", StringComparison.Ordinal)
+            && !allAskJs.Contains("rpc(", StringComparison.Ordinal)
+            && allGoJs.Contains("rpc('servers.deleteAll', {})", StringComparison.Ordinal) && !allGoJs.Contains("S.confirm", StringComparison.Ordinal)
+            && pickJs.Length > 0 && !pickJs.Contains("rpc(", StringComparison.Ordinal));
+        // What the page does with the answer of a Delete: a server.json that could not follow (fileKept) is its own red
+        // toast, never the "deleted" one; a Delete that failed reads the list and the state again (savedReread — the
+        // backend may have forgotten part of it before the failure).
+        string rereadJs = JsFunction(appJs, "async function savedReread() {");
+        Check("saved servers page: Delete and Delete all say so when server.json could not follow (fileKept: toast.savedServerFileKept / toast.savedServersFileKept, never the plain toast), and a failed one reads the list and the state again (savedReread)",
+            deleteJs.Contains("if (r && r.fileKept === true) showToast(t('toast.savedServerFileKept', { label: savedName(e) }), 'bad');", StringComparison.Ordinal)
+            && deleteJs.Contains("else showToast(t('toast.savedServerDeleted', { label: savedName(e) }), 'ok');", StringComparison.Ordinal)
+            && allGoJs.Contains("if (r && r.fileKept === true) showToast(t('toast.savedServersFileKept', { count: n }), 'bad');", StringComparison.Ordinal)
+            && allGoJs.Contains("else showToast(t('toast.savedServersDeleted', { count: n }), 'ok');", StringComparison.Ordinal)
+            && new[] { deleteJs, allGoJs }.All(js => js.IndexOf("catch (err) { await savedReread();", StringComparison.Ordinal) > js.IndexOf("rpc('servers.", StringComparison.Ordinal))
+            && rereadJs.Contains("savedReply({ state: await rpc('app.init') });", StringComparison.Ordinal));
+        string tokenAppliesJs = JsFunction(appJs, "function tokenAppliesTo(address) {");
+        string applyInitJs = JsFunction(appJs, "function applyInit(d) {");
+        Check("saved servers page: the start screen's token field counts a saved token for the hosts init's admin.tokenHosts names (tokenAppliesTo — tokenScope read only for the build's 'any'), and applyInit keeps admin.tokenHosts and savedServers from every reply that carries the init state",
+            tokenAppliesJs.Contains("if (S.admin.tokenScope === 'any') return true;", StringComparison.Ordinal)
+            && tokenAppliesJs.Contains("(S.admin.tokenHosts || []).some((x) => hostOf(x) === h)", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(tokenAppliesJs, "tokenScope").Count == 1
+            && applyInitJs.Contains("S.admin.tokenHosts = Array.isArray(d.admin.tokenHosts) ? d.admin.tokenHosts.map(String) : [];", StringComparison.Ordinal)
+            && applyInitJs.Contains("S.savedServers = d.savedServers || [];", StringComparison.Ordinal));
+
+        // ── Quick Start's backend (Backend.QuickStart.cs), the SSH host keys of the Linux boxes, the state's one lock ──
+        // Quick Start's nine rpcs act on this PC, probe an address or use SSH details typed a moment ago — like the agent
+        // installs, none sits behind the admin gate (the admin-only jobs a run drives keep theirs). The plan file, the
+        // machine check, the installs, the SSH probe and the pins are the Core's (the saved and setup spikes play them);
+        // here the Backend's half (Relic.App, which the spikes do not reference) is read from its source, its whole-line
+        // comments left out where a word is looked for anywhere (CodeOf).
+        string qsPath = Path.Combine(repoRoot, "app", "Relic.App", "Backend.QuickStart.cs");
+        string qsCs = File.Exists(qsPath) ? File.ReadAllText(qsPath) : "";
+        string qsCode = CodeOf(qsCs);
+        string backendAll = qsCode + backendBoth;
+        // Whole words of code (never inside a comment, a character or a string): neither the character before nor the one
+        // after is part of an identifier, and none is a member of something else (no dot before it).
+        static List<int> CodeWords(string src, string word) =>
+            CodeIndexes(src, word).Where(i => (i == 0 || !(char.IsLetterOrDigit(src[i - 1]) || src[i - 1] is '_' or '.'))
+                && (i + word.Length >= src.Length || !(char.IsLetterOrDigit(src[i + word.Length]) || src[i + word.Length] == '_'))).ToList();
+        // Every call of `head` (its text ending in "(") in a C# text's code: the call's whole text, from the head to the
+        // parenthesis that closes its arguments, the strings it holds included.
+        static List<string> CallTexts(string src, string head)
+        {
+            var calls = new List<string>();
+            foreach (int at in CodeIndexes(src, head))
+            {
+                if (at > 0 && (char.IsLetterOrDigit(src[at - 1]) || src[at - 1] == '_')) continue;
+                int close = CsClose(src, at + head.Length, ')');
+                calls.Add(close < 0 ? src[at..] : src[at..(close + 1)]);
+            }
+            return calls;
+        }
+        // The number of arguments of every call of `head` (its text ending in "(") in a C# text's code: the commas at the
+        // call's own level, a nested call, lambda, initializer, index or string stepped over.
+        static List<int> ArgCounts(string src, string head)
+        {
+            var counts = new List<int>();
+            foreach (int at in CodeIndexes(src, head))
+            {
+                int open = at + head.Length;
+                int close = CsClose(src, open, ')');
+                if (close < 0) { counts.Add(-1); continue; }
+                int n = src[open..close].Trim().Length == 0 ? 0 : 1;
+                for (int i = open; i < close; i++)
+                {
+                    int past = CsPast(src, i);
+                    if (past > i) { i = past - 1; continue; }
+                    char c = src[i];
+                    if (c is '(' or '[' or '{')
+                    {
+                        int end = CsClose(src, i + 1, c == '(' ? ')' : c == '[' ? ']' : '}');
+                        if (end < 0) break;
+                        i = end;
+                    }
+                    else if (c == ',') n++;
+                }
+                counts.Add(n);
+            }
+            return counts;
+        }
+        // The text of a C# file with every comment, character and string blanked (its length and line ends kept), so a
+        // pattern of code is never found inside one.
+        static string CodeMasked(string src)
+        {
+            var masked = new StringBuilder(src);
+            for (int i = 0; i < src.Length; )
+            {
+                int past = CsPast(src, i);
+                if (past <= i) { i++; continue; }
+                for (int k = i; k < past; k++) if (masked[k] is not ('\n' or '\r')) masked[k] = ' ';
+                i = past;
+            }
+            return masked.ToString();
+        }
+        // The class member a place of a C# text stands in (its name; "" outside any): the last member head at the class's
+        // own indentation before it.
+        static string MemberNameAt(string src, int at)
+        {
+            string name = "";
+            foreach (System.Text.RegularExpressions.Match head in System.Text.RegularExpressions.Regex.Matches(src[..Math.Min(at, src.Length)],
+                @"(?m)^    (?:(?:public|private|internal|protected|static|async|override|unsafe|readonly|sealed|partial)\s+)+[^\n;=]*?\b([A-Za-z_]\w*)\s*(?:<[^\n<>()]*>)?\("))
+                name = head.Groups[1].Value;
+            return name;
+        }
+        // Whether ONE block of a lock (its head, `lock (…)`) holds every text given — each standing in the member's code at
+        // least once inside that block — and awaits nothing.
+        static bool OneLockHolds(string member, string head, params string[] texts)
+        {
+            var spans = LockSpans(member, head);
+            return texts.Length > 0 && spans.Any(s => texts.All(t => CodeIndexes(member, t).Any(i => i > s.start && i + t.Length <= s.end + 1))
+                && CodeWords(member[s.start..(s.end + 1)], "await").Count == 0);
+        }
+        // ...the state's lock (RelicState.Gate).
+        static bool OneGateHolds(string member, params string[] texts) => OneLockHolds(member, "lock (RelicState.Gate)", texts);
+        // The spans of a C# text that run off the message thread: the argument of every Task.Run (a lambda handed to the
+        // thread pool), from its opening to its closing parenthesis.
+        static List<(int start, int end)> TaskRunSpans(string src)
+        {
+            var spans = new List<(int start, int end)>();
+            foreach (int at in CodeIndexes(src, "Task.Run"))
+            {
+                int open = src.IndexOf('(', at);
+                if (open < 0) continue;
+                string between = src[(at + "Task.Run".Length)..open];
+                if (between.Trim().Length > 0 && !System.Text.RegularExpressions.Regex.IsMatch(between, @"^\s*<[^()]*>\s*$")) continue;
+                int close = CsClose(src, open + 1, ')');
+                if (close > open) spans.Add((open, close));
+            }
+            return spans;
+        }
+        // The text of the class member a place of a C# text stands in: from its head (as MemberNameAt finds it) to the next
+        // member's head.
+        static string MemberAround(string src, int at)
+        {
+            int start = 0, end = src.Length;
+            foreach (System.Text.RegularExpressions.Match head in System.Text.RegularExpressions.Regex.Matches(src,
+                @"(?m)^    (?:(?:public|private|internal|protected|static|async|override|unsafe|readonly|sealed|partial)\s+)+[^\n;=]*?\b([A-Za-z_]\w*)\s*(?:<[^\n<>()]*>)?\("))
+            {
+                if (head.Index <= at) start = head.Index;
+                else { end = head.Index; break; }
+            }
+            return src[start..end];
+        }
+        // Where a plain string literal with exactly this value stands in a C# text (its opening quote), comments and other
+        // strings stepped over.
+        static List<int> StringLiteralIndexes(string src, string value)
+        {
+            var at = new List<int>();
+            string literal = "\"" + value + "\"";
+            for (int i = 0; i < src.Length; )
+            {
+                int past = CsPast(src, i);
+                if (past > i)
+                {
+                    if (src[i] == '"' && past - i == literal.Length && string.CompareOrdinal(src, i, literal, 0, literal.Length) == 0) at.Add(i);
+                    i = past;
+                    continue;
+                }
+                i++;
+            }
+            return at;
+        }
+        // Why a job's outcome could reach the page while the job's busy flag is still taken (null: it cannot). The flag is
+        // freed in a finally (`Volatile.Write(ref flag, 0)`); every outcome event the job names is posted after that — or
+        // kept until then: in a lambda stored in a local (`outcome = () => PostEvent("x.done", …)`) or a local function
+        // (`void PostDone() => PostEvent(…)`), each invoked only after it, or as the event's name in a local
+        // (`outcome = "x.error"`) whose post (`PostEvent(outcome, …)`) comes only after it. Each event must be named at all.
+        static string? OutcomeBeforeFree(string member, string flag, params string[] events)
+        {
+            if (member.Length == 0) return "the job's member is not there";
+            string masked = CodeMasked(member);
+            int freedAt = -1;
+            foreach (int f in CodeWords(member, "finally"))
+            {
+                int open = f + "finally".Length;
+                while (open < member.Length && char.IsWhiteSpace(member[open])) open++;
+                if (open >= member.Length || member[open] != '{') continue;
+                int close = CsClose(member, open + 1, '}');
+                if (close < 0) continue;
+                foreach (int w in CodeIndexes(member[open..close], $"Volatile.Write(ref {flag}, 0)")) freedAt = Math.Max(freedAt, open + w);
+            }
+            if (freedAt < 0) return $"no finally frees {flag}";
+            // (every call of a local — `name(`, `name.Invoke(`, `name?.Invoke(`, a method group handed on as `(Action)name` —
+            //  stands after the flag is freed, and there is one)
+            bool CalledOnlyAfter(string name)
+            {
+                var calls = System.Text.RegularExpressions.Regex.Matches(masked, $@"(?<![\w.]){System.Text.RegularExpressions.Regex.Escape(name)}(?:\s*\?\.\s*Invoke|\s*\.\s*Invoke)?\s*\(|\(Action\)\s*{System.Text.RegularExpressions.Regex.Escape(name)}\b")
+                    .Where(m => !System.Text.RegularExpressions.Regex.IsMatch(masked[..m.Index], $@"\bvoid\s+$")).ToList();
+                return calls.Count > 0 && calls.All(m => m.Index > freedAt);
+            }
+            foreach (string ev in events)
+            {
+                var named = StringLiteralIndexes(member, ev);
+                if (named.Count == 0) return $"{ev} is never posted";
+                foreach (int at in named)
+                {
+                    if (at > freedAt) continue;
+                    int stmt = Math.Max(masked.LastIndexOf(';', at), Math.Max(masked.LastIndexOf('{', at), masked.LastIndexOf('}', at))) + 1;
+                    string head = masked[stmt..at].Trim();
+                    var lambda = System.Text.RegularExpressions.Regex.Match(head, @"^(\w+)\s*=\s*\(\)\s*=>\s*PostEvent\($");
+                    var local = System.Text.RegularExpressions.Regex.Match(head, @"^(?:static\s+)?void\s+(\w+)\s*\(\s*\)\s*=>\s*PostEvent\($");
+                    var name = System.Text.RegularExpressions.Regex.Match(head, @"^(\w+)\s*=$");
+                    if (lambda.Success && CalledOnlyAfter(lambda.Groups[1].Value)) continue;
+                    if (local.Success && CalledOnlyAfter(local.Groups[1].Value)) continue;
+                    if (name.Success && System.Text.RegularExpressions.Regex.Matches(masked, $@"\bPostEvent\(\s*{name.Groups[1].Value}\b") is { Count: > 0 } posts
+                        && posts.All(m => m.Index > freedAt)) continue;
+                    return $"{ev} is posted while {flag} is still taken";
+                }
+            }
+            return null;
+        }
+        // The English texts as the repository holds them now: ui/lang/en.json, and a round's fragment not merged yet.
+        var qsTexts = new Dictionary<string, string>(StringComparer.Ordinal);
+        string qsLangDir = Path.Combine(repoRoot, "app", "Relic.App", "ui", "lang");
+        var qsLangFiles = new List<string> { Path.Combine(qsLangDir, "en.json") };
+        if (Directory.Exists(Path.Combine(qsLangDir, "fragments"))) qsLangFiles.AddRange(Directory.GetFiles(Path.Combine(qsLangDir, "fragments"), "*.en.json"));
+        foreach (string qsLangFile in qsLangFiles.Where(File.Exists))
+        {
+            using var qsLangDoc = JsonDocument.Parse(File.ReadAllBytes(qsLangFile));
+            foreach (var qsLangProp in qsLangDoc.RootElement.EnumerateObject())
+                if (qsLangProp.Value.ValueKind == JsonValueKind.String) qsTexts.TryAdd(qsLangProp.Name, qsLangProp.Value.GetString() ?? "");
+        }
+        string UiText(string key) => qsTexts.TryGetValue(key, out var qsText) ? qsText : "";
+        bool TextKnownFor(string key) => L.Has(key) || UiText(key).Length > 0;
+
+        var qsCases = new (string Name, string Line, string Member)[]
+        {
+            ("quickstart.get", "case \"quickstart.get\": return QuickStartGet();", "private object QuickStartGet()"),
+            ("quickstart.save", "case \"quickstart.save\": return QuickStartSave(p);", "private object QuickStartSave(JsonElement p)"),
+            ("quickstart.clear", "case \"quickstart.clear\": return QuickStartClear();", "private object QuickStartClear()"),
+            ("quickstart.check", "case \"quickstart.check\": return await QuickStartCheckAsync(p);", "private async Task<object> QuickStartCheckAsync(JsonElement p)"),
+            ("quickstart.install", "case \"quickstart.install\": return QuickStartInstall(p);", "private object QuickStartInstall(JsonElement p)"),
+            ("quickstart.restart", "case \"quickstart.restart\": return await QuickStartRestartAsync();", "private async Task<object> QuickStartRestartAsync()"),
+            ("quickstart.publicIp", "case \"quickstart.publicIp\": return await QuickStartPublicIpAsync();", "private static async Task<object> QuickStartPublicIpAsync()"),
+            ("quickstart.reach", "case \"quickstart.reach\": return await QuickStartReachAsync(p);", "private static async Task<object> QuickStartReachAsync(JsonElement p)"),
+            ("ssh.probe", "case \"ssh.probe\": return await SshProbeAsync(p);", "private async Task<object> SshProbeAsync(JsonElement p)"),
+        };
+        var qsCasesOff = qsCases.Where(c => !backendCs.Contains(c.Line, StringComparison.Ordinal)
+                || !CaseFreeOfRequireAdmin(backendCs, backendCs.IndexOf($"case \"{c.Name}\":", StringComparison.Ordinal))
+                || MemberText(qsCs, c.Member) is not { Length: > 0 } qsMember || CodeIndexes(qsMember, "RequireAdmin(").Count > 0)
+            .Select(c => c.Name).ToList();
+        Check("quick start: Backend answers the nine rpcs — quickstart.get / save / clear / check / install / restart / publicIp / reach and ssh.probe — each in a case of its own that calls its member of Backend.QuickStart.cs, none behind RequireAdmin (neither the case nor the member: they act on this PC, probe an address or use SSH details typed a moment ago), and that file asks for the admin gate nowhere"
+              + (qsCasesOff.Count > 0 ? " — not so for: " + string.Join(", ", qsCasesOff) : ""),
+            qsCs.Length > 0 && qsCasesOff.Count == 0 && CodeIndexes(qsCs, "RequireAdmin(").Count == 0);
+        // The init state carries the stored plan (the start screen offers to continue a paused run, and resumes a running
+        // one at once), and the launcher's start arms the resume value again — Windows deleted it when it ran it.
+        string qsBootCs = MemberText(qsCs, "private void QuickStartResumeOnBoot()");
+        int qsBootOnceAt = qsBootCs.IndexOf("if (Interlocked.Exchange(ref _qsBootLooked, 1) != 0) return;", StringComparison.Ordinal);
+        int qsBootRunAt = qsBootOnceAt < 0 ? -1 : qsBootCs.IndexOf("_ = Task.Run(() =>", qsBootOnceAt, StringComparison.Ordinal);
+        string qsInitCase = CaseText(backendCs, backendCs.IndexOf("case \"app.init\":", StringComparison.Ordinal));
+        Check("quick start: the init state carries the stored plan (quickstart: {plan}, null when none or unreadable), and app.init arms the resume value again once per launcher start — off the message thread, only for a run that is not ended (ResumeWanted), read under the plan's lock",
+            backendCs.Contains("quickstart = new { plan = QuickStartPlanForInit() },", StringComparison.Ordinal)
+            && qsInitCase.IndexOf("QuickStartResumeOnBoot();", StringComparison.Ordinal) is int qsBootCallAt && qsBootCallAt > 0
+            && qsInitCase.IndexOf("return BuildInitState();", qsBootCallAt, StringComparison.Ordinal) > qsBootCallAt
+            && qsBootOnceAt > 0 && qsBootRunAt > qsBootOnceAt
+            && InsideLock(qsBootCs, "lock (_qsLock)", "if (QuickStartStore.ResumeWanted(QuickStartPlanNow())) QuickStartResume(true);")
+            // (the arm itself — reg.exe — and the plan's read in the lambda handed to the thread pool, not merely after one)
+            && TaskRunSpans(qsBootCs) is { Count: > 0 } qsBootRuns
+            && new[] { "QuickStartResume(", "QuickStartPlanNow(", "lock (_qsLock)" }.All(x => CodeIndexes(qsBootCs, x) is { Count: > 0 } xs
+                && xs.All(i => qsBootRuns.Any(s => i > s.start && i < s.end)))
+            && MemberText(qsCs, "private QuickStartPlan? QuickStartPlanForInit()").Contains("catch (Exception ex)", StringComparison.Ordinal));
+        // The plan file: quickstart.save reads the page's plan into the model alone (FromJson of the raw object: the model has
+        // no field for a secret and drops every key it does not name), stores it through QuickStartStore — the file's one
+        // writer — and arms or disarms the resume value by what was stored, one step under the plan's lock; quickstart.clear
+        // deletes the file and disarms; a check reads the plan the same way. A resume value that cannot be armed fails the
+        // save (backend.qs.resumeFailed): a run that would not come back after a restart must not look saved.
+        string qsSaveCs = MemberText(qsCs, "private object QuickStartSave(JsonElement p)");
+        string qsClearCs = MemberText(qsCs, "private object QuickStartClear()");
+        string qsResumeCs = MemberText(qsCs, "private void QuickStartResume(bool wanted)");
+        int qsFromAt = qsSaveCs.IndexOf("plan = QuickStartPlan.FromJson(raw.GetRawText());", StringComparison.Ordinal);
+        int qsStoreAt = qsFromAt < 0 ? -1 : qsSaveCs.IndexOf("stored = QuickStartStore.Save(plan, gameIds: gameIds);", qsFromAt, StringComparison.Ordinal);
+        int qsArmAt = qsStoreAt < 0 ? -1 : qsSaveCs.IndexOf("QuickStartResume(QuickStartStore.ResumeWanted(stored));", qsStoreAt, StringComparison.Ordinal);
+        int qsClearAt = qsClearCs.IndexOf("QuickStartStore.Clear();", StringComparison.Ordinal);
+        int qsDisarmAt = qsClearAt < 0 ? -1 : qsClearCs.IndexOf("QuickStartResume(false);", qsClearAt, StringComparison.Ordinal);
+        int qsSetAt = qsResumeCs.IndexOf("try { Startup.SetQuickStartResume(wanted); }", StringComparison.Ordinal);
+        int qsFailAt = qsSetAt < 0 ? -1 : qsResumeCs.IndexOf("throw new InvalidOperationException(L.T(\"backend.qs.resumeFailed\", new { error = ex.Message }));", qsSetAt, StringComparison.Ordinal);
+        int qsSetDoneAt = qsFailAt < 0 ? -1 : qsResumeCs.IndexOf("_qsResumeSet = wanted;", qsFailAt, StringComparison.Ordinal);
+        Check("quick start: quickstart.save reads the page's plan into QuickStartPlan alone (FromJson of the raw object — the model has no field for a secret; nothing of the payload is read field by field), stores it through QuickStartStore.Save — the plan file's one writer — and then arms or disarms the resume value by the stored plan (ResumeWanted), one step under the plan's lock; an arm that fails is backend.qs.resumeFailed; quickstart.clear deletes the file and disarms; a check reads its plan the same way",
+            qsFromAt > 0 && qsStoreAt > qsFromAt && qsArmAt > qsStoreAt
+            && OneLockHolds(qsSaveCs, "lock (_qsLock)", "QuickStartStore.Save(plan, gameIds: gameIds)", "QuickStartResume(QuickStartStore.ResumeWanted(stored));")
+            && !System.Text.RegularExpressions.Regex.IsMatch(CodeOf(qsSaveCs), @"\b(?:Str|Bool|Int|Strings|BoolOrNull)\(raw\b|\braw\.(?:TryGetProperty|GetProperty|EnumerateObject|EnumerateArray|GetString)\(")
+            && qsClearAt > 0 && qsDisarmAt > qsClearAt && OneLockHolds(qsClearCs, "lock (_qsLock)", "QuickStartStore.Clear();", "QuickStartResume(false);")
+            && qsSetAt > 0 && qsFailAt > qsSetAt && qsSetDoneAt > qsFailAt
+            && MemberText(qsCs, "private static QuickStartPlan QuickStartPlanLoosely(JsonElement p)").Contains("return QuickStartPlan.FromJson(raw.GetRawText()).Normalize();", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(qsCode, @"\bQuickStartPlan\.FromJson\(raw\.GetRawText\(\)\)").Count == 2
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bQuickStartStore\.Save\(").Count == 1
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bQuickStartStore\.Clear\(").Count == 1
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bStartup\.(?:SetQuickStartResume|ArmQuickStartResume|DisarmQuickStartResume)\(").Count == 1);
+        // The plan's readers — the init state (every init a job's outcome carries), quickstart.get, the guards of S7 — never
+        // wait for a save or for reg.exe, which writes the resume value under the plan's lock: the plan kept is read without
+        // a lock once it was read, its first read from the file and every replacement under a lock of its own
+        // (_qsPlanLock), held for a moment and never across a write of the file or of the resume value.
+        string qsNowCs = MemberText(qsCs, "private QuickStartPlan? QuickStartPlanNow()");
+        var qsPlanLocks = LockSpans(qsCs, "lock (_qsPlanLock)");
+        var qsPlanSets = System.Text.RegularExpressions.Regex.Matches(CodeMasked(qsCs), @"\b_qsPlan(?:Read)?\s*=(?![=>])").Select(m => m.Index).ToList();
+        Check("quick start: the plan's readers (the init state, quickstart.get, the guards) never wait for a save or for reg.exe — QuickStartPlanNow reads the plan kept without a lock once it was read and takes only the plan's own lock (_qsPlanLock) for its first read, never the save's; every replacement of the plan kept under that lock, which no write of the file or of the resume value stands in",
+            qsNowCs.Contains("if (_qsPlanRead) return _qsPlan;", StringComparison.Ordinal) && qsNowCs.Contains("lock (_qsPlanLock)", StringComparison.Ordinal)
+            && !qsNowCs.Contains("lock (_qsLock)", StringComparison.Ordinal)
+            && qsPlanLocks.Count >= 2 && qsPlanSets.Count >= 4 && qsPlanSets.All(i => qsPlanLocks.Any(s => i > s.start && i < s.end))
+            && qsPlanLocks.All(s => !System.Text.RegularExpressions.Regex.IsMatch(qsCs[s.start..(s.end + 1)], @"\bQuickStartResume\(|\bStartup\.|\bQuickStartStore\.(?:Save|Clear)\("))
+            && qsCs.Contains("private volatile QuickStartPlan? _qsPlan;", StringComparison.Ordinal) && qsCs.Contains("private volatile bool _qsPlanRead;", StringComparison.Ordinal));
+        // No secret of a payload reaches the plan, a log line, an event or an answer: ssh.probe's password, passphrase and sudo
+        // password go into the SSH target alone (read once each, the target handed to AgentDeployer.Probe and nowhere else),
+        // no token is read at all, and no Log call of the Backend names a password or a passphrase; Quick Start's events carry
+        // none either.
+        string qsProbeCs = MemberText(qsCs, "private async Task<object> SshProbeAsync(JsonElement p)");
+        const string qsTargetLine = "var ssh = new SshTarget(host, port, user, Str(p, \"password\"), Str(p, \"keyPath\").Trim(), Str(p, \"passphrase\"), Str(p, \"sudoPassword\"));";
+        var qsSecretLogs = new[] { backendCs, modesCs, qsCs }
+            .SelectMany(src => CallTexts(src, "Log.Info(").Concat(CallTexts(src, "Log.Error(")).Concat(CallTexts(src, "Log.Write(")))
+            .Where(call => System.Text.RegularExpressions.Regex.IsMatch(call, "(?i)password|passphrase")).ToList();
+        var qsSecretEvents = CallTexts(qsCs, "PostEvent(").Where(call => System.Text.RegularExpressions.Regex.IsMatch(call, "(?i)password|passphrase|token|keyPath")).ToList();
+        Check("quick start: no secret of a payload reaches the plan, a log line, an event or an answer — ssh.probe reads the password, the passphrase and the sudo password once each into the SSH target alone, which goes to AgentDeployer.Probe and nowhere else; Backend.QuickStart.cs reads no token; no Log call of the Backend names a password or a passphrase; Quick Start's events name none"
+              + (qsSecretLogs.Count > 0 ? " — logged: " + string.Join(" | ", qsSecretLogs.Select(call => call[..Math.Min(80, call.Length)])) : "")
+              + (qsSecretEvents.Count > 0 ? " — posted: " + string.Join(" | ", qsSecretEvents.Select(call => call[..Math.Min(80, call.Length)])) : ""),
+            qsProbeCs.Contains(qsTargetLine, StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(qsCode, @"""(?:password|passphrase|sudoPassword|sshPassword|sshKeyPassphrase|token)""").Count == 3
+            && CodeWords(qsProbeCs, "ssh").Count == 2
+            && qsProbeCs.Contains("AgentDeployer.Probe(ssh, ", StringComparison.Ordinal)
+            && qsSecretLogs.Count == 0 && qsSecretEvents.Count == 0);
+        // quickstart.install: refused before the busy flag is taken (an unknown install, WSL's prompt outside a run whose
+        // stored plan names it — S7 —, Docker Desktop's install and WSL's memory cap outside a run whose stored plan chose
+        // them, Docker's two while Fiddler runs — S8), one at a time (_setupBusy, the install it holds named in _setupWhat),
+        // the work off the message thread, the flag freed in its finally and ONLY THEN exactly one outcome posted — the page
+        // may start the next install as soon as it hears it. An ask for the very install that runs joins it (a run stopped and
+        // continued meanwhile), answered on the message thread before that install's outcome can be; quickstart.get names
+        // the install that runs. The error's code is one of the contract's six.
+        string qsInstallCs = MemberText(qsCs, "private object QuickStartInstall(JsonElement p)");
+        int qiUnknownAt = qsInstallCs.IndexOf("L.T(\"backend.qs.unknownInstall\"", StringComparison.Ordinal);
+        int qiJoinAt = qsInstallCs.IndexOf("if (Volatile.Read(ref _setupBusy) != 0 && _setupWhat == what) return new { started = true, what, joined = true };", StringComparison.Ordinal);
+        int qiNamedAt = qsInstallCs.IndexOf("if (what is \"wsl\" or \"wslUpdate\") QuickStartRequireNamed(what);", StringComparison.Ordinal);
+        int qiChosenAt = qsInstallCs.IndexOf("if (what is \"docker\" or \"wslMemory\") QuickStartRequireChosen(what, memoryGb);", StringComparison.Ordinal);
+        int qiFiddlerAt = qsInstallCs.IndexOf("if (what is \"docker\" or \"dockerStart\") FiddlerGuard();", StringComparison.Ordinal);
+        int qiBusyAt = qsInstallCs.IndexOf("if (Interlocked.Exchange(ref _setupBusy, 1) != 0) throw new InvalidOperationException(L.T(\"backend.qs.busy\"));", StringComparison.Ordinal);
+        int qiWhatAt = qiBusyAt < 0 ? -1 : qsInstallCs.IndexOf("_setupWhat = what;", qiBusyAt, StringComparison.Ordinal);
+        int qiRunAt = qiWhatAt < 0 ? -1 : qsInstallCs.IndexOf("_ = Task.Run(async () =>", qiWhatAt, StringComparison.Ordinal);
+        int qiFreeAt = qiRunAt < 0 ? -1 : qsInstallCs.IndexOf("finally { Volatile.Write(ref _setupBusy, 0); }", qiRunAt, StringComparison.Ordinal);
+        int qiDoneAt = qiFreeAt < 0 ? -1 : qsInstallCs.IndexOf("if (done is not null) PostEvent(\"quickstart.done\", done);", qiFreeAt, StringComparison.Ordinal);
+        int qiErrorAt = qiDoneAt < 0 ? -1 : qsInstallCs.IndexOf("else if (failed is not null) PostEvent(\"quickstart.error\", failed);", qiDoneAt, StringComparison.Ordinal);
+        int qiAnswerAt = qiErrorAt < 0 ? -1 : qsInstallCs.IndexOf("return new { started = true, what };", qiErrorAt, StringComparison.Ordinal);
+        Check("quick start: quickstart.install refuses before its busy flag is taken (an unknown install, WSL's prompt outside a run whose stored plan names it, Docker Desktop's install and WSL's memory cap outside one that chose them, Docker's two while Fiddler runs), takes _setupBusy (a second is backend.qs.busy; an ask for the very install that runs joins it: {started, what, joined: true}, and quickstart.get names it), works off the message thread, frees the flag in its finally and only THEN posts exactly one outcome — quickstart.done or quickstart.error (its code one of uacDeclined / badHash / badSignature / download / failed / toolMissing) — after its quickstart.log lines; the rpc answers {started: true, what}",
+            qiUnknownAt > 0 && qiJoinAt > qiUnknownAt && qiNamedAt > qiJoinAt && qiChosenAt > qiJoinAt && qiFiddlerAt > qiJoinAt
+            && qiBusyAt > new[] { qiNamedAt, qiChosenAt, qiFiddlerAt }.Max()
+            && qiWhatAt > qiBusyAt && qiRunAt > qiWhatAt && qiFreeAt > qiRunAt && qiDoneAt > qiFreeAt && qiErrorAt > qiDoneAt && qiAnswerAt > qiErrorAt
+            && System.Text.RegularExpressions.Regex.Matches(CodeOf(qsCs), @"\b_setupWhat\s*=(?![=>])").Count == 1
+            && MemberText(qsCs, "private object QuickStartGet()").Contains("new { plan = QuickStartPlanNow(), installing = QuickStartInstalling() };", StringComparison.Ordinal)
+            && qsCs.Contains("private string? QuickStartInstalling() => Volatile.Read(ref _setupBusy) != 0 ? _setupWhat : null;", StringComparison.Ordinal)
+            && qsInstallCs.Contains("void log(string s) => PostEvent(\"quickstart.log\", new { what, text = s });", StringComparison.Ordinal)
+            && qsInstallCs.Contains("failed = new { what, message = ex.Message, code = QuickStartErrorCodes.Contains(ex.Code) ? ex.Code : \"failed\" };", StringComparison.Ordinal)
+            && qsCs.Contains("private static readonly string[] QuickStartErrorCodes = { \"uacDeclined\", \"badHash\", \"badSignature\", \"download\", \"failed\", \"toolMissing\" };", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"PostEvent\(""quickstart\.(?:done|error)""").Count == 2
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"PostEvent\(""quickstart\.log""").Count == 1
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bref _setupBusy, 1\)").Count == 1
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"Volatile\.Write\(ref _setupBusy, 0\)").Count == 1
+            && backendCs.Contains("private int _setupBusy;", StringComparison.Ordinal));
+        // Docker Desktop's install (its licence accepted on the installer's command line) and WSL's memory cap (every WSL
+        // Linux of the PC gets it) only in a run that is not ended whose stored plan sets a server up on this PC and chose
+        // them as its summary showed them — Docker Desktop with the licence ticked, that very cap (backend.qs.notChosen);
+        // and an installer that failed its signature check while Fiddler ran (the game install's Fiddler step may start it
+        // meanwhile; Windows asks about a revoked signer through the system proxy) is fetched and checked once more, once,
+        // after Fiddler closed — 30 minutes at most, its own failure kept otherwise.
+        string qsChosenCs = MemberText(qsCs, "private void QuickStartRequireChosen(string what, int memoryGb)");
+        string qsAfterFiddlerCs = MemberText(qsCs, "private static async Task QuickStartAfterFiddlerAsync(SetupInstallException failure, Action<string> log)");
+        Check("quick start: Docker Desktop's install and WSL's memory cap only in a run that is not ended whose stored plan sets a server up on this PC and chose them as its summary showed them — Docker Desktop with its licence accepted, that very cap (backend.qs.notChosen, before the busy flag); an installer that failed its signature check while Fiddler ran is fetched and checked once more, once, after Fiddler closed (30 minutes at most, its own failure kept otherwise)",
+            qsChosenCs.Contains("bool chosen = plan is not null && QuickStartStore.ResumeWanted(plan)", StringComparison.Ordinal)
+            && qsChosenCs.Contains("&& plan.Server.Kind == QuickStartPlan.Kinds.Windows", StringComparison.Ordinal)
+            && qsChosenCs.Contains("? plan.Server.Installs.Docker && plan.Server.Installs.AcceptLicence", StringComparison.Ordinal)
+            && qsChosenCs.Contains(": memoryGb > 0 && plan.Server.Installs.WslMemoryGb == memoryGb);", StringComparison.Ordinal)
+            && qsChosenCs.Contains("if (!chosen) throw new InvalidOperationException(L.T(\"backend.qs.notChosen\"));", StringComparison.Ordinal)
+            && qsInstallCs.Contains("catch (SetupInstallException ex) when (attempt == 1 && what == \"docker\" && ex.Code == \"badSignature\" && FiddlerAutomation.IsRunning)", StringComparison.Ordinal)
+            && qsInstallCs.Contains("await QuickStartAfterFiddlerAsync(ex, log);", StringComparison.Ordinal)
+            && qsAfterFiddlerCs.Contains("log(L.T(\"backend.qs.dockerAfterFiddler\"));", StringComparison.Ordinal)
+            && qsAfterFiddlerCs.Contains("var until = DateTime.UtcNow + TimeSpan.FromMinutes(30);", StringComparison.Ordinal)
+            && qsAfterFiddlerCs.Contains("while (FiddlerAutomation.IsRunning)", StringComparison.Ordinal)
+            && qsAfterFiddlerCs.Contains("System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failure);", StringComparison.Ordinal)
+            && TextKnownFor("backend.qs.notChosen") && TextKnownFor("backend.qs.dockerAfterFiddler"));
+        // S7 in the Backend: WSL's permission prompt only in a run that is not ended whose stored plan sets a server up on
+        // this PC and names that very step (the summary the user started it from named the prompt and the restart);
+        // Windows restarts only once the page saved the run as waiting for it — its resume value armed once more right
+        // before, under the plan's lock and off the message thread (Windows deletes the value when it runs it, which may have
+        // happened since this process armed it) — and never while something a restart would cut runs: one of Quick Start's
+        // installs, a game install still stopping, a server job or an account this launcher follows, a game session or a
+        // private profile not back yet, Fiddler (the system proxy) or its certificate step.
+        string qsNamedCs = MemberText(qsCs, "private void QuickStartRequireNamed(string what)");
+        string qsRestartCs = MemberText(qsCs, "private async Task<object> QuickStartRestartAsync()");
+        int qrBusyAt = qsRestartCs.IndexOf("if (Volatile.Read(ref _setupBusy) != 0) throw new InvalidOperationException(L.T(\"backend.qs.busy\"));", StringComparison.Ordinal);
+        int qrGameAt = qsRestartCs.IndexOf("if (Volatile.Read(ref _installBusy) != 0) throw new InvalidOperationException(L.T(\"backend.install.busy\"));", StringComparison.Ordinal);
+        int qrJobAt = qsRestartCs.IndexOf("if (Volatile.Read(ref _serverJobBusy) != 0 || Volatile.Read(ref _accountBusy) != 0)", StringComparison.Ordinal);
+        int qrJobThrowAt = qrJobAt < 0 ? -1 : qsRestartCs.IndexOf("throw new InvalidOperationException(L.T(\"backend.server.jobBusy\"));", qrJobAt, StringComparison.Ordinal);
+        int qrPlayAt = qsRestartCs.IndexOf("if (PlayInProgress || !QuickStartLiveProfileLoaded()) throw new InvalidOperationException(L.T(\"backend.qs.restartPlaying\"));", StringComparison.Ordinal);
+        int qrFiddlerAt = qsRestartCs.IndexOf("if (Volatile.Read(ref _certBusy) != 0 || FiddlerAutomation.IsRunning) throw new InvalidOperationException(L.T(\"backend.qs.restartFiddler\"));", StringComparison.Ordinal);
+        int qrSavedAt = qsRestartCs.IndexOf("lock (_qsLock) saved = QuickStartPlanNow() is { State: QuickStartPlan.States.WaitingRestart } && _qsResumeSet == true;", StringComparison.Ordinal);
+        int qrRefuseAt = qrSavedAt < 0 ? -1 : qsRestartCs.IndexOf("if (!saved) throw new InvalidOperationException(L.T(\"backend.qs.restartUnsaved\"));", qrSavedAt, StringComparison.Ordinal);
+        int qrRearmAt = qrRefuseAt < 0 ? -1 : qsRestartCs.IndexOf("_qsResumeSet = null;", qrRefuseAt, StringComparison.Ordinal);
+        int qrArmAt = qrRearmAt < 0 ? -1 : qsRestartCs.IndexOf("QuickStartResume(true);", qrRearmAt, StringComparison.Ordinal);
+        int qrRunAt = qrArmAt < 0 ? -1 : qsRestartCs.IndexOf("SetupInstall.RestartWindows(comment)", qrArmAt, StringComparison.Ordinal);
+        var qrRuns = TaskRunSpans(qsRestartCs);
+        Check("quick start: WSL's prompt (wsl / wslUpdate) only in a run that is not ended whose stored plan sets a server up on this PC and names that step (backend.qs.notInPlan otherwise) — SetupInstall's two WSL steps are started from quickstart.install alone; quickstart.restart restarts Windows only once the stored plan waits for it (backend.qs.restartUnsaved), its resume value armed once more right before (under the plan's lock, off the message thread), never while one of Quick Start's installs runs, a game install stops, a server job or an account runs (backend.server.jobBusy), a game session or a private profile is in place (backend.qs.restartPlaying) or Fiddler runs (backend.qs.restartFiddler)",
+            qsNamedCs.Contains("bool named = plan is not null && QuickStartStore.ResumeWanted(plan)", StringComparison.Ordinal)
+            && qsNamedCs.Contains("&& plan.Server.Kind == QuickStartPlan.Kinds.Windows", StringComparison.Ordinal)
+            && qsNamedCs.Contains("&& (what == \"wsl\" ? plan.Server.Installs.Wsl : plan.Server.Installs.WslUpdate);", StringComparison.Ordinal)
+            && qsNamedCs.Contains("if (!named) throw new InvalidOperationException(L.T(\"backend.qs.notInPlan\"));", StringComparison.Ordinal)
+            && qsInstallCs.Contains("case \"wsl\": result = await SetupInstall.EnableWslAsync(log); break;", StringComparison.Ordinal)
+            && qsInstallCs.Contains("case \"wslUpdate\": result = await SetupInstall.UpdateWslAsync(log); break;", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bSetupInstall\.(?:EnableWslAsync|UpdateWslAsync)\(").Count == 2
+            && qrBusyAt > 0 && qrGameAt > qrBusyAt && qrJobAt > qrGameAt && qrJobThrowAt > qrJobAt && qrPlayAt > qrJobThrowAt && qrFiddlerAt > qrPlayAt
+            && qrSavedAt > qrFiddlerAt && qrRefuseAt > qrSavedAt && qrRearmAt > qrRefuseAt && qrArmAt > qrRearmAt && qrRunAt > qrArmAt
+            && InsideLock(qsRestartCs, "lock (_qsLock)", "_qsResumeSet = null;") && InsideLock(qsRestartCs, "lock (_qsLock)", "QuickStartResume(true);")
+            && new[] { qrRearmAt, qrArmAt, qrRunAt }.All(i => qrRuns.Any(s => i > s.start && i < s.end))
+            && MemberText(qsCs, "private static bool QuickStartLiveProfileLoaded()").Contains("try { return ProfileStore.ForGenshin().LiveIsActive(); }", StringComparison.Ordinal)
+            && TextKnownFor("backend.qs.restartPlaying") && TextKnownFor("backend.qs.restartFiddler")
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bSetupInstall\.RestartWindows\(").Count == 1);
+        // quickstart.check reads its payload before anything is awaited, then looks at this PC off the message thread —
+        // MachineCheck with the starting progress each server version's shipped manifest offers, the server folders only for
+        // a server on this PC — and works out the needs (SetupNeeds, with the Linux box's facts the page sends back); a half
+        // that fails is null, never a failed rpc.
+        string qsCheckCs = MemberText(qsCs, "private async Task<object> QuickStartCheckAsync(JsonElement p)");
+        int qcPlanAt = qsCheckCs.IndexOf("var plan = QuickStartPlanLoosely(p);", StringComparison.Ordinal);
+        int qcBoxAt = qsCheckCs.IndexOf("QuickStartBoxFromPage(b)", StringComparison.Ordinal);
+        int qcRunAt = qsCheckCs.IndexOf("return await Task.Run(async () =>", StringComparison.Ordinal);
+        int qcMachineAt = qcRunAt < 0 ? -1 : qsCheckCs.IndexOf("machine = await MachineCheck.RunAsync(new MachineCheckRequest", qcRunAt, StringComparison.Ordinal);
+        int qcTemplatesAt = qcMachineAt < 0 ? -1 : qsCheckCs.IndexOf("TemplateVersions = ServerVersions.All,", qcMachineAt, StringComparison.Ordinal);
+        int qcNeedsAt = qcTemplatesAt < 0 ? -1 : qsCheckCs.IndexOf("needs = SetupNeeds.For(QuickStartNeedsRequest(plan, root), machine, box, ServerNeeds.Load(), tools);", qcTemplatesAt, StringComparison.Ordinal);
+        // (one look at a time — its process probes run side by side within one look, never as several looks' worth — and
+        //  none while Python's or 7-Zip's install replaces what a look runs: those take the look's turn; awaited only off the
+        //  message thread)
+        int qcGateAt = qcRunAt < 0 ? -1 : qsCheckCs.IndexOf("await _qsCheckGate.WaitAsync();", qcRunAt, StringComparison.Ordinal);
+        int qcGateFreeAt = qcNeedsAt < 0 ? -1 : qsCheckCs.IndexOf("finally { _qsCheckGate.Release(); }", qcNeedsAt, StringComparison.Ordinal);
+        var qcGateWaits = new[] { qsCs }.SelectMany(src => CodeIndexes(src, "_qsCheckGate.Wait")).ToList();
+        var qcRunsAll = TaskRunSpans(qsCs);
+        Check("quick start: quickstart.check reads its payload before anything is awaited, then looks at this PC off the message thread — one look at a time, none while Python's or 7-Zip's install replaces what it runs (_qsCheckGate, awaited off the message thread only) — MachineCheck with the starting progress each server version's shipped manifest offers (TemplateVersions = ServerVersions.All), the server folders only for a server on this PC — and works out the needs (SetupNeeds.For, with the Linux box's facts the page sends back); a half that fails is null, never a failed rpc",
+            qcPlanAt > 0 && qcBoxAt > qcPlanAt && qcRunAt > qcBoxAt && qcMachineAt > qcRunAt && qcTemplatesAt > qcMachineAt && qcNeedsAt > qcTemplatesAt
+            && qcGateAt > qcRunAt && qcGateAt < qcMachineAt && qcGateFreeAt > qcNeedsAt
+            && qsCs.Contains("private readonly SemaphoreSlim _qsCheckGate = new(1, 1);", StringComparison.Ordinal)
+            && qsInstallCs.Contains("bool takesLook = what is \"python\" or \"sevenZip\";", StringComparison.Ordinal)
+            && qsInstallCs.Contains("if (takesLook) await _qsCheckGate.WaitAsync();", StringComparison.Ordinal)
+            && qsInstallCs.Contains("finally { if (takesLook) _qsCheckGate.Release(); }", StringComparison.Ordinal)
+            && qcGateWaits.Count == 2 && qcGateWaits.All(i => qsCs.AsSpan(i).StartsWith("_qsCheckGate.WaitAsync()", StringComparison.Ordinal) && qcRunsAll.Any(s => i > s.start && i < s.end))
+            && CodeWords(qsCheckCs[..qcRunAt], "await").Count == 0 && CodeWords(qsCheckCs[qcRunAt..], "p").Count == 0
+            && qsCheckCs.Contains("var folders = plan.Server.Kind == QuickStartPlan.Kinds.Windows", StringComparison.Ordinal)
+            && qsCheckCs.Contains("catch (Exception ex) { Log.Error(\"quick start: the look at this PC failed (non-fatal)\", ex); }", StringComparison.Ordinal)
+            && qsCheckCs.Contains("catch (Exception ex) { Log.Error(\"quick start: what the run needs could not be worked out (non-fatal)\", ex); }", StringComparison.Ordinal));
+        // The reach check and the public address: an address that does not parse is refused, an agent port outside 1–65535
+        // is the default one, the answer carries the text the page shows; neither stores anything.
+        string qsReachCs = MemberText(qsCs, "private static async Task<object> QuickStartReachAsync(JsonElement p)");
+        Check("quick start: quickstart.reach probes the address it is given (one that does not parse: backend.badAddress), an agent port 1–65535 or the default one, and answers ReachCheck's verdict with its text key; quickstart.publicIp asks the address services of config/setup-tools.json (PublicAddress.LookupAsync)",
+            qsReachCs.Contains("throw new InvalidOperationException(L.T(\"backend.badAddress\", new { detail = error ?? \"\" }));", StringComparison.Ordinal)
+            && qsReachCs.Contains("int agentPort = ExplicitAgentPort(Int(p, \"agentPort\", 0)) ?? ServerAddress.DefaultAgentPort;", StringComparison.Ordinal)
+            && qsReachCs.Contains("var r = await ReachCheck.RunAsync(address.Host, agentPort, inside);", StringComparison.Ordinal)
+            && qsReachCs.Contains("textKey = r.TextKey,", StringComparison.Ordinal)
+            && MemberText(qsCs, "private static async Task<object> QuickStartPublicIpAsync()").Contains("return await PublicAddress.LookupAsync(services);", StringComparison.Ordinal));
+        // I57: Quick Start adds no writer — Backend.QuickStart.cs writes no host, no mode, no token and no server.json record,
+        // neither itself nor through a member of the Backend that does (the host and mode writers, the logins and entries,
+        // the saved list, the records), starts no game install, agent install, update or uninstall and no server or account
+        // job (the existing rpcs do, each behind its own gate), and borrows no admin token (WithAgent, the records, an
+        // AgentClient — its rpcs sit behind no admin gate); of the state it writes only the SSH host key the user confirmed,
+        // through PinSshHostKey. Every member the list names is one the Backend has (a rename fails here, never passes).
+        string[] qsForeign =
+        {
+            "ApplyAddress", "ApplyInstalledAgent", "SetMode", "SetServerAddressAsync", "AdminLoginAsync", "OpenAdminEnterAsync", "OpenAdminForget",
+            "LocalAgentEnterAsync", "RecordSaved", "DropRecords", "ForgetHost", "SaveServerEntry", "DeleteServerEntry", "DeleteAllServerEntries",
+            "ApplySettings", "SetLoginMuted", "SetLoginAnimOff",
+            "StartInstall", "RunInstallJob", "StartRemove", "StartServerJob", "StartLocalAgentInstall", "StartRemoteAgentInstall", "StartLocalAgentUpdate",
+            "StartRemoteAgentUpdate", "LocalAgentUninstallAsync", "AgentRestartAsync", "StartAccountCreate",
+            "WithAgent", "AdminServer", "StoredServer", "RecordFor",
+        };
+        string backendMasked = CodeMasked(backendCs) + "\n" + CodeMasked(modesCs);
+        var qsForeignMissing = qsForeign.Where(name => !System.Text.RegularExpressions.Regex.IsMatch(backendMasked,
+            $@"(?m)^    (?:(?:public|private|internal|protected|static|async)\s+)+[^\n;=]*?\b{name}\s*\(")).ToList();
+        string qsMasked = CodeMasked(qsCs);
+        var qsForeignCalled = qsForeign.Where(name => System.Text.RegularExpressions.Regex.IsMatch(qsMasked, $@"(?<![\w.]){name}\s*\(")).ToList();
+        var qsCoreWriters = System.Text.RegularExpressions.Regex.Matches(qsMasked,
+                @"\bAgentDeployer\.(?:Install|Upgrade)\(|\bLocalAgent\.(?:Install|UpdateAsync|ReplacePayloads|StartAsync|Stop|SetAutostart|OpenFirewallPort|RemoveFirewallRule|Uninstall)\(|\bnew AgentClient\(|\bInstallService\.|\bUninstaller\.")
+            .Select(m => m.Value).ToList();
+        Check("quick start: Backend.QuickStart.cs writes no host, no mode, no token and no record of server.json — neither itself nor through a member of the Backend that does —, starts no game install, agent install, update or uninstall and no server or account job, and borrows no admin token (WithAgent, the records, an AgentClient) — the existing rpcs do, each behind its own gate; of the state only the SSH host key the user confirmed, through PinSshHostKey"
+              + (qsForeignMissing.Count > 0 ? " — no such member of the Backend (renamed?): " + string.Join(", ", qsForeignMissing) : "")
+              + (qsForeignCalled.Count > 0 ? " — called: " + string.Join(", ", qsForeignCalled) : "")
+              + (qsCoreWriters.Count > 0 ? " — Core: " + string.Join(", ", qsCoreWriters.Distinct()) : ""),
+            qsCode.Length > 0 && qsForeignMissing.Count == 0 && qsForeignCalled.Count == 0 && qsCoreWriters.Count == 0
+            && !System.Text.RegularExpressions.Regex.IsMatch(qsCode, @"\b(?:ServerHost|ServerPort|AgentPort|Mode)\s*=(?![=>])|\bServerConfigStore\.|\b_records\s*=(?!=)|\b_state\.(?:Save|Settings\.\w+\s*=)")
+            && System.Text.RegularExpressions.Regex.Matches(qsCode, @"\bPinSshHostKey\(").Count == 1);
+
+        // ── the SSH host keys of the Linux boxes (I58) ──
+        // ssh.probe: phase key reads the key (no authentication, no password leaves this PC); phase box trusts only the key
+        // this session's read saw at that address and the user confirmed — any other request is read anew —, a key the pins
+        // call changed only with "Trust the new key" (acceptKey.changed) for the very key that read saw as changed there. Every
+        // key it answers is noted as this session's read; the box's look that succeeded pins its key.
+        int spReadAt = qsProbeCs.IndexOf("var read = SshKeyReadAt(host, port);", StringComparison.Ordinal);
+        int spConfirmedAt = spReadAt < 0 ? -1 : qsProbeCs.IndexOf("bool confirmed = accept.Length > 0 && read is not null && string.Equals(read.Fingerprint, accept, StringComparison.Ordinal);", spReadAt, StringComparison.Ordinal);
+        int spChangedAt = spConfirmedAt < 0 ? -1 : qsProbeCs.IndexOf("bool acceptChanged = confirmed && trustChanged && read!.Changed;", spConfirmedAt, StringComparison.Ordinal);
+        int spProbeAt = spChangedAt < 0 ? -1 : qsProbeCs.IndexOf("AgentDeployer.Probe(ssh, confirmed ? accept : null, pins, dirs, services,", spChangedAt, StringComparison.Ordinal);
+        int spArgAt = spProbeAt < 0 ? -1 : qsProbeCs.IndexOf("acceptChanged));", spProbeAt, StringComparison.Ordinal);
+        int spNoteAt = spArgAt < 0 ? -1 : qsProbeCs.IndexOf("NoteSshKeyRead(host, port, probe.HostKey);", spArgAt, StringComparison.Ordinal);
+        int spBoxAt = spNoteAt < 0 ? -1 : qsProbeCs.IndexOf("bool box = probe.Phase == \"box\";", spNoteAt, StringComparison.Ordinal);
+        int spPinAt = spBoxAt < 0 ? -1 : qsProbeCs.IndexOf("if (box) PinSshHostKey(host, port, probe.HostKey.Type, probe.HostKey.Fingerprint);", spBoxAt, StringComparison.Ordinal);
+        int spFirstAwaitAt = CodeWords(qsProbeCs, "await").DefaultIfEmpty(-1).Min();
+        int spLastPayloadAt = CodeWords(qsProbeCs, "p").DefaultIfEmpty(int.MaxValue).Max();
+        Check("ssh probe: ssh.probe reads its payload before anything is awaited; a confirmed key counts only when it is the key this session's read saw at that address (else the key is read anew, phase key), a key the pins call changed only with \"Trust the new key\" (acceptKey.changed) for a key that read saw as changed; every key answered is noted as this session's read, and the box's look that succeeded pins its key — the address's public address is asked only then",
+            spReadAt > 0 && spConfirmedAt > spReadAt && spChangedAt > spConfirmedAt && spProbeAt > spChangedAt && spArgAt > spProbeAt
+            && spNoteAt > spArgAt && spBoxAt > spNoteAt && spPinAt > spBoxAt
+            && spFirstAwaitAt > 0 && spLastPayloadAt < spFirstAwaitAt
+            && qsProbeCs.Contains("trustChanged = accept.Length > 0 && Bool(acceptKey, \"changed\");", StringComparison.Ordinal)
+            && qsProbeCs.Contains("var services = confirmed && publicIp ? SetupTools.Load().PublicIpServices : null;", StringComparison.Ordinal)
+            && qsProbeCs.Contains("var pins = SshPinsOf(host, port);", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bNoteSshKeyRead\(").Count == 2
+            && TextKnownFor("backend.qs.sshTarget"));
+        // HostKeyCheck.AcceptChanged — the one way a key the pins call changed is trusted — is set only from that path: ssh.probe's
+        // acceptChanged and SshHostKeyCheck's AcceptChanged, each from the user's "Trust the new key" AND this session's read
+        // having seen that very key as changed there. The agent install's confirmed key counts only when this session's read
+        // saw it at that address (backend.agent.hostKeyUnread, before the busy flag, before anything connects); the update
+        // passes no confirmed key; both hand their check to the deployer.
+        string skCheckCs = MemberText(modesCs, "private HostKeyCheck SshHostKeyCheck(string host, int port, string? confirmed = null, bool trustChanged = false)");
+        string skConfirmedCs = MemberText(modesCs, "private static (string Fingerprint, bool Changed) ConfirmedHostKey(JsonElement p)");
+        string skInstallCs = MemberText(modesCs, "private object StartRemoteAgentInstall(JsonElement p)");
+        string skUpdateCs = MemberText(modesCs, "private object StartRemoteAgentUpdate(JsonElement p)");
+        int skConfirmAt = skInstallCs.IndexOf("var (confirmed, trustChanged) = ConfirmedHostKey(p);", StringComparison.Ordinal);
+        int skCheckAt = skConfirmAt < 0 ? -1 : skInstallCs.IndexOf("var hostKeys = SshHostKeyCheck(ssh.Host, ssh.Port, confirmed, trustChanged);", skConfirmAt, StringComparison.Ordinal);
+        int skBusyAt = skCheckAt < 0 ? -1 : skInstallCs.IndexOf("Interlocked.Exchange(ref _serverJobBusy, 1)", skCheckAt, StringComparison.Ordinal);
+        int skRunAt = skBusyAt < 0 ? -1 : skInstallCs.IndexOf("var result = AgentDeployer.Install(ssh, plan, Path.Combine(AppContext.BaseDirectory, \"agent\"), log, hostKeys);", skBusyAt, StringComparison.Ordinal);
+        int skUpdCheckAt = skUpdateCs.IndexOf("var hostKeys = SshHostKeyCheck(ssh.Host, ssh.Port);", StringComparison.Ordinal);
+        int skUpdBusyAt = skUpdCheckAt < 0 ? -1 : skUpdateCs.IndexOf("Interlocked.Exchange(ref _serverJobBusy, 1)", skUpdCheckAt, StringComparison.Ordinal);
+        int skUpdRunAt = skUpdBusyAt < 0 ? -1 : skUpdateCs.IndexOf("var result = AgentDeployer.Upgrade(ssh, Path.Combine(AppContext.BaseDirectory, \"agent\"), force, log, hostKeys);", skUpdBusyAt, StringComparison.Ordinal);
+        int skReadAt = skCheckCs.IndexOf("var read = SshKeyReadAt(host, port);", StringComparison.Ordinal);
+        int skUnreadAt = skReadAt < 0 ? -1 : skCheckCs.IndexOf("if (read is null || !string.Equals(read.Fingerprint, fingerprint, StringComparison.Ordinal))", skReadAt, StringComparison.Ordinal);
+        int skThrowAt = skUnreadAt < 0 ? -1 : skCheckCs.IndexOf("throw new InvalidOperationException(L.T(\"backend.agent.hostKeyUnread\", new { host, port }));", skUnreadAt, StringComparison.Ordinal);
+        int skAcceptAt = skThrowAt < 0 ? -1 : skCheckCs.IndexOf("return new HostKeyCheck(pins, fingerprint, AcceptChanged: trustChanged && read.Changed);", skThrowAt, StringComparison.Ordinal);
+        Check("ssh host keys: HostKeyCheck.AcceptChanged is set only for a key this session's read saw as CHANGED at that address and the user confirmed after the changed-key warning (\"Trust the new key\": changed true beside its fingerprint) — ssh.probe's acceptChanged and SshHostKeyCheck's AcceptChanged, nowhere else; the agent install's confirmed key counts only when this session's read saw that very key there (backend.agent.hostKeyUnread, before the busy flag); the update passes no confirmed key; both hand their check to the deployer",
+            skReadAt > 0 && skUnreadAt > skReadAt && skThrowAt > skUnreadAt && skAcceptAt > skThrowAt
+            && skCheckCs.IndexOf("if (fingerprint.Length == 0) return new HostKeyCheck(pins);", StringComparison.Ordinal) is int skNoneAt && skNoneAt > 0 && skNoneAt < skReadAt
+            && skConfirmedCs.Contains("return (fingerprint, fingerprint.Length > 0 && Bool(hk, \"changed\"));", StringComparison.Ordinal)
+            && skConfirmAt > 0 && skCheckAt > skConfirmAt && skBusyAt > skCheckAt && skRunAt > skBusyAt
+            && skUpdCheckAt > 0 && skUpdBusyAt > skUpdCheckAt && skUpdRunAt > skUpdBusyAt
+            && spChangedAt > 0 && spArgAt > spProbeAt
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bAcceptChanged\b").Count == 1
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bacceptChanged\b").Count == 2
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bnew HostKeyCheck\(").Count == 2
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bSshHostKeyCheck\(").Count == 3
+            && TextKnownFor("backend.agent.hostKeyUnread"));
+        // A key is pinned only after the run that trusted it succeeded — the agent install (in the try, after the deployer
+        // returned, with the install's record in ONE hold of the state's lock), the agent update (after the deployer returned),
+        // ssh.probe's box look and a legacy tunnel the agent answered (PinTunnelKey, below) — always the key that run trusted,
+        // through PinSshHostKey: the pins changed and saved under the state's lock. Nothing else pins.
+        string skPinCs = MemberText(modesCs, "private void PinSshHostKey(string host, int port, string type, string fingerprint)");
+        const string skPinCall = "PinSshHostKey(ssh.Host, ssh.Port, result.HostKeyType, result.HostKeyFingerprint);";
+        int skInstallPinAt = skRunAt < 0 ? -1 : skInstallCs.IndexOf(skPinCall, skRunAt, StringComparison.Ordinal);
+        int skInstallCatchAt = skRunAt < 0 ? -1 : skInstallCs.IndexOf("catch (", skRunAt, StringComparison.Ordinal);
+        int skUpdPinAt = skUpdRunAt < 0 ? -1 : skUpdateCs.IndexOf(skPinCall, skUpdRunAt, StringComparison.Ordinal);
+        int skUpdCatchAt = skUpdRunAt < 0 ? -1 : skUpdateCs.IndexOf("catch (", skUpdRunAt, StringComparison.Ordinal);
+        string ptCs = MemberText(modesCs, "private void PinTunnelKey(ServerConfig cfg, HostKeySeen? key)");
+        const string ptPinCall = "PinSshHostKey(cfg.Host, cfg.Port, key.Type, key.Fingerprint);";
+        Check("ssh host keys: a key is pinned only after the run that trusted it succeeded — the agent install (after AgentDeployer.Install returned, in its try, inside the install's one hold of the state's lock), the agent update (after AgentDeployer.Upgrade returned), ssh.probe's box look and a legacy tunnel the agent answered (PinTunnelKey) — the key that run trusted, through PinSshHostKey alone, which changes the pins and saves under the state's lock",
+            skInstallPinAt > skRunAt && skInstallPinAt < skInstallCatchAt && skUpdPinAt > skUpdRunAt && skUpdPinAt < skUpdCatchAt
+            && spPinAt > spBoxAt
+            && InsideLock(skInstallCs, "lock (RelicState.Gate)", skPinCall)
+            && UnderStateLock(skPinCs, "_state.PinHostKey(host, port, type, fingerprint)", "_state.Save();")
+            && InsideLock(ptCs, "lock (RelicState.Gate)", ptPinCall)
+            && System.Text.RegularExpressions.Regex.Matches(CodeMasked(qsCs) + CodeMasked(backendCs) + CodeMasked(modesCs), @"\bPinSshHostKey\(").Count == 5
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\b_state\.PinHostKey\(").Count == 1);
+        // The legacy tunnel's key (I58): AgentClient reports the key its connection trusted (TunnelKey, its verdict decided
+        // against the pins the tunnel was checked against) and writes no pin; the Backend pins it through PinTunnelKey only
+        // when it was seen for the first time there (verdict New) AND the address still has no pin when it pins (the verdict
+        // judged again against the pins as they stand: a pin another run wrote while the call was in flight stays), never for
+        // a direct connection, and only while the host's record is still that tunnel at that port (a Delete of its saved
+        // server meanwhile forgets its pins for good) — the looks and the pin one step under the state's lock, nothing
+        // awaited. It is read only after the call the agent answered: the admin login and the open key's entry once /status
+        // accepted the token (pinned in their write tails, under the lock, after the save — a login that enters with the
+        // saved token while the agent does not answer pins nothing, and one whose tunnel record went meanwhile saves nothing
+        // back), a WithAgent call once its op returned, the agent's restart once /agent/config answered.
+        string ptLoginCs = CodeOf(MemberText(modesCs, "private async Task<object> AdminLoginAsync(string address, string token, int agentPort = 0)"));
+        int ptLoginStatusAt = ptLoginCs.IndexOf("await a.StatusAsync();", StringComparison.Ordinal);
+        int ptLoginReadAt = ptLoginStatusAt < 0 ? -1 : ptLoginCs.IndexOf("tunnelKey = a.TunnelKey;", ptLoginStatusAt, StringComparison.Ordinal);
+        int ptLoginCatchAt = ptLoginStatusAt < 0 ? -1 : ptLoginCs.IndexOf("catch (", ptLoginStatusAt, StringComparison.Ordinal);
+        int ptLoginSaveAt = ptLoginCs.IndexOf("ServerConfigStore.Save(cfg);", StringComparison.Ordinal);
+        int ptLoginPinAt = ptLoginSaveAt < 0 ? -1 : ptLoginCs.IndexOf("PinTunnelKey(cfg, tunnelKey);", ptLoginSaveAt, StringComparison.Ordinal);
+        string ptEntryCs = CodeOf(entryHead);
+        int ptEntryStatusAt = ptEntryCs.IndexOf("await a.StatusAsync();", StringComparison.Ordinal);
+        int ptEntryReadAt = ptEntryStatusAt < 0 ? -1 : ptEntryCs.IndexOf("tunnelKey = a.TunnelKey;", ptEntryStatusAt, StringComparison.Ordinal);
+        int ptEntryCatchAt = ptEntryStatusAt < 0 ? -1 : ptEntryCs.IndexOf("catch (", ptEntryStatusAt, StringComparison.Ordinal);
+        int ptEntryModeAt = ptEntryCs.IndexOf("_state.Settings.Mode = \"admin\";", StringComparison.Ordinal);
+        int ptEntryPinAt = ptEntryModeAt < 0 ? -1 : ptEntryCs.IndexOf("PinTunnelKey(stored, tunnelKey);", ptEntryModeAt, StringComparison.Ordinal);
+        string ptAgentCs = CodeOf(MemberText(backendCs, "private async Task<object?> WithAgent("));
+        int ptAgentOpAt = ptAgentCs.IndexOf("var answer = await op(a);", StringComparison.Ordinal);
+        int ptAgentPinAt = ptAgentOpAt < 0 ? -1 : ptAgentCs.IndexOf("PinTunnelKey(cfg, a.TunnelKey);", ptAgentOpAt, StringComparison.Ordinal);
+        int ptAgentRetAt = ptAgentPinAt < 0 ? -1 : ptAgentCs.IndexOf("return answer;", ptAgentPinAt, StringComparison.Ordinal);
+        string ptRestartCs = CodeOf(MemberText(modesCs, "private async Task<object> AgentRestartAsync()"));
+        int ptRestartGetAt = ptRestartCs.IndexOf("string before = AgentClient.StartedOf(await a.AgentConfigGetAsync());", StringComparison.Ordinal);
+        int ptRestartPinAt = ptRestartGetAt < 0 ? -1 : ptRestartCs.IndexOf("PinTunnelKey(cfg, a.TunnelKey);", ptRestartGetAt, StringComparison.Ordinal);
+        int ptRestartPostAt = ptRestartPinAt < 0 ? -1 : ptRestartCs.IndexOf("await a.AgentRestartAsync();", ptRestartPinAt, StringComparison.Ordinal);
+        string ptCode = CodeOf(ptCs);
+        int ptGuardAt = ptCode.IndexOf("if (cfg.IsDirect || key is not { Verdict: HostKeyVerdict.New }) return;", StringComparison.Ordinal);
+        int ptGateAt = ptGuardAt < 0 ? -1 : ptCode.IndexOf("lock (RelicState.Gate)", ptGuardAt, StringComparison.Ordinal);
+        int ptRecordAt = ptGateAt < 0 ? -1 : ptCode.IndexOf("if (RecordFor(cfg.Host) is not { IsDirect: false } now || now.Port != cfg.Port) return;", ptGateAt, StringComparison.Ordinal);
+        int ptAgainAt = ptRecordAt < 0 ? -1 : ptCode.IndexOf("if (HostKeyPins.Decide(SshPinsOf(cfg.Host, cfg.Port), key.Fingerprint) != HostKeyVerdict.New) return;", ptRecordAt, StringComparison.Ordinal);
+        int ptCallAt = ptAgainAt < 0 ? -1 : ptCode.IndexOf(ptPinCall, ptAgainAt, StringComparison.Ordinal);
+        int ptGoneAt = ptLoginCs.IndexOf("if (storedForHost is { IsDirect: false } && RecordFor(r.Host) is not { IsDirect: false })", StringComparison.Ordinal);
+        int ptGoneThrowAt = ptGoneAt < 0 ? -1 : ptLoginCs.IndexOf("throw new InvalidOperationException(L.T(\"backend.savedTokenChanged\"));", ptGoneAt, StringComparison.Ordinal);
+        string ptMasked = CodeMasked(qsCs) + CodeMasked(backendCs) + CodeMasked(modesCs);
+        string ptClientCode = CodeMasked(agentClientCs);
+        Check("ssh host keys: a legacy tunnel's key is pinned only through PinTunnelKey — a key seen there for the first time (verdict New, and judged again against the pins as they stand when it pins: a pin another run wrote meanwhile stays), never for a direct connection, only while the host's record is still that tunnel at that SSH port, the looks and the pin one step under the state's lock — and only after the agent answered over it: the admin login and the open key's entry once /status accepted the token (in their write tails, under the lock, after the state's save; a login whose tunnel record went meanwhile saves nothing back, backend.savedTokenChanged), a WithAgent call once its op returned, the agent's restart once /agent/config answered; AgentClient reports the key it trusted (TunnelKey, its verdict decided against the tunnel's own pins) once the connection stands and writes no pin",
+            ptGuardAt >= 0 && ptGateAt > ptGuardAt && ptRecordAt > ptGateAt && ptAgainAt > ptRecordAt && ptCallAt > ptAgainAt
+            && UnderStateLock(ptCs, "RecordFor(cfg.Host)", "SshPinsOf(cfg.Host, cfg.Port)", ptPinCall)
+            && ptLoginStatusAt > 0 && ptLoginReadAt > ptLoginStatusAt && ptLoginReadAt < ptLoginCatchAt
+            && ptLoginPinAt > ptLoginSaveAt && ptLoginSaveAt > ptLoginCatchAt
+            && InsideLock(ptLoginCs, "lock (RelicState.Gate)", "PinTunnelKey(cfg, tunnelKey);")
+            && ptGoneAt > ptLoginCatchAt && ptGoneThrowAt > ptGoneAt && ptGoneThrowAt < ptLoginSaveAt
+            && InsideLock(ptLoginCs, "lock (RelicState.Gate)", "if (storedForHost is { IsDirect: false } && RecordFor(r.Host) is not { IsDirect: false })")
+            && ptEntryStatusAt > 0 && ptEntryReadAt > ptEntryStatusAt && ptEntryReadAt < ptEntryCatchAt
+            && ptEntryPinAt > ptEntryModeAt && InsideLock(ptEntryCs, "lock (RelicState.Gate)", "PinTunnelKey(stored, tunnelKey);")
+            && ptAgentOpAt > 0 && ptAgentPinAt > ptAgentOpAt && ptAgentRetAt > ptAgentPinAt
+            && ptRestartGetAt > 0 && ptRestartPinAt > ptRestartGetAt && ptRestartPostAt > ptRestartPinAt
+            && System.Text.RegularExpressions.Regex.Matches(ptMasked, @"\bPinTunnelKey\(").Count == 5
+            && System.Text.RegularExpressions.Regex.Matches(ptMasked, @"\bTunnelKey\b").Count == 4
+            && agentClientCs.Contains("public HostKeySeen? TunnelKey { get; private set; }", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(ptClientCode, @"\bTunnelKey = ").Count == 1
+            && System.Text.RegularExpressions.Regex.Matches(ptClientCode, @"\btrusted = (?!null\b)").Count == 1
+            && ptClientCode.Contains("if (e.CanTrust) trusted = key;", StringComparison.Ordinal)
+            && ptClientCode.Contains("var key = new HostKeySeen(Setup.HostKeyPins.KeyType(e.HostKey), fingerprint,", StringComparison.Ordinal)
+            && ptClientCode.Contains("Setup.HostKeyPins.Decide(pins, fingerprint), Setup.HostKeyPins.Describe(pins));", StringComparison.Ordinal)
+            && TextKnownFor("backend.savedTokenChanged"));
+        // The pins' one spelling: the Backend reads and pins a box's keys only through the state's (host, port) overloads and
+        // keys this session's reads by RelicState.PinKeyFor — no pin key spelled by hand, no look into SshHostKeys.
+        Check("ssh host keys: the Backend reads and pins a box's keys only through the state's (host, port) overloads — HostKeyPinsFor(host, port), PinHostKey(host, port, type, fingerprint) — and keys this session's reads by RelicState.PinKeyFor(host, port): no pin key spelled by hand, no look into SshHostKeys",
+            ArgCounts(backendAll, "_state.HostKeyPinsFor(") is { Count: > 0 } skReadArgs && skReadArgs.All(n => n == 2)
+            && ArgCounts(backendAll, "_state.PinHostKey(") is [4]
+            && CodeIndexes(backendAll, "SshHostKeys").Count == 0 && CodeIndexes(backendAll, "HostKeyPins.Key(").Count == 0
+            && CodeIndexes(backendAll, "RelicState.PinKey(").Count == 0
+            && MemberText(modesCs, "private void NoteSshKeyRead(string host, int port, HostKeySeen seen)").Contains("string key = RelicState.PinKeyFor(host, port);", StringComparison.Ordinal)
+            && MemberText(modesCs, "private HostKeySeen? SshKeyReadAt(string host, int port)").Contains("string key = RelicState.PinKeyFor(host, port);", StringComparison.Ordinal)
+            && MemberText(modesCs, "private List<HostKeyPin> SshPinsOf(string host, int port) =>")
+                .Contains("_state.HostKeyPinsFor(host, port).Select(pin => new HostKeyPin(pin.Type, pin.Fingerprint)).ToList();", StringComparison.Ordinal));
+        // The tunnel of a legacy Mode: ssh record (AgentClient) checks the box's key against the same pins before anything —
+        // the bearer token included — goes through it: a handler on the connection before it connects, the one decision
+        // (HostKeyPins.Trusts) with no confirmed key, only the pinned type offered (once more with every algorithm when the box
+        // holds none), a refused key ending the connect with the Core's own refusal (HostKeyRefusedException, the changed-key
+        // text) before the port is forwarded, the key it trusted reported (TunnelKey) only once the connection stands. It
+        // writes no pin itself (the Backend pins a first-seen key once the agent answered: PinTunnelKey, above). The Backend
+        // hands the tunnel its pins in memory wherever
+        // a record of the configured server — which may be a legacy one — is used (WithAgent, the login, the open key's
+        // entry, the agent's restart, the update's question before its upload and its confirmation); without them the client
+        // reads the state file's, and a state file that is there but cannot be read refuses the tunnel
+        // (core.deploy.hostKeysUnreadable) rather than trust any key.
+        string tunnelCs = MemberText(agentClientCs, "public Task ConnectAsync(CancellationToken ct = default)");
+        string tunnelPinnedCs = MemberText(agentClientCs, "private static IReadOnlyList<Setup.HostKeyPin> PinnedHostKeys(string host, int port)");
+        int tnPinsAt = tunnelCs.IndexOf("var pins = _sshHostKeys ?? PinnedHostKeys(_cfg.Host, _cfg.Port);", StringComparison.Ordinal);
+        int tnCheckAt = tnPinsAt < 0 ? -1 : tunnelCs.IndexOf("var check = new Setup.HostKeyCheck(pins);", tnPinsAt, StringComparison.Ordinal);
+        int tnHandlerAt = tnCheckAt < 0 ? -1 : tunnelCs.IndexOf("ssh.HostKeyReceived += (_, e) =>", tnCheckAt, StringComparison.Ordinal);
+        int tnTrustAt = tnHandlerAt < 0 ? -1 : tunnelCs.IndexOf("e.CanTrust = Setup.HostKeyPins.Trusts(check, fingerprint);", tnHandlerAt, StringComparison.Ordinal);
+        int tnMakeAt = tnTrustAt < 0 ? -1 : tunnelCs.IndexOf("_ssh = Make(narrow: true, out bool restricted);", tnTrustAt, StringComparison.Ordinal);
+        int tnConnectAt = tnMakeAt < 0 ? -1 : tunnelCs.IndexOf("try { _ssh.Connect(); }", tnMakeAt, StringComparison.Ordinal);
+        int tnRefusedAt = tnConnectAt < 0 ? -1 : tunnelCs.IndexOf("throw new HostKeyRefusedException(L.T(\"core.deploy.hostKeyChanged\", new", tnConnectAt, StringComparison.Ordinal);
+        int tnReportAt = tnRefusedAt < 0 ? -1 : tunnelCs.IndexOf("TunnelKey = trusted;", tnRefusedAt, StringComparison.Ordinal);
+        int tnForwardAt = tnReportAt < 0 ? -1 : tunnelCs.IndexOf("_forward = new ForwardedPortLocal(", tnReportAt, StringComparison.Ordinal);
+        int tnStateAt = tunnelPinnedCs.IndexOf("var state = State.RelicState.TryRead();", StringComparison.Ordinal);
+        int tnUnreadableAt = tnStateAt < 0 ? -1 : tunnelPinnedCs.IndexOf("if (File.Exists(State.RelicState.DefaultPath))", tnStateAt, StringComparison.Ordinal);
+        int tnUnreadThrowAt = tnUnreadableAt < 0 ? -1 : tunnelPinnedCs.IndexOf("throw new InvalidOperationException(L.T(\"core.deploy.hostKeysUnreadable\", new { host, port }));", tnUnreadableAt, StringComparison.Ordinal);
+        // (every AgentClient the Backend builds for a record that may be a legacy one gets the pins in memory — TunnelPinsOf of
+        //  that record, or the pins a caller computed so (tunnelPins); one without them is built for a direct record: made in
+        //  the call, made "direct" in its own member, or InstallFollowUpAsync's `ask`, which both installs make "direct")
+        var tnBare = new List<string>();
+        int tnBuiltCount = 0;
+        foreach (string tnSrc in new[] { backendCs, modesCs, qsCs })
+            foreach (int tnAt in CodeIndexes(tnSrc, "new AgentClient("))
+            {
+                tnBuiltCount++;
+                int tnClose = CsClose(tnSrc, tnAt + "new AgentClient(".Length, ')');
+                string tnCall = tnClose < 0 ? tnSrc[tnAt..] : tnSrc[tnAt..(tnClose + 1)];
+                if (System.Text.RegularExpressions.Regex.IsMatch(tnCall, @"^new AgentClient\((\w+), (?:TunnelPinsOf\(\1\)|tunnelPins)\)$")) continue;
+                if (System.Text.RegularExpressions.Regex.IsMatch(tnCall, @"^new AgentClient\(new ServerConfig\([^;]*, ""direct""\)\)$")) continue;
+                var tnArg = System.Text.RegularExpressions.Regex.Match(tnCall, @"^new AgentClient\((\w+)\)$");
+                string tnMember = MemberAround(tnSrc, tnAt);
+                if (tnArg.Success && System.Text.RegularExpressions.Regex.IsMatch(tnMember[..Math.Max(0, tnMember.IndexOf(tnCall, StringComparison.Ordinal))],
+                        $@"\b{tnArg.Groups[1].Value}\s*=\s*new ServerConfig\([^;]*, ""direct""(?:, OpenKey: true)?\);")) continue;
+                if (tnArg.Success && tnArg.Groups[1].Value == "ask" && MemberNameAt(tnSrc, tnAt) == "InstallFollowUpAsync"
+                    && MemberText(modesCs, "private object StartLocalAgentInstall(JsonElement p)").Contains("var ask = new ServerConfig(host, 22, \"root\", \"\", sameProcess ? beforeToken : plan.Token, plan.ListenPort, \"direct\");", StringComparison.Ordinal)
+                    && skInstallCs.Contains("var cfg = new ServerConfig(ssh.Host, ssh.Port, ssh.User, \"\", plan.Token, plan.ListenPort, \"direct\");", StringComparison.Ordinal)
+                    && System.Text.RegularExpressions.Regex.Matches(CodeMasked(modesCs), @"\bInstallFollowUpAsync\(").Count == 3
+                    && modesCs.Contains("await InstallFollowUpAsync(plan, willFetch, ask, ", StringComparison.Ordinal)
+                    && modesCs.Contains("await InstallFollowUpAsync(plan, result.FetchVersions, cfg, ", StringComparison.Ordinal)) continue;
+                tnBare.Add(tnCall);
+            }
+        Check("ssh host keys: the tunnel of a legacy Mode: ssh record (AgentClient) checks the box's key against the pins of its host and port before anything goes through it — the handler on the connection before it connects, HostKeyPins.Trusts with no confirmed key (a changed key refused with the Core's own refusal, HostKeyRefusedException: core.deploy.hostKeyChanged, before the port is forwarded; the key it trusted reported as TunnelKey once the connection stands, before the forward), only the pinned type offered and every algorithm once more when the box holds none; the Backend hands it the pins in memory (TunnelPinsOf) wherever a configured record is used — WithAgent, the login, the open key's entry, the agent's restart, the update's question before its upload (RefuseRemoteUpdateAsync) and its confirmation —, and a state file that is there but cannot be read refuses the tunnel (core.deploy.hostKeysUnreadable)"
+              + (tnBare.Count > 0 ? " — built without the pins, for a record that may be a legacy one: " + string.Join(" | ", tnBare) : ""),
+            tnPinsAt > 0 && tnCheckAt > tnPinsAt && tnHandlerAt > tnCheckAt && tnTrustAt > tnHandlerAt && tnMakeAt > tnTrustAt && tnConnectAt > tnMakeAt
+            && tnRefusedAt > tnConnectAt && tnReportAt > tnRefusedAt && tnForwardAt > tnReportAt
+            && tunnelCs.Contains("string fingerprint = \"SHA256:\" + e.FingerPrintSHA256;", StringComparison.Ordinal)
+            && tunnelCs.Contains("Setup.HostKeyPins.AlgorithmsFor(conn.HostKeyAlgorithms.Keys, pins)", StringComparison.Ordinal)
+            && tunnelCs.Contains("catch (Renci.SshNet.Common.SshConnectionException ex) when (restricted && !keySeen", StringComparison.Ordinal)
+            && tunnelCs.Contains("_ssh = Make(narrow: false, out _);", StringComparison.Ordinal)
+            && tunnelCs.Contains("catch (Exception) when (refused is { } seen)", StringComparison.Ordinal)
+            && tunnelCs.Contains("}), seen);", StringComparison.Ordinal)
+            && !CodeOf(agentClientCs).Contains("e.CanTrust = true", StringComparison.Ordinal) && !CodeOf(agentClientCs).Contains("HostKeyName", StringComparison.Ordinal)
+            && !System.Text.RegularExpressions.Regex.IsMatch(CodeOf(agentClientCs), @"\bPinHostKey\(|\bSshHostKeys\b|\.Save\(\)")
+            && agentClientCs.Contains("public AgentClient(ServerConfig cfg, IReadOnlyList<Setup.HostKeyPin>? sshHostKeys = null)", StringComparison.Ordinal)
+            && tunnelPinnedCs.Contains("return state.HostKeyPinsFor(host, port).Select(pin => new Setup.HostKeyPin(pin.Type, pin.Fingerprint)).ToList();", StringComparison.Ordinal)
+            && tnStateAt > 0 && tnUnreadableAt > tnStateAt && tnUnreadThrowAt > tnUnreadableAt && TextKnownFor("core.deploy.hostKeysUnreadable")
+            && modesCs.Contains("cfg.IsDirect ? null : SshPinsOf(cfg.Host, cfg.Port);", StringComparison.Ordinal)
+            && tnBuiltCount >= 9 && tnBare.Count == 0
+            && MemberText(modesCs, "private static async Task RefuseRemoteUpdateAsync(").Contains("new AgentClient(cfg, tunnelPins)", StringComparison.Ordinal)
+            && skUpdateCs.Contains("await RefuseRemoteUpdateAsync(cfg, TunnelPinsOf(cfg));", StringComparison.Ordinal)
+            && MemberText(modesCs, "private static async Task<string?> ConfirmUpdatedAsync(").Contains("new AgentClient(cfg, tunnelPins)", StringComparison.Ordinal)
+            && skUpdateCs.Contains("await ConfirmUpdatedAsync(cfg, log, TunnelPinsOf(cfg))", StringComparison.Ordinal)
+            && MemberText(backendCs, "private async Task<object?> WithAgent(").Contains("new AgentClient(cfg, TunnelPinsOf(cfg))", StringComparison.Ordinal)
+            && MemberText(modesCs, "private async Task<object> AdminLoginAsync(string address, string token, int agentPort = 0)").Contains("new AgentClient(cfg, TunnelPinsOf(cfg))", StringComparison.Ordinal)
+            && MemberText(modesCs, "private async Task<object> AgentRestartAsync()").Contains("new AgentClient(cfg, TunnelPinsOf(cfg))", StringComparison.Ordinal)
+            && modesCs.Contains("new AgentClient(stored, TunnelPinsOf(stored))", StringComparison.Ordinal));
+        // ...and a key it refuses is no agent that does not answer: the admin login and the open key's entry with a saved
+        // token rethrow the Core's refusal before the catch that would enter with the saved token (a warning) or call the
+        // agent unreachable — refused with its own text, whatever token the login holds.
+        string tnLoginCs = CodeOf(MemberText(modesCs, "private async Task<object> AdminLoginAsync(string address, string token, int agentPort = 0)"));
+        int tnLoginStatusAt = tnLoginCs.IndexOf("await a.StatusAsync();", StringComparison.Ordinal);
+        int tnLoginRefusedAt = tnLoginStatusAt < 0 ? -1 : tnLoginCs.IndexOf("catch (HostKeyRefusedException) { throw; }", tnLoginStatusAt, StringComparison.Ordinal);
+        int tnLoginAnyAt = tnLoginStatusAt < 0 ? -1 : tnLoginCs.IndexOf("catch (Exception ex)", tnLoginStatusAt, StringComparison.Ordinal);
+        int tnLoginEnterAt = tnLoginAnyAt < 0 ? -1 : tnLoginCs.IndexOf("warning = L.T(\"backend.agentUnreachableEnter\"", tnLoginAnyAt, StringComparison.Ordinal);
+        string tnEntryCs = CodeOf(entryHead);
+        int tnEntryStatusAt = tnEntryCs.IndexOf("new AgentClient(stored, TunnelPinsOf(stored))", StringComparison.Ordinal);
+        int tnEntryRefusedAt = tnEntryStatusAt < 0 ? -1 : tnEntryCs.IndexOf("catch (HostKeyRefusedException) { throw; }", tnEntryStatusAt, StringComparison.Ordinal);
+        int tnEntryAnyAt = tnEntryStatusAt < 0 ? -1 : tnEntryCs.IndexOf("catch (Exception ex)", tnEntryStatusAt, StringComparison.Ordinal);
+        Check("ssh host keys: a key the pins refuse at a legacy tunnel is no unreachable agent — the admin login and the open key's entry with a saved token rethrow HostKeyRefusedException before the catch that would enter with the saved token or call the agent unreachable: refused with its own text, whatever token the login holds",
+            tnLoginStatusAt > 0 && tnLoginRefusedAt > tnLoginStatusAt && tnLoginAnyAt > tnLoginRefusedAt && tnLoginEnterAt > tnLoginAnyAt
+            && tnEntryStatusAt > 0 && tnEntryRefusedAt > tnEntryStatusAt && tnEntryAnyAt > tnEntryRefusedAt
+            && agentClientCs.Contains("throw new HostKeyRefusedException(", StringComparison.Ordinal));
+
+        // ── the firewall step of the agent on this PC ──
+        // localagent.firewall {gamePorts} hands its gamePorts (a JSON true) to OpenFirewallPort off the message thread — TCP
+        // 21000 and UDP 21081 beside the agent's port in the one prompt (S7), the game's rules only for a run whose stored
+        // plan names the firewall step of a server other PCs join, one prompt at a time (_firewallBusy, freed in its
+        // finally) —, localagent.status answers serverRules beside firewallRule, and the uninstall's report names the rules
+        // still there; the texts name every rule.
+        string fwCase = CaseText(backendCs, backendCs.IndexOf("case \"localagent.firewall\":", StringComparison.Ordinal));
+        string fwStatusCs = MemberText(modesCs, "private Task<object> LocalAgentStatusAsync() => Task.Run<object>(async () =>");
+        string fwPlanCs = MemberText(qsCs, "private void QuickStartRequireFirewall()");
+        int fwRuleAt = fwStatusCs.IndexOf("firewallRule = LocalAgent.FirewallRuleExists(port),", StringComparison.Ordinal);
+        int fwReadAt = fwCase.IndexOf("bool gamePorts = Bool(p, \"gamePorts\");", StringComparison.Ordinal);
+        int fwNamedAt = fwReadAt < 0 ? -1 : fwCase.IndexOf("if (gamePorts) QuickStartRequireFirewall();", fwReadAt, StringComparison.Ordinal);
+        int fwBusyAt = fwNamedAt < 0 ? -1 : fwCase.IndexOf("if (Interlocked.Exchange(ref _firewallBusy, 1) != 0) throw new InvalidOperationException(L.T(\"backend.firewall.busy\"));", fwNamedAt, StringComparison.Ordinal);
+        int fwPromptAt = fwBusyAt < 0 ? -1 : fwCase.IndexOf("string? err = await Task.Run(() => LocalAgent.OpenFirewallPort(fwPort, gamePorts));", fwBusyAt, StringComparison.Ordinal);
+        int fwFreeAt = fwPromptAt < 0 ? -1 : fwCase.IndexOf("finally { Volatile.Write(ref _firewallBusy, 0); }", fwPromptAt, StringComparison.Ordinal);
+        Check("firewall: localagent.firewall hands its gamePorts (a JSON true) to LocalAgent.OpenFirewallPort off the message thread — TCP 21000 and UDP 21081 beside the agent's port, one prompt — the game's rules only for a run that is not ended whose stored plan sets up a server on this PC that other PCs join (reach lan or internet) and names the firewall step (backend.qs.notInPlan, before the prompt), one prompt at a time (backend.firewall.busy, the flag freed in its finally); localagent.status answers serverRules beside firewallRule; localagent.uninstall's report names the rules still there (keptRules)",
+            fwReadAt > 0 && fwNamedAt > fwReadAt && fwBusyAt > fwNamedAt && fwPromptAt > fwBusyAt && fwFreeAt > fwPromptAt
+            && fwPlanCs.Contains("bool named = plan is not null && QuickStartStore.ResumeWanted(plan)", StringComparison.Ordinal)
+            && fwPlanCs.Contains("&& plan.Server.Kind == QuickStartPlan.Kinds.Windows", StringComparison.Ordinal)
+            && fwPlanCs.Contains("&& plan.Server.Reach is (QuickStartPlan.Reaches.Lan or QuickStartPlan.Reaches.Internet)", StringComparison.Ordinal)
+            && fwPlanCs.Contains("&& plan.Server.Firewall;", StringComparison.Ordinal)
+            && fwPlanCs.Contains("if (!named) throw new InvalidOperationException(L.T(\"backend.qs.notInPlan\"));", StringComparison.Ordinal)
+            && backendCs.Contains("private int _firewallBusy;", StringComparison.Ordinal) && TextKnownFor("backend.firewall.busy")
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bOpenFirewallPort\(").Count == 1
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bQuickStartRequireFirewall\(").Count == 2
+            && fwRuleAt > 0 && fwStatusCs.IndexOf("serverRules = LocalAgent.ServerRulesExist(),", fwRuleAt, StringComparison.Ordinal) > fwRuleAt
+            && uninstallCs.Contains("keptRules = rep.KeptRules ?? Array.Empty<string>(),", StringComparison.Ordinal));
+        // The uninstall's question names every rule the removal deletes; the toast of the Agent card's own step (the agent's
+        // rule alone) says that rule was added and that the game ports' rules come with Quick Start's firewall step — every
+        // rule named, none claimed added that this call did not add.
+        string fwAsk = UiText("confirm.localAgentUninstall.firewall"), fwToast = UiText("toast.firewallOpened");
+        Check("firewall texts: the uninstall's question names every rule the removal deletes — the agent's (its {port}) and both game-port rules by their names — and the Agent card's toast names the agent's port as the rule added and TCP 21000 / UDP 21081 as what Quick Start's firewall step adds, never all three as added by it",
+            fwAsk.Contains(LocalAgent.FirewallRuleName(18080).Replace("18080", "{port}"), StringComparison.Ordinal)
+            && fwAsk.Contains(LocalAgent.ServerRuleTcp, StringComparison.Ordinal) && fwAsk.Contains(LocalAgent.ServerRuleUdp, StringComparison.Ordinal)
+            && fwToast.Contains("agent's port", StringComparison.Ordinal) && fwToast.Contains("Quick Start", StringComparison.Ordinal)
+            && fwToast.Contains("TCP 21000", StringComparison.Ordinal) && fwToast.Contains("UDP 21081", StringComparison.Ordinal)
+            && !fwToast.StartsWith("Windows Firewall rules added", StringComparison.Ordinal));
+
+        // ── Quick Start's page (ui/quickstart.js) and its hooks in app.js (I57) ──
+        // The runner is the page's: ui/quickstart.js, loaded right after app.js (index.html). app.js reaches it only through
+        // one-line hooks guarded by typeof … === 'function' — without the file the page runs as before and draws nothing of
+        // Quick Start. Its screen takes the window whole (no sidebar, so no other host editor) and draws the overlays the
+        // page's click and key guards wait on. A run adds no writer: the host only through server.setAddress then mode.set,
+        // admin.login, localagent.enter and the agent installs; the game through install.start; the stack through the chain
+        // an install leaves and the server jobs; the accounts through server.accountcreate / account.create; the plan
+        // through quickstart.save alone, with what ONE allow-list copy (qsPlanForDisk) takes of it — never a secret. Read
+        // from the source (the page, which the spikes do not run), whole-line comments left out (CodeOf) where a word is
+        // looked for anywhere; three of its functions are played with node further down.
+        string qsJsPath = Path.Combine(uiDir, "quickstart.js");
+        string qsJs = File.Exists(qsJsPath) ? File.ReadAllText(qsJsPath) : "";
+        string qsJsCode = CodeOf(qsJs), appJsCode = CodeOf(appJs);
+        // (an entry of the ACTIONS quickstart.js adds — Object.assign(ACTIONS, {…}) —, up to the next entry)
+        string QsAction(string name)
+        {
+            int at = qsJs.IndexOf("\n  " + name + ": (", StringComparison.Ordinal);
+            if (at < 0) at = qsJs.IndexOf("\n  " + name + ": async (", StringComparison.Ordinal);
+            if (at < 0) return "";
+            var next = System.Text.RegularExpressions.Regex.Match(qsJs[(at + 1)..], @"\n  [A-Za-z_$][A-Za-z0-9_$]*: ");
+            return next.Success ? qsJs.Substring(at, next.Index + 1) : qsJs[at..];
+        }
+        static int QsCount(string src, string pattern) => System.Text.RegularExpressions.Regex.Matches(src, pattern).Count;
+        // (the index of each text in turn, each looked for after the one before: all >= 0 when they stand in that order)
+        static bool InOrder(string src, params string[] texts)
+        {
+            int at = -1;
+            foreach (string text in texts)
+            {
+                at = src.IndexOf(text, at + 1, StringComparison.Ordinal);
+                if (at < 0) return false;
+            }
+            return texts.Length > 0;
+        }
+
+        // The screen: render draws quickStart() while S.screen is 'quickstart' (the start screen when quickstart.js is not
+        // there); quickStart() is the shell's frame without its sidebar, with the overlays login() draws for a question, a
+        // notice and an agent update above its page — the very flags the click guard and the Enter key's guard wait on
+        // (an overlay they waited on that the screen never drew would freeze it). The other flags of those guards (a game
+        // install's, a play's, a removal's, an agent install's form, the folder dialog's) are never set by quickstart.js.
+        string renderJs = JsFunction(appJs, "function render() {");
+        string quickStartJs = JsFunction(qsJs, "function quickStart() {");
+        string loginJs = JsFunction(appJs, "function login() {");
+        const string qsGuardFlags = "(S.installing || S.playing || S.confirm || S.notice || S.agentInstall || S.agentUpdate || S.remove || S.agentCfg.reloc)";
+        var qsFlagsSet = System.Text.RegularExpressions.Regex.Matches(qsJsCode, @"\bS\.(?:installing|playing|remove|agentUpdate|agentCfg\.reloc|agentInstall)\s*=(?!=)[^;]*")
+            .Select(m => m.Value.Trim()).Where(v => v != "S.agentInstall = null").ToList();
+        Check("quick start page: render draws quickStart() while S.screen is 'quickstart' — the start screen when quickstart.js is not there — and quickStart() is the shell's frame without its sidebar (no other host editor in reach), drawing above its page the overlays login() draws for a question, a notice and an agent update (S.confirm, S.notice, S.agentUpdate), which the click guard and the Enter key's guard wait on; quickstart.js sets none of the guards' other flags (an install's, a play's, a removal's, the folder dialog's; the agent install's form only to null)"
+              + (qsFlagsSet.Count > 0 ? " — set: " + string.Join(" | ", qsFlagsSet) : ""),
+            qsJs.Length > 0
+            && InOrder(renderJs, "const page = S.screen === 'quickstart' && typeof quickStart === 'function' ? quickStart()",
+                ": S.screen === 'login' || S.screen === 'quickstart' ? login() : shell();", "app.innerHTML = titlebar() + page + (S.toast ? toast() : '');")
+            && InOrder(quickStartJs, "const over = S.confirm ? confirmOverlay() : S.notice ? noticeOverlay() : S.agentUpdate ? agentUpdateOverlay() : '';",
+                "return `<div class=\"shell qs-shell\">", "${over}</div>`;")
+            && !quickStartJs.Contains("sidebar(", StringComparison.Ordinal)
+            && loginJs.Contains("${S.confirm ? confirmOverlay() : S.notice ? noticeOverlay() : S.agentUpdate ? agentUpdateOverlay() :", StringComparison.Ordinal)
+            && QsCount(appJsCode, System.Text.RegularExpressions.Regex.Escape(qsGuardFlags)) == 2
+            && qsFlagsSet.Count == 0);
+
+        // The ways in: the start screen's highlighted entry above the two modes ("Which Way?") and a link under each panel's
+        // main button — on both tabs, a part of the panel's own template —, each opening qsOpen; a run kept paused turns the
+        // entry into Continue with a Discard link that asks once (no rpc) before quickstart.clear. Boot opens the progress
+        // page of a run that runs or waits for the restart (qsResume), once every script of the page has run. index.html
+        // loads quickstart.js right after app.js.
+        string lgQsJs = JsFunction(appJs, "function loginQuickStart() {"), lgQsLinkJs = JsFunction(appJs, "function loginQuickStartLink() {");
+        int lpQsLinkPart = panelParts.IndexOf("loginQuickStartLink()");
+        int lpCtaPart = panelParts.IndexOf("isAdmin ? T('login.cta.admin') : T('login.cta.player')");
+        int lpLocalPart = panelParts.IndexOf("isAdmin ? loginLocalAgent() : ''");
+        string qsDiscardAskJs = ActionBody("qsDiscardAsk"), qsDiscardGoJs = ActionBody("qsDiscardGo");
+        Check("quick start page: the start screen's \"Which Way?\" view draws the Quick Start entry between its title and the two modes, and each panel draws the link under its main button (a part of the panel's own template, so on both tabs) — both open qsOpen (quickstart.js), neither drawn without quickstart.js; a kept run that is not done turns the entry into Continue with Discard, which asks once (S.confirm, no rpc) and only then sends quickstart.clear",
+            InOrder(loginJs, "<div class=\"lg-which\">", "${loginQuickStart()}", "<div class=\"lg-mode player\">")
+            && QsCount(appJsCode, @"\bloginQuickStart\(\)") == 2 && QsCount(appJsCode, @"\bloginQuickStartLink\(\)") == 2
+            && appJsCode.Contains("const qsHere = () => typeof quickStart === 'function';", StringComparison.Ordinal)
+            && appJsCode.Contains("const qsKept = () => !!(S.qsPlan && typeof S.qsPlan.state === 'string' && S.qsPlan.state && S.qsPlan.state !== 'done');", StringComparison.Ordinal)
+            && lgQsJs.Contains("if (!qsHere()) return '';", StringComparison.Ordinal) && lgQsLinkJs.Contains("if (!qsHere()) return '';", StringComparison.Ordinal)
+            && lgQsJs.Contains("<button data-act=\"qsOpen\"", StringComparison.Ordinal) && lgQsLinkJs.Contains("data-act=\"qsOpen\"", StringComparison.Ordinal)
+            && InOrder(lgQsJs, "const cont = qsKept();", "T('login.qs.continue')", "T('login.qs.title')", "T('login.qs.continueSub')", "T('login.qs.sub')",
+                "<button class=\"lg-qs-discard\" data-act=\"qsDiscardAsk\">${T('login.qs.discard')}</button>")
+            && lpQsLinkPart >= 0 && lpCtaPart >= 0 && lpLocalPart > lpQsLinkPart && lpQsLinkPart > lpCtaPart
+            && qsDiscardAskJs.Contains("S.confirm = {", StringComparison.Ordinal) && qsDiscardAskJs.Contains("act: 'qsDiscardGo'", StringComparison.Ordinal)
+            && !qsDiscardAskJs.Contains("rpc(", StringComparison.Ordinal)
+            && InOrder(qsDiscardGoJs, "if (S.qs && S.qs.plan) { S.qs.plan = null; S.qs.rt = null; }", "const r = await rpc('quickstart.clear', {});")
+            && QsCount(CodeOf(qsDiscardGoJs), @"\brpc\(") == 1
+            && QsAction("qsOpen").Contains("S.screen = 'quickstart';", StringComparison.Ordinal));
+        string bootJs = JsFunction(appJs, "(async function boot() {");
+        string qsResumeJs = JsFunction(qsJs, "function qsResume(plan) {");
+        string indexHtml = File.Exists(Path.Combine(uiDir, "index.html")) ? File.ReadAllText(Path.Combine(uiDir, "index.html")) : "";
+        // (a resumed run: the states its plan file records are hints of what was started, never the truth (I57) — a step
+        //  under way goes again, and a recorded "done" of a kind the facts decide is judged against them at each look until
+        //  they are in (qsHintsJudge), holding what waits behind it (qsDepsOk, qsHintHolds); nothing starts before the plan
+        //  is written again — at a resume as at Start (rt.starting, qsRunning))
+        string qsTickOnceJs = JsFunction(qsJs, "function qsTickOnce() {"), qsDepsOkJs = JsFunction(qsJs, "function qsDepsOk(st) {");
+        string qsStartRunJs = JsFunction(qsJs, "async function qsStartRun() {");
+        Check("quick start page: boot waits for every script of the page (DOMContentLoaded — quickstart.js among them), takes the init state in, and opens the progress page of a run that runs or waits for the restart (S.screen = 'quickstart', qsResume) before the start screen's own choices; qsResume judges every step again from the facts — a step under way goes again, a recorded done of a kind the facts decide (the host, the connection, the agent, this PC's installs, the firewall rules, the agent's build, a package, the last start) is a hint judged at each look (qsHintsJudge) and holds what waits behind it until its facts are in; nothing of a run starts before its plan is written (rt.starting, at a resume and at Start); index.html loads quickstart.js right after app.js",
+            InOrder(bootJs, "if (document.readyState === 'loading') await new Promise((r) => document.addEventListener('DOMContentLoaded', r, { once: true }));",
+                "applyInit(init);", "const qsPlan = init && init.quickstart && init.quickstart.plan;",
+                "if (qsPlan && (qsPlan.state === 'running' || qsPlan.state === 'waitingRestart') && typeof qsResume === 'function') {",
+                "S.screen = 'quickstart';", "qsResume(qsPlan);", "const configured = S.mode === 'player'")
+            && InOrder(qsResumeJs, "if (r && (r.state === 'running' || r.state === 'paused'", "p.state = 'running';", "rt.steps = qsStepsOf(p, rt);",
+                "rt.steps.forEach((st) => { if (QS_HINT_KINDS.includes(st.kind) && qsRec(st.id).state === 'done') rt.hints[st.id] = true; });",
+                "rt.starting = true;", "S.qs.page = 'progress';", "qsSaveNow().then(() => { rt.starting = false;")
+            && qsJs.Contains("const QS_HINT_KINDS = ['host', 'connect', 'shost', 'agent', 'python', 'sevenzip', 'wsl', 'wslMemory', 'docker', 'firewall', 'agentUpdate', 'package', 'hotpatch', 'start'];", StringComparison.Ordinal)
+            && qsTickOnceJs.Contains("if (Object.keys(rt.hints).length && qsHintsJudge()) changed = true;", StringComparison.Ordinal)
+            && qsDepsOkJs.Contains("!qsHintHolds(id)", StringComparison.Ordinal)
+            && qsJs.Contains("const qsRunning = () => !!(S.qs.plan && S.qs.rt && !S.qs.rt.stopped && !S.qs.rt.starting && !S.qs.rt.restarting && S.qs.plan.state === 'running');", StringComparison.Ordinal)
+            && InOrder(qsStartRunJs, "rt.starting = true;", "const saved = await qsSaveNow();", "rt.starting = false;")
+            && System.Text.RegularExpressions.Regex.IsMatch(indexHtml, @"<script src=""app\.js""></script>\s*(?:<!--[\s\S]*?-->\s*)?<script src=""quickstart\.js""></script>")
+            && QsCount(indexHtml, @"<script src=""quickstart\.js""></script>") == 1);
+
+        // The hooks: every call app.js makes of a function of quickstart.js stands behind `typeof <it> === 'function'` — on its
+        // own line, or heading the block it stands in (boot's resume). The jobs a run starts hand their events to qsEvent, one
+        // line per event, 19 in all: the game install's, an account's and a search's first in their handlers, which leave the
+        // event to it when it answers true (the run's own job: quickstart.js takes an install's events only while its own
+        // install runs); the agent installs' and the agent update's in a listener registered before their handlers, the
+        // server jobs' after theirs — those handlers always run (the chain of what an install leaves is built there).
+        // applyInit and every status read taken in queue the runner's look (qsTickSoon: a microtask later, once for several,
+        // nothing without quickstart.js).
+        string[] qsHookFns = { "quickStart", "qsTick", "qsEvent", "qsResume", "qsOwnsInstall" };
+        // (a call is guarded when the guard stands before it on its line, or heads the block it stands in: `if (… typeof <it>
+        //  === 'function') {` on the line that opens that block)
+        static bool HookGuarded(string code, int at, string fn)
+        {
+            string guardText = $"typeof {fn} === 'function'";
+            int lineStart = code.LastIndexOf('\n', Math.Max(0, at - 1)) + 1;
+            int onLine = code.IndexOf(guardText, lineStart, StringComparison.Ordinal);
+            if (onLine >= 0 && onLine < at) return true;
+            for (int i = at - 1, depth = 0; i >= 0; i--)
+            {
+                if (code[i] == '}') depth++;
+                else if (code[i] == '{' && depth-- == 0)
+                {
+                    string head = code[(code.LastIndexOf('\n', i) + 1)..(i + 1)].Trim();
+                    return head.StartsWith("if (", StringComparison.Ordinal) && head.EndsWith(") {", StringComparison.Ordinal) && head.Contains(guardText, StringComparison.Ordinal);
+                }
+            }
+            return false;
+        }
+        var hookBare = new List<string>();
+        foreach (string fn in qsHookFns)
+            foreach (System.Text.RegularExpressions.Match call in System.Text.RegularExpressions.Regex.Matches(appJsCode, $@"(?<![\w.$]){fn}\("))
+                if (!HookGuarded(appJsCode, call.Index, fn))
+                {
+                    int ls = appJsCode.LastIndexOf('\n', Math.Max(0, call.Index - 1)) + 1, le = appJsCode.IndexOf('\n', call.Index);
+                    hookBare.Add(appJsCode[ls..(le < 0 ? appJsCode.Length : le)].Trim());
+                }
+        var hookOff = new List<string>();
+        int OnAt(string ev, int from = 0) => appJsCode.IndexOf($"on('{ev}', ", from, StringComparison.Ordinal);
+        List<int> OnAll(string ev) { var all = new List<int>(); for (int at = OnAt(ev); at >= 0; at = OnAt(ev, at + 1)) all.Add(at); return all; }
+        foreach (string ev in new[] { "install.progress", "install.done", "install.error", "install.cancelled", "account.log", "account.done", "account.error" })
+            if (!appJsCode.Contains($"on('{ev}', (d) => {{\n  if (typeof qsEvent === 'function' && qsEvent('{ev}', d)) return;\n", StringComparison.Ordinal)) hookOff.Add(ev);
+        foreach (var (ev, kind) in new[] { ("findgames.progress", "progress"), ("findgames.found", "found"), ("findgames.done", "done") })
+            if (!appJsCode.Contains($"on('{ev}', (d) => {{ if (typeof qsEvent === 'function' && qsEvent('{ev}', d)) return; findEvent('{kind}', d); }});", StringComparison.Ordinal)) hookOff.Add(ev);
+        foreach (var (ev, before) in new[] { ("deploy.log", true), ("deploy.done", true), ("deploy.error", true), ("agentupdate.log", true), ("agentupdate.done", true),
+                     ("agentupdate.error", true), ("server.log", false), ("server.done", false), ("server.error", false) })
+        {
+            string observer = $"on('{ev}', (d) => typeof qsEvent === 'function' && qsEvent('{ev}', d));";
+            int obsAt = appJsCode.IndexOf(observer, StringComparison.Ordinal);
+            var others = OnAll(ev).Where(at => at != obsAt).ToList();
+            if (obsAt < 0 || others.Count == 0 || QsCount(appJsCode, System.Text.RegularExpressions.Regex.Escape(observer)) != 1
+                || (before ? others.Any(at => at < obsAt) : others.Any(at => at > obsAt))) hookOff.Add(ev);
+        }
+        string ingestJs = JsFunction(appJs, "function ingestStatus(st) {");
+        string qsInstallEventJs = JsFunction(qsJs, "function qsInstallEvent(name, d) {"), qsAccountEventJs = JsFunction(qsJs, "function qsAccountEvent(name, d) {");
+        Check("quick start page: every call app.js makes of quickstart.js (quickStart, qsTick, qsEvent, qsResume, qsOwnsInstall) is guarded by typeof … === 'function' — before it on its line, or heading the block it stands in; 19 events reach qsEvent — install.* / account.* / findgames.* first in their handlers (left to it when it answers true: the run's own install, account or search), deploy.* / agentupdate.* observed before their handlers, server.* after theirs; applyInit and ingestStatus queue the runner's look (qsTickSoon)"
+              + (hookBare.Count > 0 ? " — unguarded: " + string.Join(" | ", hookBare) : "") + (hookOff.Count > 0 ? " — not hooked so: " + string.Join(", ", hookOff) : ""),
+            hookBare.Count == 0 && hookOff.Count == 0
+            && QsCount(appJsCode, @"(?<![\w.$])qsEvent\(") == 19
+            && QsCount(applyInitJs, @"\bqsTickSoon\(\);") == 1 && InOrder(applyInitJs, "qsTickSoon();", "if (srvBooted && srvTarget() !== prevTarget) { srvRetarget(); return true; }")
+            && QsCount(ingestJs, @"\bqsTickSoon\(\);") == 2
+            && appJsCode.Contains("if (qsTickQueued || typeof qsTick !== 'function') return;", StringComparison.Ordinal)
+            && appJsCode.Contains("Promise.resolve().then(() => { qsTickQueued = false; if (typeof qsTick === 'function') qsTick(); })", StringComparison.Ordinal)
+            && applyInitJs.Contains("if (d.quickstart && typeof d.quickstart === 'object') S.qsPlan = d.quickstart.plan && typeof d.quickstart.plan === 'object' ? d.quickstart.plan : null;", StringComparison.Ordinal)
+            && qsJs.Contains("function qsOwnsInstall() { return !!(S.qs && S.qs.inst); }", StringComparison.Ordinal)
+            && InOrder(qsInstallEventJs, "const inst = S.qs.inst;", "if (!inst) return false;")
+            && InOrder(qsAccountEventJs, "const a = S.qs.acct;", "if (!a || !d || String(d.version) !== String(a.version)) return false;"));
+
+        // I57's writers in quickstart.js: every rpc it calls names one of the existing rpcs below (a literal name, never one
+        // made up at run time); the host only through server.setAddress and then mode.set {player} — one function,
+        // qsWriteHost —, admin.login and localagent.enter, and the agent installs (their ApplyInstalledAgent); the game
+        // through install.start; the server jobs through runServerJob (qsRunJob: a download, a Prepare, the pathfinding
+        // switch, a start, an admin's account) and the chain (chainAdd: a re-point, then the download — the re-point alone
+        // where a check says the folder holds that server already); its own settings through settings.save once. It never
+        // sets the mode, the host or the admin state itself (applyInit does).
+        string[] qsRpcAllowed =
+        {
+            "install.start", "install.cancel", "install.inspectGame", "install.findGames", "install.findGamesStop", "settings.save",
+            "server.setAddress", "mode.set", "admin.login", "localagent.enter", "localagent.install", "localagent.update", "localagent.status",
+            "localagent.folderCheck", "localagent.firewall", "localagent.stop", "localagent.start", "agent.install", "agent.config.set", "ssh.probe",
+            "account.create", "server.test", "server.fetch.cancel", "servers.save", "app.init", "fiddler.trustCert", "pickFile", "pickFolder", "shell.openUrl",
+            "quickstart.get", "quickstart.save", "quickstart.clear", "quickstart.check", "quickstart.install", "quickstart.restart", "quickstart.publicIp", "quickstart.reach",
+        };
+        var qsRpcNames = System.Text.RegularExpressions.Regex.Matches(qsJsCode, @"(?<![\w.$])rpc\(\s*'([^']*)'").Select(m => m.Groups[1].Value).ToList();
+        var qsRpcOther = qsRpcNames.Where(n => !qsRpcAllowed.Contains(n)).Distinct().ToList();
+        var qsJobKinds = System.Text.RegularExpressions.Regex.Matches(qsJsCode, @"\bqsRunJob\(st, '([^']*)'").Select(m => m.Groups[1].Value).ToList();
+        string qsWriteHostJs = JsFunction(qsJs, "async function qsWriteHost(address, agentPort) {");
+        string qsRunJobJs = JsFunction(qsJs, "async function qsRunJob(st, kind, sv, extra) {");
+        int QsRpcs(string name) => qsRpcNames.Count(n => n == name);
+        var qsStateSet = System.Text.RegularExpressions.Regex.Matches(qsJsCode, @"\bS\.(?:mode|serverConfigured|serverAddr|admin|settings)(?:\.\w+)*\s*=(?!=)").Select(m => m.Value.Trim()).ToList();
+        Check("quick start page (I57): quickstart.js calls only existing rpcs, each by a literal name — the host only through server.setAddress and then mode.set {player} (one function, qsWriteHost), admin.login, localagent.enter and the agent installs; the game through install.start; the server jobs through runServerJob (a download, a Prepare, the pathfinding switch, a start, an admin's account) and the chain (chainAdd); its settings through settings.save — each writer named once; it never sets the mode, the host or the admin state itself"
+              + (qsRpcOther.Count > 0 ? " — other rpcs: " + string.Join(", ", qsRpcOther) : "") + (qsStateSet.Count > 0 ? " — sets: " + string.Join(" | ", qsStateSet) : ""),
+            qsRpcNames.Count > 0 && qsRpcOther.Count == 0 && qsStateSet.Count == 0
+            && QsCount(qsJsCode, @"(?<![\w.$])rpc\(") == qsRpcNames.Count
+            && new[] { "server.setAddress", "mode.set", "admin.login", "localagent.enter", "localagent.install", "agent.install", "localagent.update", "install.start",
+                       "settings.save", "account.create", "agent.config.set", "servers.save", "quickstart.save", "quickstart.clear", "quickstart.restart" }.All(n => QsRpcs(n) == 1)
+            && InOrder(qsWriteHostJs, "await rpc('server.setAddress', { address, agentPort: agentPort > 0 ? agentPort : 0 });", "const d = await rpc('mode.set', { mode: 'player' });", "applyInit(d);")
+            && qsJs.Contains("const r = await rpc('admin.login', { address, token, agentPort });", StringComparison.Ordinal)
+            && qsJs.Contains("const r = await rpc('localagent.enter');", StringComparison.Ordinal)
+            && qsJs.Contains("try { await rpc('localagent.install', qsWinPayload()); }", StringComparison.Ordinal)
+            && qsJs.Contains("try { await rpc('agent.install', qsLxPayload()); }", StringComparison.Ordinal)
+            && qsJs.Contains("await rpc('install.start', payload);", StringComparison.Ordinal)
+            && qsJs.Contains("const d = await rpc('settings.save', Object.assign({}, st, want));", StringComparison.Ordinal)
+            && QsCount(qsJsCode, @"\brunServerJob\(") == 1 && qsRunJobJs.Contains("await runServerJob(kind, sv, extra);", StringComparison.Ordinal)
+            && qsJobKinds.Count > 0 && qsJobKinds.All(k => k is "fetch" or "setup" or "pathfinding" or "hotpatch" or "start" or "accountcreate")
+            && QsCount(qsJsCode, @"\bqsRunJob\(") == qsJobKinds.Count + 1
+            && QsCount(qsJsCode, @"\bchainAdd\(") == 1
+            && qsJs.Contains("chainAdd({ version: sv, dir: x.dir, repoint: true, fetch: qsFolderKind(sv, x.dir) !== 'stack', stop: false });", StringComparison.Ordinal));
+
+        // The plan on disk (I57): every quickstart.save — and every quickstart.check, which carries the plan too — goes
+        // through ONE function, qsPlanForDisk, which copies an allow-list field by field: no spread, no Object.assign, no
+        // JSON copy of what it is handed, and none of the words of a secret in it. What is typed to log in stays in page
+        // memory (S.qs.mem): the token leaves it once admin.login took it. The plan saved before each install the backend
+        // gates on the stored plan (WSL's prompt, Docker Desktop, WSL's memory limit) and before the game's firewall rules;
+        // Docker Desktop's licence accepted only when the plan says so. A run starts with id "" (the store makes one).
+        string qsPlanJs = JsFunction(qsJs, "function qsPlanForDisk(p) {");
+        var qsPlanSecrets = System.Text.RegularExpressions.Regex.Matches(CodeOf(qsPlanJs), @"(?i)password|passphrase|sudo|token|secret|\bmem\b").Select(m => m.Value).Distinct().ToList();
+        string qsSetupJs = JsFunction(qsJs, "async function qsSetup(st, what, extra) {"), qsFirewallJs = JsFunction(qsJs, "async function qsPumpFirewall(st) {");
+        string qsPlanOfJs = JsFunction(qsJs, "function qsPlanOf(d) {");
+        Check("quick start page: every quickstart.save and quickstart.check payload carries the plan through ONE function, qsPlanForDisk, an allow-list copy field by field — no spread, Object.assign or JSON copy of what it is handed, no word of a secret in it; the plan of the wizard (qsPlanOf) asks page memory only whether a token was typed; the token typed leaves page memory once admin.login took it; the plan is saved right before WSL's prompt, Docker Desktop's install, WSL's memory limit and the game's firewall rules; Docker's licence accepted only when the plan says so; a run starts with id \"\""
+              + (qsPlanSecrets.Count > 0 ? " — qsPlanForDisk names: " + string.Join(", ", qsPlanSecrets) : ""),
+            qsPlanJs.Length > 0 && QsCount(qsJsCode, @"\bfunction qsPlanForDisk\(") == 1 && qsPlanSecrets.Count == 0
+            && QsCount(CodeOf(qsPlanOfJs), @"\bS\.qs\.mem\b") == 1 && qsPlanOfJs.Contains("(!!S.qs.mem.token.trim() || tokenAppliesTo(server.address))", StringComparison.Ordinal)
+            && !qsPlanJs.Contains("...", StringComparison.Ordinal) && !qsPlanJs.Contains("Object.assign", StringComparison.Ordinal) && !qsPlanJs.Contains("JSON.", StringComparison.Ordinal)
+            && qsPlanJs.Contains("return {", StringComparison.Ordinal)
+            && QsRpcs("quickstart.save") == 1 && qsJs.Contains("r = await rpc('quickstart.save', { plan: qsPlanForDisk(p) });", StringComparison.Ordinal)
+            && QsRpcs("quickstart.check") == 1 && qsJs.Contains("rpc('quickstart.check', Object.assign({ plan: qsPlanForDisk(plan) }, facts ? { box: facts } : {}))", StringComparison.Ordinal)
+            && InOrder(qsJs, "const r = await rpc('admin.login', { address, token, agentPort });", "S.qs.mem.token = '';")
+            && qsJs.Contains("const QS_PLAN_GATED = ['wsl', 'wslUpdate', 'docker', 'wslMemory'];", StringComparison.Ordinal)
+            && InOrder(qsSetupJs, "if (QS_PLAN_GATED.includes(what)) await qsSaveNow();", "await rpc('quickstart.install', Object.assign({ what }, extra || {}));")
+            && InOrder(qsFirewallJs, "if (rt.act[st.id] || !qsFreshLa()) return;", "await qsSaveNow();", "const r = await rpc('localagent.firewall', { gamePorts: true });")
+            && qsJs.Contains("qsSetup(st, install ? 'docker' : 'dockerStart', install && n.acceptLicence === true ? { acceptLicence: true } : {});", StringComparison.Ordinal)
+            && QsCount(qsJsCode, @"\bacceptLicence: true\b") == 1
+            && qsJs.Contains("p.id = ''; p.state = 'running'; p.startedAt = new Date().toISOString(); p.steps = {};", StringComparison.Ordinal));
+
+        // `default` progress (I57, I33): a Prepare goes out from ONE place (qsPumpPrepare, through runServerJob), with
+        // `default` only for a stack this run downloaded (fetchedByRun) whose raw status entry says bootstrapped: false —
+        // `keep` for every other, or the fixes alone when Custom chose them. fetchedByRun is set by one function, called
+        // only where a download of the run's own is proven: its first line (the agent writes none for a download it refused
+        // before it began — a server already in the folder) or its end done — never where one is merely asked (the package
+        // step's chain, qsRunJob); a stack the agent has a Prepare on record for (provisioned, or a progress) is never taken
+        // as one. The chain an install leaves runs only re-points and downloads (never a Prepare).
+        string qsPrepareJs = JsFunction(qsJs, "function qsPumpPrepare(st) {");
+        string qsServerEndJs = JsFunction(qsJs, "function qsServerEnd(ok, d) {"), qsServerLogJs = JsFunction(qsJs, "function qsServerLog(d) {");
+        string qsPackageJs = JsFunction(qsJs, "function qsPumpPackage(st) {");
+        Check("quick start page: a Prepare (server.setup) goes out from ONE place, qsPumpPrepare, through runServerJob — `default` only for a stack this run downloaded (fetchedByRun) whose raw status entry says bootstrapped: false, `keep` for every other (the fixes alone when Custom chose them); fetchedByRun is set by one function, called only on a download of the run's own that wrote its first line (qsServerLog) or ended done (qsServerEnd) — never where one is merely asked (the package step's chain, qsRunJob) — and taken back for a stack with a Prepare on record (provisioned, or a progress); neither quickstart.js nor the chain an install leaves sends a Prepare any other way (the chain runs re-points and downloads alone)",
+            InOrder(qsPrepareJs, "const f = srvFacts(sv), raw = S.srv.versions[sv];",
+                "if (x.fetchedByRun && raw && !(raw.provisioned === false && raw.progress == null)) { x.fetchedByRun = false; qsSaveSoon(); }",
+                "const progress = x.progress === 'default' && x.fetchedByRun && raw && raw.bootstrapped === false ? 'default' : x.progress === 'fixes' ? 'fixes' : 'keep';",
+                "qsRunJob(st, 'setup', sv, pathfinding === null ? { progress } : { progress, pathfinding });")
+            && qsJobKinds.Count(k => k == "setup") == 1
+            && !System.Text.RegularExpressions.Regex.IsMatch(qsJsCode, @"'server\.(?:setup|provision)'|\bprovision\b")
+            && QsCount(qsJsCode, @"\.fetchedByRun = true\b") == 1 && qsJs.Contains("if (x && !x.fetchedByRun) { x.fetchedByRun = true; qsSaveSoon(); }", StringComparison.Ordinal)
+            && QsCount(qsJsCode, @"\bqsFetchedByRun\(") == 3
+            && qsServerEndJs.Contains("if (ok && kind === 'fetch' && rt && !rt.stopped) qsFetchedByRun(v);", StringComparison.Ordinal)
+            && qsServerLogJs.Contains("if (kind === 'fetch' && v && !S.qs.rt.stopped) qsFetchedByRun(v);", StringComparison.Ordinal)
+            && qsPackageJs.Length > 0 && !qsPackageJs.Contains("qsFetchedByRun(", StringComparison.Ordinal) && !qsRunJobJs.Contains("qsFetchedByRun(", StringComparison.Ordinal)
+            && QsCount(appJsCode, @"\brunChained\(c, '") == 2 && appJsCode.Contains("runChained(c, 'relocate', step, { dir: step.dir, mode: 'repoint' });", StringComparison.Ordinal)
+            && appJsCode.Contains("else if (step.fetch) runChained(c, 'fetch', step);", StringComparison.Ordinal));
+
+        // The certificate step's own button sends fiddler.trustCert (nothing else); no Windows 11 note (wizWindows11Note, the
+        // owner's decision: PLAY still asks); no advertised host name, only ''; an agent already on this PC learns Relic's
+        // 7zr.exe through agent.config.set {set: {GIO_7Z}} — that one key.
+        string qsTrustJs = QsAction("qsTrustCert");
+        Check("quick start page: the certificate step that needs the player offers Trust the certificate (qsTrustCert), which sends fiddler.trustCert and nothing else; quickstart.js never calls wizWindows11Note, never sends advertisedHost other than '', and sends agent.config.set only as {set: {GIO_7Z: <Relic's 7zr.exe>}}",
+            qsJs.Contains("case 'cert': if (!S.fiddler.certTrusted) qsSetState(st.id, 'needs', t('qs.note.certNo')); return;", StringComparison.Ordinal)
+            && qsJs.Contains("if (s === 'needs' && st.kind === 'cert') acts.push(b('qsTrustCert', T('qs.act.trustCert'), ''));", StringComparison.Ordinal)
+            && qsTrustJs.Contains("const r = await rpc('fiddler.trustCert');", StringComparison.Ordinal) && QsCount(CodeOf(qsTrustJs), @"\brpc\(") == 1
+            && !System.Text.RegularExpressions.Regex.IsMatch(qsJsCode, @"\bwizWindows11Note\b")
+            && QsCount(qsJsCode, @"\badvertisedHost\b") == 2 && QsCount(qsJsCode, @"\badvertisedHost: ''") == 2
+            && QsRpcs("agent.config.set") == 1 && qsJs.Contains("rpc('agent.config.set', { set: { GIO_7Z: path } })", StringComparison.Ordinal));
+
+        // S8 in the runner: a refusal "close Fiddler first" is waited out only while the game install's own
+        // Fiddler (or Shortcut) step runs — asked again every 10 s, 30 minutes at most, its note saying why — and is the
+        // step's failure at any other time (the player's own Fiddler); the agent's entry, install, update and restart and
+        // Docker Desktop's install and start go through that one rule; the agent's restart never stops the agent while that
+        // step runs (its start would be refused), and an agent it stopped is started again whatever a status says (a stopped
+        // agent answers none). And no firewall prompt of a resumed run before a status of the agent on this PC read since
+        // says a rule is missing (S7: never a second permission prompt for rules there).
+        string qsFiddlerJs = JsFunction(qsJs, "function qsFiddlerWait(st, message) {"), qsAgentRestartJs = JsFunction(qsJs, "async function qsPumpAgentRestart(st) {");
+        string qsSetupFnJs = JsFunction(qsJs, "async function qsSetup(st, what, extra) {");
+        var fiddlerUsers = new[] { "async function qsPumpAgentUpdate(st) {", "async function qsPumpAgentWindows(st) {", "async function qsPumpAgentRestart(st) {" }
+            .Where(h => !JsFunction(qsJs, h).Contains("if (!qsFiddlerWait(st, e.message)) qsSetState(st.id, 'failed', e.message);", StringComparison.Ordinal)).ToList();
+        Check("quick start page (S8): a refusal \"close Fiddler first\" is waited out only while the game install's own Fiddler or Shortcut step runs — asked again every 10 s (QS_FIDDLER_RETRY_MS), 30 minutes at most (QS_FIDDLER_MS), its note qs.note.fiddlerWait — and is the step's failure otherwise; the agent's entry, install, update and restart and Docker Desktop's install and start go through qsFiddlerWait; the agent's restart never stops the agent while that step runs and starts one it stopped again whatever a status says"
+              + (fiddlerUsers.Count > 0 ? " — not through it: " + string.Join(", ", fiddlerUsers) : ""),
+            qsJs.Contains("const QS_FIDDLER_MS = 30 * 60 * 1000;", StringComparison.Ordinal) && qsJs.Contains("const QS_FIDDLER_RETRY_MS = 10000;", StringComparison.Ordinal)
+            && InOrder(qsFiddlerJs, "if (message !== t('backend.closeFiddlerFirst')) return false;", "if (ph !== 'Fiddler' && ph !== 'Shortcut') return false;",
+                "if (Date.now() - first > QS_FIDDLER_MS) return false;", "rt.retryAt[st.id] = Date.now() + QS_FIDDLER_RETRY_MS;", "qsSetNote(st.id, t('qs.note.fiddlerWait'));", "return true;")
+            && qsSetupFnJs.Contains("if ((what === 'docker' || what === 'dockerStart') && qsFiddlerWait(st, e.message)) return;", StringComparison.Ordinal)
+            && fiddlerUsers.Count == 0
+            && qsJs.Contains("const qsFiddlerPhase = () => { const ph = S.qs.inst && S.qs.inst.phase; return ph === 'Fiddler' || ph === 'Shortcut'; };", StringComparison.Ordinal)
+            && InOrder(qsAgentRestartJs, "if (rt.agentDown) {", "await rpc('localagent.start');", "if (qsFiddlerPhase()) { qsSetNote(st.id, t('qs.note.fiddlerWait')); return; }",
+                "await rpc('localagent.stop');", "rt.agentDown = true;", "await rpc('localagent.start');", "rt.agentDown = false;")
+            && qsJs.Contains("const qsFreshLa = () => { const rt = S.qs.rt; return !rt || !rt.resumed || S.qs.la.n > rt.laN || Date.now() - rt.hintAt > QS_HINT_MS; };", StringComparison.Ordinal));
+
+        // Stop, Restart Windows now and the end: Stop starts nothing more — not the downloads an agent install it stopped
+        // leaves either (the install's deploy.done hands its handler no chain then), nor the ones queued in a chain already
+        // built (S.fetchChain dropped: a job of it that runs ends on its own) —, pauses the game download, stops a server
+        // download (paused, never failed: the run takes it up where it stopped) and saves the plan paused; a failure of the
+        // chain's job never takes back a package step the facts found done (a download the agent refused over the server
+        // already in its folder); Restart Windows now — Stop dead meanwhile — drops the chain too, pauses the game install and
+        // waits for its end, stops a server download and waits for its end, saves the plan waitingRestart and only then asks
+        // quickstart.restart (again while the backend has not armed the resume yet); a restart Windows did not make
+        // (refused, or held by a program) is taken back: the run going on, what it paused taken up again, its question asked
+        // again. Continue on the Done page saves the server in the start screen's list — a server the run reached alone, no
+        // token, the agent port only when it is not 18080, a name of 40 characters at most — and then clears the plan.
+        string qsStopJs = JsFunction(qsJs, "async function qsStopRun(note) {"), qsRestartJs = JsFunction(qsJs, "async function qsRestartGo() {");
+        string qsFinishJs = JsFunction(qsJs, "async function qsFinish() {"), qsDeployJs = JsFunction(qsJs, "function qsDeployEvent(name, d) {");
+        string qsRestartHeldJs = JsFunction(qsJs, "function qsRestartHeld(rt) {"), qsRestartBackJs = JsFunction(qsJs, "function qsRestartBack(rt, note) {");
+        Check("quick start page: Stop starts nothing more (an agent install it stopped hands its handler no chain of downloads; a chain already built is dropped, S.fetchChain = null), pauses the game download (install.cancel), stops a server download (server.fetch.cancel — that step paused, not failed) and saves the plan paused; a failure of the chain's job leaves a package step the facts found done as it is; Restart Windows now (Stop dead meanwhile) drops the chain too, pauses the game install and waits for it, stops a server download and waits for it, saves the plan waitingRestart and only then sends quickstart.restart (asked again while the resume is not armed: backend.qs.restartUnsaved); a restart Windows did not make is taken back (QS_RESTART_HELD_MS) — the run going on, what it paused taken up again; the Done page's Continue sends servers.save {address, mode, label, agentPort: 0 for 18080} — a server the run reached alone, no token — and then quickstart.clear",
+            InOrder(qsStopJs, "rt.stopped = true;", "S.fetchChain = null;", "rpc('install.cancel')", "rt.fetchCancelled[String(S.srvJob.version)] = true;", "rpc('server.fetch.cancel', { version: S.srvJob.version })", "p.state = 'paused';", "await qsSaveNow();")
+            && qsDeployJs.Contains("if (rt.stopped && d && typeof d === 'object') { d.chain = []; d.fetch = []; }", StringComparison.Ordinal)
+            && qsServerEndJs.Contains("const cancelled = !ok && kind === 'fetch' && !!rt && (!!rt.fetchCancelled[v]", StringComparison.Ordinal)
+            && qsServerEndJs.Contains("else if (cancelled) qsSetState(st.id, 'paused', '');", StringComparison.Ordinal)
+            && qsServerEndJs.Contains("} else if (!ok && (kind === 'fetch' || kind === 'relocate') && rt && qsHas(`s.${v}.package`) && !qsOkState(qsRec(`s.${v}.package`).state)", StringComparison.Ordinal)
+            && InOrder(qsRestartJs, "if (!rt || !p || rt.restarting || rt.stopped) return;", "rt.restarting = true;", "S.fetchChain = null;", "rpc('install.cancel')", "await waitFor(() => !S.qs.inst);",
+                "rpc('server.fetch.cancel', { version: j.version })", "await waitFor(() => !j.running);", "if (S.qs.rt !== rt || rt.stopped) return;",
+                "p.state = 'waitingRestart';", "await qsSaveNow();", "try { await rpc('quickstart.restart', {}); return; }", "if (e.message === t('backend.qs.restartUnsaved') && i < 5)", "qsRestartBack(rt, ")
+            && qsJs.Contains("qsRestartGo: () => { const rt = S.qs.rt; qsRestartGo().then(() => { if (rt && rt.restarting) qsRestartHeld(rt); }); },", StringComparison.Ordinal)
+            && InOrder(qsRestartHeldJs, "if (S.qs.rt !== rt || !rt.restarting || !p || p.state !== 'waitingRestart') return;", "qsRestartBack(rt, t('qs.note.restartHeld'));", "}, QS_RESTART_HELD_MS);")
+            && InOrder(qsRestartBackJs, "rt.restarting = false;", "p.state = 'running';", "qsSaveNow();")
+            && qsJs.Contains("data-act=\"qsStopAsk\" ${rt.stopped || rt.restarting ? 'disabled' : ''}", StringComparison.Ordinal)
+            && InOrder(qsFinishJs, "const connected = qsDoneConnected();", "const agentPort = p.server.agentPort && p.server.agentPort !== 18080 ? p.server.agentPort : 0;", "if (connected) {",
+                "const r = await rpc('servers.save', { address, mode: admin ? 'admin' : 'player', label: qsSavedLabel(), agentPort });",
+                "const r = await rpc('quickstart.clear', {});")
+            && qsJs.Contains("hostOf(a) === '127.0.0.1' ? t('qs.done.labelThisPc') : hostOf(a).slice(0, 40); };", StringComparison.Ordinal)
+            && !System.Text.RegularExpressions.Regex.IsMatch(CodeOf(qsFinishJs), @"\btoken\b"));
+
+        // The account helpers judge the snapshot they are handed (Quick Start's Test of a server it is not connected to) by
+        // the configured server's rules; a snapshot handed as null or undefined is none, never the configured server's.
+        Check("quick start page: acctOffer, acctUp and acctLimit take an optional snapshot (server.test's agent.status) and read the configured server's public snapshot only when none is handed — null or undefined handed is none",
+            new[] { "function acctOffer(id, snap) {", "function acctUp(id, snap) {", "function acctLimit(id, snap) {" }
+                .All(h => JsFunction(appJs, h).Contains("const pub = arguments.length > 1 ? snap : S.pub.status;", StringComparison.Ordinal))
+            && qsJs.Contains("const offer = acctOffer(sv, qsSnap(d));", StringComparison.Ordinal) && qsJs.Contains("else if (!acctUp(sv, snap))", StringComparison.Ordinal));
+
+        // The folder default (I36): stackFolder(s, win, local, root) — beside the games for the agent on THIS PC (the install
+        // form's Windows target, Quick Start, the folder dialog while the admin server is that agent), C:\relic_servers for a
+        // Windows agent on another PC, /home on Linux — the one default of the install form, Quick Start and the dialog.
+        string stackFolderJs = JsFunction(appJs, "function stackFolder(s, win, local, root) {");
+        var sfCallArgs = System.Text.RegularExpressions.Regex.Matches(appJsCode + "\n" + qsJsCode, @"(?<![\w.$])stackFolder\(([^()]*(?:\([^()]*\)[^()]*)*)\)")
+            .Select(m => m.Groups[1].Value).Where(a => !a.StartsWith("s, win, local, root", StringComparison.Ordinal)).ToList();
+        string[] sfCallsWanted =
+        {
+            "stack, srvWindows(), !!(S.agentBuild.local && S.agentBuild.local.adminServer)", "s, win, win", "s, tg === 'windows', tg === 'windows'",
+            "s, a.target === 'windows', a.target === 'windows'", "row, true, true, qsRootOf(d)", "row, false",
+        };
+        Check("folder default: stackFolder(s, win, local, root) — the agent on this PC beside the games (<root>\\servers\\<folder>, the fallback <drive>:\\relic_servers for a root it cannot take), a Windows agent elsewhere C:\\relic_servers, Linux /home — is the one default of the install form's Windows target, the folder dialog (local while agent.build's local.adminServer says the admin server is the agent on this PC) and Quick Start; no call names a Windows target without saying whether it is this PC"
+              + $" — calls: {string.Join(" | ", sfCallArgs)}",
+            stackFolderJs.Length > 0 && sfCallArgs.OrderBy(x => x, StringComparer.Ordinal).SequenceEqual(sfCallsWanted.OrderBy(x => x, StringComparer.Ordinal))
+            && stackFolderJs.Contains("if (!win) return `/home/${s.folder}`;", StringComparison.Ordinal)
+            && stackFolderJs.Contains("if (!local) return `C:\\\\relic_servers\\\\${s.folder}`;", StringComparison.Ordinal));
+
+        // The uninstall of the agent on this PC offers its firewall box while either the agent's rule or the game ports' rules
+        // are there, and lists the rules left in place with the line that removes each; the start screen's Save on the Player
+        // tab keeps a saved host's agent port, and its Save row saves nothing for another host than the one it was opened for
+        // (the name filled again for the new host).
+        string saveGoAllJs = ActionBody("loginSaveGo");
+        Check("uninstall / saved servers: the uninstall's firewall box is offered while the agent's rule or the game ports' rules are there (firewallRule || serverRules), and every rule left in place is listed with its removal line (keptRules → localAgent.keptRules.cmd); Save on the Player tab sends the saved host's agent port (0 for a host not saved), and the Save row saves nothing for another host than the one it was opened for — the name filled again for that host",
+            appJsCode.Contains("checkbox: (st.firewallRule || st.serverRules) ? { label: t('confirm.localAgentUninstall.firewall', { port: st.port }), checked: false } : null,", StringComparison.Ordinal)
+            && appJsCode.Contains("rows: keptRules.map((n) => ({ label: n, value: t('localAgent.keptRules.cmd', { rule: n }), copy: true })) };", StringComparison.Ordinal)
+            && TextKnownFor("localAgent.keptRules.title") && TextKnownFor("localAgent.keptRules.cmd") && UiText("localAgent.keptRules.cmd").Contains("{rule}", StringComparison.Ordinal)
+            && saveGoAllJs.Contains("const agentPort = mode === 'admin' ? loginAgentPort() : (loginPortFor(address) || 0);", StringComparison.Ordinal)
+            && InOrder(saveGoAllJs, "if (hostOf(address) !== sv.host) {", "S.login.saving = loginSavingFor(address);", "return;", "rpc('servers.save'")
+            && JsFunction(appJs, "function loginSavingFor(address) {").Contains("host: hostOf(address) };", StringComparison.Ordinal));
+
+        // Every literal text key quickstart.js and the start screen's Quick Start parts name resolves (en.json, or a round's
+        // fragment before the merge); the reach check's answer names its text by key (ReachResult.TextKey): every key the
+        // Core gives has its own case in the page (the last, failOutside, the default's).
+        int keptRulesAt = appJsCode.IndexOf("const keptRules = ", StringComparison.Ordinal);
+        string keptRulesJs = keptRulesAt < 0 ? "" : appJsCode.Substring(keptRulesAt, Math.Min(600, appJsCode.Length - keptRulesAt));
+        var qsPageKeys = System.Text.RegularExpressions.Regex.Matches(qsJsCode + "\n" + lgQsJs + "\n" + lgQsLinkJs + "\n" + qsDiscardAskJs + "\n" + keptRulesJs,
+                @"(?<![\w.$])[tT]\('([A-Za-z0-9_.\-]+)'").Select(m => m.Groups[1].Value).Distinct().Where(k => !TextKnownFor(k)).ToList();
+        string qsReachJs = JsFunction(qsJs, "function qsReachText(r, ip, agentPort) {");
+        var reachKeys = new[] { "ok", "partial", "fail" }.SelectMany(v => new[] { true, false }.Select(inside => Relic.Core.Setup.ReachCheck.TextKey(v, inside))).Distinct().ToList();
+        var reachOff = reachKeys.Where(k => !(qsReachJs.Contains($"case '{k}': return t('{k}', v);", StringComparison.Ordinal)
+            || (k == "qs.reach.failOutside" && qsReachJs.Contains("default: return t('qs.reach.failOutside', v);", StringComparison.Ordinal))) || !TextKnownFor(k)).ToList();
+        Check("quick start page: every literal text key of quickstart.js and of the start screen's Quick Start parts resolves (en.json, or the round's fragments before the merge); the reach answer's text key (ReachCheck.TextKey of every verdict, inside or not) has its own case in qsReachText"
+              + (qsPageKeys.Count > 0 ? " — unknown keys: " + string.Join(", ", qsPageKeys) : "") + (reachOff.Count > 0 ? " — reach keys not drawn: " + string.Join(", ", reachOff) : ""),
+            qsJs.Length > 0 && qsPageKeys.Count == 0 && reachKeys.Count == 5 && reachOff.Count == 0);
+
+        // ── played with node (when it is on PATH, as sameFolder is): stackFolder, qsPlanForDisk, qsStepsOf ──
+        // (what a script prints; null when there is no node to run it)
+        (bool Ended, string Out, string Err)? NodeRun(string script)
+        {
+            string file = Path.Combine(Path.GetTempPath(), "relic-qspage-" + Guid.NewGuid().ToString("n")[..8] + ".js");
+            try
+            {
+                File.WriteAllText(file, script, new UTF8Encoding(false));
+                var psi = new System.Diagnostics.ProcessStartInfo("node")
+                {
+                    UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
+                    StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8,
+                };
+                psi.ArgumentList.Add(file);
+                System.Diagnostics.Process? proc = null;
+                try { proc = System.Diagnostics.Process.Start(psi); }
+                catch { /* no node on PATH */ }
+                if (proc is null) return null;
+                using (proc)
+                {
+                    var err = proc.StandardError.ReadToEndAsync();
+                    string stdout = proc.StandardOutput.ReadToEnd();
+                    bool ended = proc.WaitForExit(30_000);
+                    if (!ended) { try { proc.Kill(true); } catch { /* gone already */ } }
+                    return (ended, stdout, ended ? err.Result.Trim() : "it did not end within 30 s");
+                }
+            }
+            finally { try { File.Delete(file); } catch { /* best effort */ } }
+        }
+        // stackFolder: each target (this PC, a Windows agent elsewhere, Linux), the fallback for a root holding a quote, a
+        // character outside printable ASCII (a tab, a DEL, a letter with a mark), more than 100 characters (the boundary at
+        // 100, counted without the separators typed after it) or lying inside Relic's own data folder (…\AppData\Local\Relic,
+        // which the uninstall deletes whole — a folder beside it is no such folder), a share, a blank root and none (the
+        // settings' games folder) — and every Windows folder it answers is one the install's own folder rule takes (a full
+        // path on a drive letter of this PC, no quote: AgentInstallPlan.IsWindowsDrivePath, core.deploy.dirQuotes), in
+        // printable ASCII.
+        string sfRoot100 = "D:\\" + new string('c', 97), sfRoot101 = "D:\\" + new string('b', 98), sfRoot120 = "D:\\" + new string('a', 117);
+        var sfdCases = new (string What, string Folder, bool Win, bool Local, string? Root, string Want)[]
+        {
+            ("this PC, a root with a space", "2.8_live", true, true, @"C:\Users\me\Relic Games", @"C:\Users\me\Relic Games\servers\2.8_live"),
+            ("this PC, a root holding ă", "2.8_live", true, true, @"C:\Users\Ană\Relic Games", @"C:\relic_servers\2.8_live"),
+            ("this PC, a root holding '", "2.8_live", true, true, @"C:\Users\O'Neil\Relic Games", @"C:\relic_servers\2.8_live"),
+            ("this PC, a root holding \" on E:", "2.8_live", true, true, "E:\\Jocuri \"noi\"", @"E:\relic_servers\2.8_live"),
+            ("this PC, a 120-character root on D:", "2.8_live", true, true, sfRoot120, @"D:\relic_servers\2.8_live"),
+            ("this PC, a 101-character root on D:", "2.8_live", true, true, sfRoot101, @"D:\relic_servers\2.8_live"),
+            ("this PC, a 100-character root", "2.8_live", true, true, sfRoot100, sfRoot100 + @"\servers\2.8_live"),
+            ("this PC, a 100-character root typed with a separator after it (counted without it)", "2.8_live", true, true, sfRoot100 + "\\", sfRoot100 + @"\servers\2.8_live"),
+            (@"this PC, D:\Games\", "2.8_live", true, true, @"D:\Games\", @"D:\Games\servers\2.8_live"),
+            (@"this PC, D:\Games\\ (two separators)", "2.8_live", true, true, @"D:\Games\\", @"D:\Games\servers\2.8_live"),
+            ("this PC, D:/Games/", "2.8_live", true, true, "D:/Games/", @"D:\Games\servers\2.8_live"),
+            ("this PC, a share (no drive letter)", "2.8_live", true, true, @"\\nas\share\games", @"C:\relic_servers\2.8_live"),
+            ("this PC, a tab in the root", "2.8_live", true, true, "C:\\Games\tRelic", @"C:\relic_servers\2.8_live"),
+            ("this PC, a DEL in the root (not printable)", "2.8_live", true, true, "D:\\Games\u007f", @"D:\relic_servers\2.8_live"),
+            ("this PC, a lower-case drive holding ă", "2.8_live", true, true, @"d:\Jocuri ă", @"D:\relic_servers\2.8_live"),
+            ("this PC, a lower-case drive kept as typed", "2.8_live", true, true, @"d:\games", @"d:\games\servers\2.8_live"),
+            // (Relic's own data folder: the uninstall deletes it whole — the servers' databases would go with it, I16)
+            ("this PC, a root inside Relic's own data folder", "2.8_live", true, true, @"C:\Users\me\AppData\Local\Relic\games", @"C:\relic_servers\2.8_live"),
+            ("this PC, Relic's data folder itself on D:, lower case, a separator after it", "2.8_live", true, true, @"D:\Users\me\appdata\local\relic\", @"D:\relic_servers\2.8_live"),
+            ("this PC, a folder beside Relic's data folder (…\\Local\\Relic Games)", "2.8_live", true, true, @"C:\Users\me\AppData\Local\Relic Games", @"C:\Users\me\AppData\Local\Relic Games\servers\2.8_live"),
+            ("this PC, the program folder (…\\Local\\Programs\\Relic\\…)", "2.8_live", true, true, @"C:\Users\me\AppData\Local\Programs\Relic\g", @"C:\Users\me\AppData\Local\Programs\Relic\g\servers\2.8_live"),
+            ("this PC, a blank root (the settings' games folder)", "2.8_live", true, true, "  ", @"E:\Relic Games\servers\2.8_live"),
+            ("this PC, no root handed (the settings' games folder)", "2.8_live", true, true, null, @"E:\Relic Games\servers\2.8_live"),
+            ("this PC, 3.2", "3.2_live", true, true, @"C:\Games\Relic", @"C:\Games\Relic\servers\3.2_live"),
+            ("a Windows agent on another PC", "2.8_live", true, false, @"D:\Games", @"C:\relic_servers\2.8_live"),
+            ("Linux", "2.8_live", false, false, @"D:\Games", "/home/2.8_live"),
+            ("Linux, this PC's flag set", "2.8_live", false, true, @"D:\Games", "/home/2.8_live"),
+        };
+        if (stackFolderJs.Length == 0) Check("folder default: app.js holds stackFolder(s, win, local, root), played with node", false);
+        else
+        {
+            // (a case without a root is called with three arguments, as the form's own calls are)
+            var sfRun = NodeRun(@"const S = { settings: { installRoot: 'E:\\Relic Games' } };" + "\n" + stackFolderJs + "\n}\n"
+                + "const cases = " + JsonSerializer.Serialize(sfdCases.Select(c => new object?[] { c.Folder, c.Win, c.Local, c.Root })) + ";\n"
+                + "process.stdout.write(JSON.stringify(cases.map((c) => c[3] === null ? stackFolder({ folder: c[0] }, c[1], c[2]) : stackFolder({ folder: c[0] }, c[1], c[2], c[3]))));\n");
+            if (sfRun is null) Console.WriteLine("        (skipped: no node on PATH — stackFolder is not played)");
+            else
+            {
+                string[]? sfGot = null;
+                try { sfGot = JsonSerializer.Deserialize<string[]>(sfRun.Value.Out); } catch (JsonException) { }
+                var sfOff = sfGot is null || sfGot.Length != sfdCases.Length ? new List<string>()
+                    : sfdCases.Select((c, i) => (c, got: sfGot[i])).Where(x => x.got != x.c.Want).Select(x => $"{x.c.What}: {x.got} (not {x.c.Want})").ToList();
+                var sfBadDir = sfGot is null || sfGot.Length != sfdCases.Length ? new List<string>()
+                    : sfdCases.Select((c, i) => (c, got: sfGot[i])).Where(x => x.c.Win && !(AgentInstallPlan.IsWindowsDrivePath(x.got)
+                        && x.got.IndexOfAny(new[] { '"', '\'' }) < 0 && x.got.All(ch => ch >= 0x20 && ch <= 0x7e))).Select(x => x.got).ToList();
+                Check("folder default (node): stackFolder answers <root>\\servers\\<folder> beside the games for the agent on this PC — the root's trailing separators dropped, '/' read as '\\', the settings' games folder for a blank or missing root —, <its drive>:\\relic_servers\\<folder> (C: without a drive letter) for a root holding a quote, a character outside printable ASCII (a tab, a DEL) or more than 100 characters (100 taken, 101 not, the separators typed after it not counted) or inside Relic's own data folder (…\\AppData\\Local\\Relic, deleted whole by the uninstall), C:\\relic_servers for a Windows agent on another PC, /home on Linux; every Windows folder it answers is one the install takes (a full drive-letter path, no quote, printable ASCII)"
+                      + (sfGot is null || sfGot.Length != sfdCases.Length ? " — node gave no answer: " + sfRun.Value.Err : "")
+                      + (sfOff.Count > 0 ? " — differ: " + string.Join("; ", sfOff) : "") + (sfBadDir.Count > 0 ? " — not a folder the install takes: " + string.Join(", ", sfBadDir) : ""),
+                    sfRun.Value.Ended && sfGot is not null && sfGot.Length == sfdCases.Length && sfOff.Count == 0 && sfBadDir.Count == 0);
+            }
+        }
+        // qsPlanForDisk and qsStepsOf: a plan with a secret planted under every name a secret goes by, at every level of it,
+        // goes through qsPlanForDisk without one — no such key, no such value — and with exactly the model's fields
+        // (QuickStartPlan, camelCase; updatedAt is the store's), as a plan the store takes whole (Problems: none; under 64 KiB;
+        // a long note cut to the page's length, within the store's); anything else handed to it — nothing, the wrong types —
+        // still gives the plan's shape, never a throw. Every step id qsStepsOf makes, for every kind of server, is one the
+        // store takes (capitals included: s.agentUpdate, s.agentRestart, s.agent7z, s.wslMemory).
+        string qsNoteMaxJs = System.Text.RegularExpressions.Regex.Match(qsJs, @"(?m)^const QS_NOTE_MAX = (\d+);").Value;
+        int qsNoteMax = int.TryParse(System.Text.RegularExpressions.Regex.Match(qsNoteMaxJs, @"\d+").Value, out int qsNoteMaxN) ? qsNoteMaxN : -1;
+        string qsStepsJs = JsFunction(qsJs, "function qsStepsOf(p, rt) {");
+        string planSecret = "planted-" + Guid.NewGuid().ToString("n");
+        if (qsPlanJs.Length == 0 || qsStepsJs.Length == 0 || qsNoteMax <= 0) Check("quick start page: quickstart.js holds qsPlanForDisk, qsStepsOf and QS_NOTE_MAX, played with node", false);
+        else
+        {
+            const string plantJs = """
+                const plant = (o) => Object.assign(o, { password: SECRET, passphrase: SECRET, sudoPassword: SECRET, sshPassword: SECRET, sshKeyPassphrase: SECRET,
+                  keyPassphrase: SECRET, token: SECRET, agentToken: SECRET, openKey: SECRET, secret: SECRET, mem: { token: SECRET, ssh: SECRET, acct: SECRET } });
+                const plan = plant({ id: '', state: 'running', express: false, startedAt: '2026-10-23T10:00:00.000Z', updatedAt: SECRET,
+                  game: plant({ installRoot: 'C:\\Games\\Relic', enhancements: false, fiddlerDecrypt: false, installCert: false, createShortcut: false, source: 'cdn',
+                    versions: [plant({ id: '2.8', from: 'download', voices: ['English(US)', 'Japanese'], localPath: '', replaceInstalledAt: '' }),
+                      plant({ id: '1.6', from: 'local', voices: [], localPath: 'D:\\Genshin 1.6', replaceInstalledAt: 'C:\\Old\\Genshin 1.6' })] }),
+                  server: plant({ kind: 'linux', address: 'box.example.com', agentPort: 18181, admin: true, reach: 'public', bindIp: '192.0.2.5', advertisedIp: '203.0.113.9',
+                    listen: '0.0.0.0:18181', keepEnv: true, firewall: true, autostart: false,
+                    ssh: plant({ host: 'box.example.com', port: 2222, user: 'deploy', keyPath: 'C:\\keys\\id_ed25519', hostKey: plant({ type: 'ssh-ed25519', fingerprint: 'SHA256:' + 'A'.repeat(43) }) }),
+                    versions: [plant({ id: '2.8', choice: 'download', dir: '/home/2.8_live', progress: 'default', pathfinding: false, fetchedByRun: true }),
+                      plant({ id: '3.2', choice: 'have', dir: '/srv/3.2_live', progress: 'keep', pathfinding: null, fetchedByRun: false })],
+                    installs: plant({ python: true, sevenZip: true, wsl: true, wslUpdate: true, docker: true, dockerStart: true, acceptLicence: true, wslMemoryGb: 20, agentUpdate: true }) }),
+                  account: plant({ name: 'traveller', create: { '2.8': plant({ template: 'pre-gaa' }), '3.2': plant({ template: 'fresh' }) } }),
+                  steps: { 's.agent': plant({ state: 'failed', note: 'x'.repeat(5000) }), 'g.2.8.get': plant({ state: 'done', note: '' }), 's.agentUpdate': plant({ state: 'pending', note: '' }) } });
+                const garbage = [null, undefined, {}, { game: 'x', server: 5, account: [], steps: 'y' }, { server: { versions: 'x', ssh: null, installs: 7 }, game: { versions: [null, 3, 'x'] } }];
+                const S = { stacks: [{ id: '1.6' }, { id: '2.8' }, { id: '3.2' }] };
+                const base = (kind, o) => ({ game: { versions: [{ id: '2.8', from: 'download' }, { id: '1.6', from: 'local' }, { id: '3.2', from: 'installed' }] },
+                  server: Object.assign({ kind, reach: 'local', firewall: false, installs: {}, versions: [{ id: '1.6' }, { id: '2.8' }, { id: '3.2' }] }, o || {}),
+                  account: { create: { '1.6': { template: 'fresh' }, '2.8': { template: 'pre-gaa' }, '3.2': { template: 'fresh' } } }, steps: {} });
+                const all = { python: true, sevenZip: true, agentUpdate: true, wsl: true, wslUpdate: false, docker: true, dockerStart: false, wslMemoryGb: 12 };
+                const plays = [
+                  qsStepsOf(base('windows', { reach: 'internet', firewall: true, installs: all }), { agentHere: false }),
+                  qsStepsOf(base('windows', { reach: 'lan', firewall: true, installs: Object.assign({}, all, { wsl: false, wslUpdate: true }) }), { agentHere: true }),
+                  qsStepsOf(base('linux', { reach: 'public' }), { agentHere: false }),
+                  qsStepsOf(base('existing'), { agentHere: false }),
+                ].map((list) => list.map((st) => st.id));
+                const shapes = garbage.map((g) => { try { const o = qsPlanForDisk(g); return Object.keys(o).join(','); } catch (e) { return 'threw: ' + e.message; } });
+                process.stdout.write(JSON.stringify({ plan: qsPlanForDisk(plan), shapes, plays }));
+                """;
+            var pdRun = NodeRun(qsNoteMaxJs + "\n" + qsPlanJs + "\n}\n" + qsStepsJs + "\n}\n" + "const SECRET = " + JsonSerializer.Serialize(planSecret) + ";\n" + plantJs + "\n");
+            if (pdRun is null) Console.WriteLine("        (skipped: no node on PATH — qsPlanForDisk and qsStepsOf are not played)");
+            else
+            {
+                JsonDocument? pdDoc = null;
+                try { pdDoc = JsonDocument.Parse(pdRun.Value.Out); } catch (JsonException) { }
+                using (pdDoc)
+                {
+                    static void QsPaths(JsonElement e, string at, HashSet<string> into, List<string> names)
+                    {
+                        if (e.ValueKind == JsonValueKind.Object)
+                            foreach (var prop in e.EnumerateObject()) { into.Add(at + "." + prop.Name); names.Add(prop.Name); QsPaths(prop.Value, at + "." + prop.Name, into, names); }
+                        else if (e.ValueKind == JsonValueKind.Array)
+                            foreach (var item in e.EnumerateArray()) QsPaths(item, at + "[]", into, names);
+                    }
+                    string pageOut = pdDoc is not null && pdDoc.RootElement.TryGetProperty("plan", out var pagePlan) ? pagePlan.GetRawText() : "";
+                    var pagePaths = new HashSet<string>(StringComparer.Ordinal); var pageNames = new List<string>();
+                    if (pageOut.Length > 0) QsPaths(pdDoc!.RootElement.GetProperty("plan"), "$", pagePaths, pageNames);
+                    var secretNames = pageNames.Where(n => System.Text.RegularExpressions.Regex.IsMatch(n, "(?i)password|passphrase|sudo|token|secret|openkey|^mem$")).Distinct().ToList();
+                    Relic.Core.Setup.QuickStartPlan? model = null; string modelJson = ""; List<string> modelBad = new() { "not read" };
+                    try
+                    {
+                        model = Relic.Core.Setup.QuickStartPlan.FromJson(pageOut).Normalize();
+                        modelJson = model.ToJson(false);
+                        modelBad = model.Problems(new[] { "1.6", "2.8", "3.2" });
+                    }
+                    catch (Exception ex) { modelBad = new List<string> { ex.GetType().Name + " " + ex.Message }; }
+                    var modelPaths = new HashSet<string>(StringComparer.Ordinal);
+                    if (modelJson.Length > 0) { using var md = JsonDocument.Parse(modelJson); QsPaths(md.RootElement, "$", modelPaths, new List<string>()); }
+                    var onlyPage = pagePaths.Except(modelPaths).OrderBy(x => x, StringComparer.Ordinal).ToList();
+                    var onlyModel = modelPaths.Except(pagePaths).Where(x => x != "$.updatedAt").OrderBy(x => x, StringComparer.Ordinal).ToList();
+                    int noteLen = pageOut.Length > 0 && pdDoc!.RootElement.GetProperty("plan").GetProperty("steps").TryGetProperty("s.agent", out var longStep)
+                        ? (longStep.GetProperty("note").GetString() ?? "").Length : -1;
+                    var shapes = pdDoc is not null && pdDoc.RootElement.TryGetProperty("shapes", out var sh) ? sh.EnumerateArray().Select(x => x.GetString() ?? "").ToList() : new List<string>();
+                    const string fullShape = "id,state,express,startedAt,game,server,account,steps";
+                    Check("quick start page (node): a plan with a secret planted under every name a secret goes by (password, passphrase, sudoPassword, sshPassword, token, the key's passphrase, an open key, page memory), at every level, goes through qsPlanForDisk without one — no such key, not the value — with exactly QuickStartPlan's fields (camelCase; updatedAt the store's), a plan the store takes whole (no problem, under 64 KiB, the long note cut to the page's length, within the store's); nothing, or the wrong types, still gives the plan's shape"
+                          + (pageOut.Length == 0 ? " — node gave no plan: " + pdRun.Value.Err : "")
+                          + (secretNames.Count > 0 ? " — secret keys: " + string.Join(", ", secretNames) : "")
+                          + (pageOut.Contains(planSecret, StringComparison.Ordinal) ? " — the planted value is in it" : "")
+                          + (onlyPage.Count > 0 ? " — fields the model has not: " + string.Join(", ", onlyPage) : "") + (onlyModel.Count > 0 ? " — model fields the page leaves out: " + string.Join(", ", onlyModel) : "")
+                          + (modelBad.Count > 0 ? " — the store says: " + string.Join(", ", modelBad) : "")
+                          + (shapes.Any(s => s != fullShape) ? " — shapes: " + string.Join(" | ", shapes) : ""),
+                        pdRun.Value.Ended && pageOut.Length > 0 && secretNames.Count == 0 && !pageOut.Contains(planSecret, StringComparison.Ordinal)
+                        && !pageOut.Contains("updatedAt", StringComparison.Ordinal) && onlyPage.Count == 0 && onlyModel.Count == 0 && modelPaths.Contains("$.updatedAt")
+                        && modelBad.Count == 0 && Encoding.UTF8.GetByteCount(modelJson) < Relic.Core.Setup.QuickStartPlan.MaxBytes
+                        && noteLen == qsNoteMax && qsNoteMax <= Relic.Core.Setup.QuickStartPlan.MaxNote
+                        && shapes.Count == 5 && shapes.All(s => s == fullShape));
+                    var plays = pdDoc is not null && pdDoc.RootElement.TryGetProperty("plays", out var pl)
+                        ? pl.EnumerateArray().Select(x => x.EnumerateArray().Select(y => y.GetString() ?? "").ToList()).ToList() : new List<List<string>>();
+                    var stepIds = plays.SelectMany(x => x).Distinct(StringComparer.Ordinal).ToList();
+                    List<string> stepsBad = new() { "not read" };
+                    if (model is not null && stepIds.Count > 0)
+                    {
+                        model.Steps = stepIds.ToDictionary(id => id, _ => new Relic.Core.Setup.QuickStartStep(), StringComparer.Ordinal);
+                        stepsBad = model.Normalize().Problems(new[] { "1.6", "2.8", "3.2" });
+                    }
+                    string[] capitals = { "s.agentUpdate", "s.agentRestart", "s.wslMemory" };
+                    Check("quick start page (node): every step id qsStepsOf makes — this PC (an agent installed by the run, and one already here), a Linux box, an existing server — is one the store takes (letters, digits, dots and dashes, capitals included: s.agentUpdate, s.agentRestart, s.agent7z, s.wslMemory), at most 64 characters, within the store's count"
+                          + $" — {stepIds.Count} ids: {string.Join(" ", stepIds)}" + (stepsBad.Count > 0 ? " — the store says: " + string.Join(", ", stepsBad) : ""),
+                        plays.Count == 4 && stepIds.Count > 0 && stepsBad.Count == 0 && stepIds.All(id => id.Length is > 0 and <= 64)
+                        && capitals.All(id => plays[0].Contains(id)) && plays[1].Contains("s.agent7z") && !plays[0].Contains("s.agent7z")
+                        && plays[3].Contains("s.connect") && plays[2].Contains("s.reach") && plays.All(x => x.Count <= Relic.Core.Setup.QuickStartPlan.MaxSteps));
+                }
+            }
+        }
+
+        // ── a job's outcome reaches the page only once its busy flag is free (the bridge rule) ──
+        // A page that chains jobs — Quick Start's runner above all: the next game install, the agent entered after its
+        // update, the next account, Windows restarted once a paused install stopped — starts the next one the moment it hears
+        // the outcome; an outcome posted while the job's own flag is still taken would meet that job's "busy". Every job that
+        // streams its outcome posts it after the finally that frees its flag, or keeps it until then.
+        var jobsOutcomes = new (string Name, string Member, string Flag, string[] Events)[]
+        {
+            ("the game install (RunInstallJob)", MemberText(backendCs, "private void RunInstallJob(GameVersionInfo v, string cache, string logLine, Action? preflight,"),
+                "_installBusy", new[] { "install.done", "install.cancelled", "install.error" }),
+            ("a version's removal (StartRemove)", MemberText(modesCs, "private object StartRemove(string versionId, bool deleteFiles)"), "_installBusy", new[] { "remove.done", "remove.error" }),
+            ("a server job (StartServerJob)", MemberText(backendCs, "private object StartServerJob(string kind, string version,"), "_serverJobBusy", new[] { "server.done", "server.error" }),
+            ("the agent install on this PC", MemberText(modesCs, "private object StartLocalAgentInstall(JsonElement p)"), "_serverJobBusy", new[] { "deploy.done", "deploy.error" }),
+            ("the agent install over SSH", skInstallCs, "_serverJobBusy", new[] { "deploy.done", "deploy.error" }),
+            ("the update of the agent on this PC", MemberText(modesCs, "private object StartLocalAgentUpdate()"), "_serverJobBusy", new[] { "agentupdate.done", "agentupdate.error" }),
+            ("the update of an agent over SSH", skUpdateCs, "_serverJobBusy", new[] { "agentupdate.done", "agentupdate.error" }),
+            ("a player's account", MemberText(modesCs, "private object StartAccountCreate(JsonElement p)"), "_accountBusy", new[] { "account.done", "account.error" }),
+            ("Quick Start's installs", qsInstallCs, "_setupBusy", new[] { "quickstart.done", "quickstart.error" }),
+        };
+        var jobsEarly = jobsOutcomes.Select(j => (j.Name, Why: OutcomeBeforeFree(j.Member, j.Flag, j.Events))).Where(j => j.Why is not null).Select(j => $"{j.Name}: {j.Why}").ToList();
+        Check("events: every job whose outcome the page chains on posts it only once the job's busy flag is free again — the game install (install.done / cancelled / error, _installBusy), a removal, a server job, the two agent installs (deploy.*), the two agent updates (agentupdate.*), a player's account (account.*) and Quick Start's installs: after the finally that frees the flag, or kept until then (a stored lambda, a local function or the event's name, posted only after it)"
+              + (jobsEarly.Count > 0 ? " — not so: " + string.Join("; ", jobsEarly) : ""),
+            jobsEarly.Count == 0);
+
+        // ── off the message thread: FindPython ──
+        // FindPython asks Relic's own Python, every Python registry entry and py / python / python3 in turn, each a process
+        // given up to 8 s — and so do LocalAgent.SetAutostart (turning it on) and LocalAgent.StartAsync whenever the
+        // install's record of its interpreter is gone: every call of the three in the Backend stands in the lambda of a
+        // Task.Run — the install's after its busy flag. A Python that is not there is the install job's deploy.error, which
+        // hands the page the install's token only once the install may have written it on this PC (none to write down
+        // before).
+        var fpOff = new List<string>();
+        var fpCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var (fpName, fpSrc) in new[] { ("Backend.cs", backendCs), ("Backend.Modes.cs", modesCs), ("Backend.QuickStart.cs", qsCs) })
+        {
+            var fpSpans = TaskRunSpans(fpSrc);
+            foreach (string fpHead in new[] { "FindPython(", "LocalAgent.SetAutostart(", "LocalAgent.StartAsync(" })
+                foreach (int fpAt in CodeIndexes(fpSrc, fpHead))
+                {
+                    fpCounts[fpHead] = fpCounts.GetValueOrDefault(fpHead) + 1;
+                    if (!fpSpans.Any(s => fpAt > s.start && fpAt < s.end)) fpOff.Add($"{fpName}: {MemberNameAt(fpSrc, fpAt)} ({fpHead.TrimEnd('(')})");
+                }
+        }
+        string fpInstallCs = MemberText(modesCs, "private object StartLocalAgentInstall(JsonElement p)");
+        int fpBusyAt = fpInstallCs.IndexOf("Interlocked.Exchange(ref _serverJobBusy, 1)", StringComparison.Ordinal);
+        int fpRunAt = fpBusyAt < 0 ? -1 : fpInstallCs.IndexOf("_ = Task.Run(async () =>", fpBusyAt, StringComparison.Ordinal);
+        int fpFindAt = fpRunAt < 0 ? -1 : fpInstallCs.IndexOf("var python = LocalAgent.FindPython() ?? throw new InvalidOperationException(L.T(\"core.deploy.noPython\"));", fpRunAt, StringComparison.Ordinal);
+        int fpWrittenAt = fpFindAt < 0 ? -1 : fpInstallCs.IndexOf("tokenWritten = true;", fpFindAt, StringComparison.Ordinal);
+        int fpUseAt = fpWrittenAt < 0 ? -1 : fpInstallCs.IndexOf("var willFetch = LocalAgent.Install(plan, python, log);", fpWrittenAt, StringComparison.Ordinal);
+        Check("off the message thread: every call of LocalAgent.FindPython in the Backend — and of LocalAgent.SetAutostart and StartAsync, which look for Python when the install's record of it is gone — stands in the lambda of a Task.Run: localagent.status's, localagent.autostart's, the start's and the entry's, and the agent install's in its job after the busy flag (no Python is the job's deploy.error, its token handed on only once the install may have written it)"
+              + (fpOff.Count > 0 ? " — on the caller's thread in: " + string.Join(", ", fpOff) : ""),
+            fpCounts.GetValueOrDefault("FindPython(") == 2 && fpCounts.GetValueOrDefault("LocalAgent.SetAutostart(") >= 2 && fpCounts.GetValueOrDefault("LocalAgent.StartAsync(") >= 3
+            && fpOff.Count == 0 && fpBusyAt > 0 && fpRunAt > fpBusyAt && fpFindAt > fpRunAt && fpWrittenAt > fpFindAt && fpUseAt > fpWrittenAt
+            && fpInstallCs.Contains("failed = new { target = \"windows\", message = ex.Message, token = tokenWritten ? plan.Token : null };", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(CodeOf(fpInstallCs), @"\btokenWritten = true;").Count == 1
+            && fwStatusCs.Contains("var py = LocalAgent.FindPython();", StringComparison.Ordinal));
+        // localagent.install takes the extractor the page names, and LocalAgent.Install fills it with Relic's 7zr.exe while the
+        // agent finds no tool of its own, before the plan is checked (the setup spike holds the fill rule).
+        string laPath = Path.Combine(repoRoot, "app", "Relic.Core", "Server", "LocalAgent.cs");
+        string laCs = File.Exists(laPath) ? File.ReadAllText(laPath) : "";
+        string laInstallCs = MemberText(laCs, "public static IReadOnlyList<string> Install(AgentInstallPlan plan, PythonInfo python, Action<string>? log = null, string? agentDir = null)");
+        int laFillAt = laInstallCs.IndexOf("if (FillSevenZip(plan)) log?.Invoke(L.T(\"core.deploy.sevenZipUsed\", new { path = plan.SevenZip }));", StringComparison.Ordinal);
+        Check("quick start: localagent.install takes the extractor the page names (ReadPlan: SevenZip = Str(p, \"sevenZip\").Trim()) and hands its plan to LocalAgent.Install, which fills plan.SevenZip with Relic's 7zr.exe while the agent finds no tool of its own (FillSevenZip) before the plan is checked",
+            modesCs.Contains("SevenZip = Str(p, \"sevenZip\").Trim(),", StringComparison.Ordinal) && fpUseAt > 0
+            && laFillAt > 0 && laInstallCs.IndexOf("var errs = plan.Validate();", laFillAt, StringComparison.Ordinal) > laFillAt);
+        // Docker Desktop's licence is accepted on its installer's command line only when the payload says acceptLicence: true
+        // (Bool answers true for a JSON true alone), handed to SetupInstall.DockerAsync and nowhere else.
+        string siPath = Path.Combine(repoRoot, "app", "Relic.Core", "Setup", "SetupInstall.cs");
+        string siCode = File.Exists(siPath) ? CodeOf(File.ReadAllText(siPath)) : "";
+        Check("quick start: Docker Desktop's licence is accepted on its installer's command line only when the payload says acceptLicence: true — a JSON true (Bool), handed to SetupInstall.DockerAsync alone, whose arguments add --accept-license only for it",
+            qsInstallCs.Contains("bool acceptLicence = Bool(p, \"acceptLicence\");", StringComparison.Ordinal)
+            && qsInstallCs.Contains("case \"docker\": result = await SetupInstall.DockerAsync(tools.Docker, acceptLicence, log); break;", StringComparison.Ordinal)
+            && CodeWords(backendAll, "acceptLicence").Count == 2
+            && System.Text.RegularExpressions.Regex.Matches(backendAll, @"\bDockerAsync\(").Count == 1
+            && modesCs.Contains("p.ValueKind == JsonValueKind.Object && p.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(siCode, "\"--accept-license\"").Count == 1
+            && siCode.Contains("if (acceptLicence) args.Add(\"--accept-license\");", StringComparison.Ordinal)
+            && siCode.Contains("DockerInstallerArguments(acceptLicence)", StringComparison.Ordinal));
+        // S7: nothing of the launcher elevates but the steps the rule names — across app/ (Relic.App and Relic.Core) the word
+        // runas, in any letter case (a shell verb ignores it: "RunAs" elevates as "runas" does) and anywhere in the code (a
+        // verb, runas.exe, a script's -Verb RunAs), stands only in Fiddler's documented fallback
+        // (FiddlerAutomation.InstallSilent), the local agent's firewall pair (LocalAgent.OpenFirewallPort / RemoveFirewallRule)
+        // and Quick Start's two WSL steps (SetupInstall.EnableWslAsync / UpdateWslAsync); the Backend starts none of them itself.
+        var runasAt = new List<string>();
+        foreach (string runasFile in Directory.GetFiles(Path.Combine(repoRoot, "app"), "*.cs", SearchOption.AllDirectories)
+                     .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+                                 && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)))
+        {
+            string runasCode = CodeOf(File.ReadAllText(runasFile));
+            foreach (System.Text.RegularExpressions.Match runasHit in System.Text.RegularExpressions.Regex.Matches(runasCode, @"(?i)(?<![A-Za-z0-9_])runas(?![A-Za-z0-9_])"))
+                runasAt.Add(Path.GetFileNameWithoutExtension(runasFile) + "." + MemberNameAt(runasCode, runasHit.Index));
+        }
+        string[] runasAllowed = { "FiddlerAutomation.InstallSilent", "LocalAgent.OpenFirewallPort", "LocalAgent.RemoveFirewallRule", "SetupInstall.EnableWslAsync", "SetupInstall.UpdateWslAsync" };
+        Check("elevation (S7): across app/ the word runas (any letter case, anywhere in the code) stands only in Fiddler's documented fallback (FiddlerAutomation.InstallSilent), the local agent's firewall pair (OpenFirewallPort / RemoveFirewallRule) and Quick Start's two WSL steps (SetupInstall.EnableWslAsync / UpdateWslAsync), once each — the Backend elevates nothing itself"
+              + $" — found: {string.Join(", ", runasAt)}",
+            runasAt.OrderBy(x => x, StringComparer.Ordinal).SequenceEqual(runasAllowed.OrderBy(x => x, StringComparer.Ordinal)));
+
+        // ── the state's one lock (RelicState.Gate) in the Backend ──
+        // Every change of a collection reachable from the state, with the save that keeps it, runs under RelicState.Gate, and
+        // a reader that walks one of those collections copies it under it: the Backend's writers each hold ONE block of it
+        // across what decides the change, the change and its save (an agent install's whole write tail — the record saved,
+        // taken into memory and applied — included, so a Delete all lands before or after it whole), nothing awaited there.
+        string CaseOf(string name) => CaseText(backendCs, backendCs.IndexOf($"case \"{name}\":", StringComparison.Ordinal));
+        string gtCtorCs = MemberText(backendCs, "public Backend(MainForm form)");
+        string gtApplyAllCs = MemberText(backendCs, "private async Task<object> ApplyAllGameFilesAsync()");
+        string gtBuildCs = MemberText(backendCs, "private object BuildInitState()");
+        string gtAccountCs = MemberText(modesCs, "private object StartAccountCreate(JsonElement p)");
+        string gtOpenEnterCs = MemberText(modesCs, "private async Task<object> OpenAdminEnterAsync()");
+        // (the entry's two paths: a token saved for the host, before the key is ever asked for; then the key)
+        int gtOpenKeyAt = gtOpenEnterCs.IndexOf("key = await pub.OpenAdminKeyAsync();", StringComparison.Ordinal);
+        string gtOpenStoredCs = gtOpenKeyAt < 0 ? "" : gtOpenEnterCs[..gtOpenKeyAt];
+        string gtOpenKeyCs = gtOpenKeyAt < 0 ? "" : gtOpenEnterCs[gtOpenKeyAt..];
+        var gtWriters = new (string Name, string Member, string[] Texts)[]
+        {
+            ("the start's reconciliation", gtCtorCs, new[] { "var gone = _state.PruneMissing();", "if (_state.FillOrigins()) _state.Save();", "if (_state.RefreshVoices()) _state.Save();" }),
+            ("the start's adoption of server.json's one host", gtCtorCs, new[] { "_state.Settings.ServerHost = only.Host;", "_state.Settings.AgentPort = only.AgentPort;", "_state.Save();" }),
+            ("settings.save", CaseOf("settings.save"), new[] { "ApplySettings(p);", "_state.Save();" }),
+            ("version.select", CaseOf("version.select"), new[] { "_state.SelectedVersionId = Str(p, \"id\");", "_state.Save();" }),
+            ("account.use", CaseOf("account.use"), new[] { "_state.UseAccount(_state.Settings.ServerHost, _state.Settings.ServerPort, version, name)", "_state.Save();" }),
+            ("RememberServerAccounts", MemberText(backendCs, "private void RememberServerAccounts(JsonElement status, string host, int port, bool admin)"),
+                new[] { "if (!ServerConfig.SameHost(_state.Settings.ServerHost, host) || _state.Settings.ServerPort != port)", "changed |= _state.RememberServerAccount(host, port, v.Name, name.Trim());", "if (changed) _state.Save();" }),
+            ("RememberOwnFilesChoice", MemberText(backendCs, "public void RememberOwnFilesChoice(string versionId, string choice)"), new[] { "if (_state.Settings.SetOwnFilesChoice(versionId, choice)) _state.Save();" }),
+            ("ReloadOwnFiles", MemberText(backendCs, "public void ReloadOwnFiles()"), new[] { "_state.Settings.OwnFiles = disk.Settings.OwnFiles;" }),
+            ("Apply Relic's game files: the registrations read", gtApplyAllCs, new[] { "versions = _state.Installed.Select(i => (i.Id, i.GameDir)).ToList();" }),
+            ("Apply Relic's game files: the injector fields and their save", gtApplyAllCs, new[] { "InstallService.DetectInjector(inst);", "if (changed) _state.Save();" }),
+            ("the recovery's game folders", MemberText(backendCs, "private Recovery RecoverCore(string origin, out string detail)"), new[] { "ourDirs = _state.Installed.Select(i => i.GameDir).ToArray();" }),
+            ("the init state's registrations and logins", gtBuildCs, new[] { "installedIds = _state.Installed.Select(i => i.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);",
+                "installed = _state.Installed", "voices = i.Voices?.ToList() })", "accounts = AccountsForCurrentServer();", "accountLists = AccountListsForCurrentServer();", "serverAccounts = ServerAccountsForCurrentServer();" }),
+            ("the import check's registrations", MemberText(backendCs, "private async Task<object> InspectGameAsync(JsonElement p)"), new[] { "ImportRequest.From(_state, Str(p, \"versionId\"), Str(p, \"path\"))" }),
+            ("the game search's registrations", MemberText(backendCs, "private object FindGames(bool deeper)"), new[] { "GameSearchContext.From(_state, VersionCatalog.Load())" }),
+            ("SetMode", MemberText(modesCs, "private object SetMode(string? mode)"), new[] { "_state.Settings.Mode = mode;", "_state.Save();" }),
+            ("ApplyAddress", MemberText(modesCs, "private void ApplyAddress(ServerAddress.Resolved r, int? agentPortOverride = null)"),
+                new[] { "agentPort = agentPortOverride ?? AgentPortFor(r);", "s.ServerHost = r.Host;", "s.AgentPort = agentPort;", "_state.Save();" }),
+            ("ApplyInstalledAgent", MemberText(modesCs, "private void ApplyInstalledAgent(string host, int agentPort)"), new[] { "s.ServerHost = host;", "s.Mode = \"admin\";", "_state.Save();" }),
+            ("SetLoginMuted", MemberText(modesCs, "private void SetLoginMuted(bool muted)"), new[] { "_state.Settings.LoginMuted = muted;", "_state.Save();" }),
+            ("SetLoginAnimOff", MemberText(modesCs, "private void SetLoginAnimOff(bool off)"), new[] { "_state.Settings.LoginAnimOff = off;", "_state.Save();" }),
+            ("the admin login's write tail", MemberText(modesCs, "private async Task<object> AdminLoginAsync(string address, string token, int agentPort = 0)"),
+                new[] { "!(RecordFor(r.Host) is { OpenKey: false } now && now.AgentToken == storedForHost.AgentToken)", "ServerConfigStore.Save(cfg);", "RecordSaved(cfg);", "ApplyAddress(r, explicitPort);", "_state.Settings.Mode = \"admin\";", "_state.Save();" }),
+            ("the open key's entry with a saved token", gtOpenStoredCs,
+                new[] { "if (!(StoredServer() is { OpenKey: false } now && now.AgentToken == st.AgentToken))", "throw new InvalidOperationException(L.T(\"backend.savedTokenChanged\"));", "_state.Settings.Mode = \"admin\";", "_state.Save();" }),
+            ("the open key's entry with the key", gtOpenKeyCs, new[] { "ServerConfigStore.Save(cfg);", "RecordSaved(cfg);", "_state.Settings.Mode = \"admin\";", "_state.Save();" }),
+            ("OpenAdminForget", MemberText(modesCs, "private object OpenAdminForget(out bool forgot)"),
+                new[] { "forgot = AdminServer() is { OpenKey: true };", "DropRecords(r => r.OpenKey && ServerConfig.SameHost(r.Host, host))", "_state.Settings.Mode = \"player\";", "try { _state.Save(); }", "ServerConfigStore.ForgetWhere(host, r => r.OpenKey)" }),
+            ("the agent on this PC entered", MemberText(modesCs, "private async Task<object> LocalAgentEnterAsync()"), new[] { "ServerConfigStore.Save(cfg);", "RecordSaved(cfg);", "ApplyInstalledAgent(host, c.ListenPort);" }),
+            ("the agent install on this PC", fpInstallCs, new[] { "ServerConfigStore.Save(cfg);", "RecordSaved(cfg);", "ApplyInstalledAgent(host, plan.ListenPort);" }),
+            ("the agent install over SSH", skInstallCs, new[] { skPinCall, "ServerConfigStore.Save(cfg);", "RecordSaved(cfg);", "ApplyInstalledAgent(ssh.Host, plan.ListenPort);" }),
+            ("the uninstall of the agent on this PC", uninstallCs, new[] { "var gone = DropRecords(mine.Contains);", "try { ServerConfigStore.Forget(host); }", "_state.Settings.Mode = \"\";", "_state.Save();" }),
+            ("a player's account: the launcher's id on the server", gtAccountCs, new[] { "client = _state.ClientIdFor(host);", "if (made) _state.Save();" }),
+            ("a player's account: remembered", gtAccountCs, new[] { "remembered = ServerConfig.SameHost(_state.Settings.ServerHost, host) && _state.Settings.ServerPort == port;", "_state.RememberAccount(host, port, version, created, gen);", "_state.Save();" }),
+            ("an admin-created account remembered", MemberText(modesCs, "private async Task RememberAdminCreatedAsync(AgentClient a, JsonElement snap, string version, string typed,"),
+                new[] { "if (!ServerConfig.SameHost(_state.Settings.ServerHost, host) || _state.Settings.ServerPort != port)", "_state.RememberAccount(host, port, version, created, gen);", "_state.Save();" }),
+            ("the accounts read for the page", MemberText(modesCs, "private Dictionary<string, object> AccountListsForCurrentServer()"),
+                new[] { "_state.AccountLists.TryGetValue(key, out var lists)", "_state.Accounts.TryGetValue(key, out var cur)", "_state.AccountListFor(host, port, v)" }),
+            ("the logins read for the page", MemberText(modesCs, "private Dictionary<string, object> AccountsForCurrentServer()"), new[] { "_state.Accounts.TryGetValue(key, out var per)" }),
+            ("the servers' answers read for the page", MemberText(modesCs, "private Dictionary<string, string> ServerAccountsForCurrentServer()"), new[] { "_state.ServerAccounts.TryGetValue(key, out var per)" }),
+            ("PinSshHostKey", skPinCs, new[] { "_state.PinHostKey(host, port, type, fingerprint)", "_state.Save();" }),
+        };
+        var gtOff = gtWriters.Where(w => w.Member.Length == 0 || !OneGateHolds(w.Member, w.Texts)).Select(w => w.Name).ToList();
+        Check("state lock: each writer of the Backend holds ONE block of RelicState.Gate across what decides its change, the change and its save — awaiting nothing there — and each reader that walks the state's collections copies them under it: the start's reconciliation and adoption, settings.save, version.select, account.use, the server's answers, the own-files choice, Apply's registrations, the recovery, the init state, the import check, the game search, the mode, the address, an installed agent, the login's, the open key's and the agent installs' whole write tails, the forget of the open key, the uninstall, the accounts and their reads, the pins"
+              + (gtOff.Count > 0 ? " — not so for: " + string.Join("; ", gtOff) : ""),
+            gtOff.Count == 0);
+        // ...and nothing of the Backend escapes it: every place a file of the Backend changes the state, saves it or walks one
+        // of its collections stands inside a block of the lock — or in a member whose every call does (ApplySettings).
+        var touchRe = new System.Text.RegularExpressions.Regex(
+            @"\b_state\.(?:Save|RememberAccount|RememberServerAccount|UseAccount|ClientIdFor|SaveServer|PinHostKey|ForgetServer|FillOrigins|RefreshVoices|RestoreRegistration|PruneMissing|Settings\.SetOwnFilesChoice)\("
+            + @"|\b_state\.(?:Settings\.)?[A-Za-z_]\w*\s*=(?![=>])"
+            + @"|\b_state\.(?:Installed|Accounts|AccountLists|ServerAccounts|SavedServers|SshHostKeys)\b"
+            + @"|\bInstallService\.DetectInjector\(|\b(?:ImportRequest|GameSearchContext)\.From\(_state\b");
+        var gtFiles = new[] { ("Backend.cs", backendCs), ("Backend.Modes.cs", modesCs), ("Backend.QuickStart.cs", qsCs) }
+            .Select(f => (Name: f.Item1, Src: f.Item2, Masked: CodeMasked(f.Item2), Gates: LockSpans(f.Item2, "lock (RelicState.Gate)"))).ToList();
+        bool UnderGate(int fileIndex, int at) => gtFiles[fileIndex].Gates.Any(s => at > s.start && at <= s.end);
+        // (a member every call of which — at least one — stands inside a block of the lock; its own head is no call)
+        bool CalledUnderGate(string name)
+        {
+            int calls = 0;
+            for (int k = 0; k < gtFiles.Count; k++)
+                foreach (System.Text.RegularExpressions.Match call in System.Text.RegularExpressions.Regex.Matches(gtFiles[k].Masked, $@"(?<![\w.]){System.Text.RegularExpressions.Regex.Escape(name)}\s*\("))
+                {
+                    int lineAt = gtFiles[k].Masked.LastIndexOf('\n', Math.Max(0, call.Index - 1)) + 1;
+                    if (System.Text.RegularExpressions.Regex.IsMatch(gtFiles[k].Masked[lineAt..call.Index], @"^    (?:public|private|internal|protected)\b")) continue;
+                    calls++;
+                    if (!UnderGate(k, call.Index)) return false;
+                }
+            return calls > 0;
+        }
+        var gtLoose = new List<string>();
+        int gtTouches = 0;
+        for (int k = 0; k < gtFiles.Count; k++)
+        {
+            var places = touchRe.Matches(gtFiles[k].Masked).Select(m => (m.Index, m.Value)).ToList();
+            foreach (System.Text.RegularExpressions.Match alias in System.Text.RegularExpressions.Regex.Matches(gtFiles[k].Masked, @"\bvar\s+([A-Za-z_]\w*)\s*=\s*_state\.Settings\s*;"))
+            {
+                int end = gtFiles[k].Masked.IndexOf("\n    }", alias.Index, StringComparison.Ordinal);
+                string scope = end < 0 ? gtFiles[k].Masked[alias.Index..] : gtFiles[k].Masked[alias.Index..end];
+                places.AddRange(System.Text.RegularExpressions.Regex.Matches(scope, $@"(?<![\w.]){alias.Groups[1].Value}\.[A-Za-z_]\w*\s*=(?![=>])")
+                    .Select(m => (alias.Index + m.Index, m.Value)));
+            }
+            foreach (var (at, what) in places)
+            {
+                gtTouches++;
+                if (UnderGate(k, at)) continue;
+                string member = MemberNameAt(gtFiles[k].Masked, at);
+                if (member.Length > 0 && CalledUnderGate(member)) continue;
+                gtLoose.Add($"{gtFiles[k].Name} {member}: {what.Trim()}");
+            }
+        }
+        Check($"state lock: every place the Backend changes the state, saves it or walks one of its collections ({gtTouches} in Backend.cs, Backend.Modes.cs and Backend.QuickStart.cs) stands inside a block of RelicState.Gate, or in a member every call of which does"
+              + (gtLoose.Count > 0 ? " — outside it: " + string.Join("; ", gtLoose.Distinct()) : ""),
+            gtTouches > 40 && gtLoose.Count == 0);
+        // While the lock is held nothing is awaited, no other gate of the launcher is taken (the session gate, the import's
+        // hold of the checks, the plan's lock, the check's queue), the message thread is never waited for, no init state is
+        // built (it reads the plan under the plan's lock) and nothing is waited for in a blocking way — a task's Result, a
+        // WaitAll / WaitAny, a process waited for (an await cannot stand in a lock at all: a blocking wait is the one way to
+        // wait there); server.json's own lock may be taken inside it, never the other way round, and neither that lock nor the
+        // plan's holds anything of the state.
+        string[] gtNever = { "WaitOne(", "HoldChecks(", "GetAwaiter()", ".Wait(", "Invoke(", "BuildInitState(", "QuickStartPlanNow(", "QuickStartPlanForInit(", "QuickStartResume(",
+            "lock (_qsLock)", "lock (_inspectLock)", "AwaitRecovery(", "Thread.Sleep(", "WaitAll(", "WaitAny(", ".WaitForExit(", "Proc.Run(", "TimedProcess.Run(",
+            "_gameSearch.Start(" };
+        string[] gtStateWords = { "_state.", "RelicState.", "PinSshHostKey(", "ApplyAddress(", "ApplyInstalledAgent(", "ForgetHost(", "SetMode(", "BuildInitState(" };
+        string gtRefreshCs = MemberText(File.Exists(Path.Combine(repoRoot, "app", "Relic.Core", "Play", "PlaySession.cs")) ? File.ReadAllText(Path.Combine(repoRoot, "app", "Relic.Core", "Play", "PlaySession.cs")) : "",
+            "private void RefreshInjector(InstalledVersion inst)");
+        var gtBlocks = gtFiles.SelectMany(f => f.Gates.Select(s => (f.Name, Text: f.Src[s.start..(s.end + 1)])))
+            .Concat(LockSpans(gtRefreshCs, "lock (RelicState.Gate)").Select(s => (Name: "PlaySession.cs", Text: gtRefreshCs[s.start..(s.end + 1)]))).ToList();
+        // (what of a block waits: an await, a text of gtNever, or a task's Result — the member itself, not a longer name)
+        string? GtWaits(string block) =>
+            CodeWords(block, "await").Count > 0 ? "await"
+            : gtNever.FirstOrDefault(x => CodeIndexes(block, x).Count > 0)
+              ?? (CodeIndexes(block, ".Result").Any(i => i + ".Result".Length >= block.Length || !(char.IsLetterOrDigit(block[i + ".Result".Length]) || block[i + ".Result".Length] == '_')) ? ".Result" : null);
+        var gtHeld = gtBlocks.Where(b => GtWaits(b.Text) is not null)
+            .Select(b => $"{b.Name}: {b.Text.Split('\n')[0].Trim()} … {GtWaits(b.Text)}").ToList();
+        var gtInner = gtFiles.SelectMany(f => LockSpans(f.Src, "lock (ServerConfigStore.Gate)").Concat(LockSpans(f.Src, "lock (_qsLock)")).Concat(LockSpans(f.Src, "lock (_qsPlanLock)"))
+                .Select(s => (f.Name, Text: f.Src[s.start..(s.end + 1)])))
+            .Where(b => gtStateWords.Any(x => CodeIndexes(b.Text, x).Count > 0)).Select(b => $"{b.Name}: {b.Text.Split('\n')[0].Trim()}").ToList();
+        Check($"state lock: in its {gtBlocks.Count} blocks (the Backend's and PlaySession.RefreshInjector's) nothing is awaited or waited for in a blocking way (a task's Result or GetAwaiter, Wait / WaitAll / WaitAny / WaitOne, a process waited for, a sleep), no other gate of the launcher is taken (the session gate, the import's hold of the checks, the plan's lock, the check's queue, the game search's own lock), the message thread is never waited for and no init state is built; server.json's lock and the plan's hold nothing of the state"
+              + (gtHeld.Count > 0 ? " — held: " + string.Join("; ", gtHeld) : "") + (gtInner.Count > 0 ? " — the state under another lock: " + string.Join("; ", gtInner) : ""),
+            gtBlocks.Count > 30 && gtHeld.Count == 0 && gtInner.Count == 0);
+        Check("state lock: PlaySession.RefreshInjector detects a registration's injector and saves the state in ONE block of RelicState.Gate",
+            OneGateHolds(gtRefreshCs, "InstallService.DetectInjector(inst);", "_state.Save();"));
+        // Every text the Backend's three files and AgentClient use is in en.json or in a round's fragment not merged yet.
+        var qsKeys = System.Text.RegularExpressions.Regex.Matches(qsCs + skCheckCs + backendCs + modesCs + agentClientCs, "L\\.T\\(\"([a-zA-Z0-9_.]+)\"").Select(m => m.Groups[1].Value).Distinct().ToList();
+        var qsKeysMissing = qsKeys.Where(k => !TextKnownFor(k)).ToList();
+        Check($"quick start texts: every key Backend.QuickStart.cs, the rest of the Backend and AgentClient use ({qsKeys.Count}) is in en.json or in a fragment not merged yet"
+              + (qsKeysMissing.Count > 0 ? " — missing: " + string.Join(", ", qsKeysMissing) : ""),
+            qsKeys.Count >= 100 && qsKeysMissing.Count == 0);
+
+        // The Agent tab's Logs: the agent's last operations and one operation's lines, read on demand through two
+        // admin rpcs, and Relic's own log opened on this PC. An admin account creation's generated password lives
+        // in its job's result, which the agent hands to every holder of the token or of the open key: the Backend
+        // reads no job snapshot itself, and both reads come back through the whitelist projections of AgentClient
+        // (the agent spike plays them against a stand-in that serves the password).
+        int jobsAt = backendCs.IndexOf("case \"agent.jobs\":", StringComparison.Ordinal);
+        int jobLogAt = backendCs.IndexOf("case \"agent.jobLog\":", StringComparison.Ordinal);
+        int relicLogAt = backendCs.IndexOf("case \"app.openLog\":", StringComparison.Ordinal);
+        // A case's own text, from its label up to the next case of the switch: what the case must hold is looked for
+        // there alone, so the same text in a later case cannot stand in for it.
+        static string CaseText(string src, int at)
+        {
+            if (at < 0) return "";
+            int next = src.IndexOf("case \"", at + 6, StringComparison.Ordinal);
+            return next < 0 ? src[at..] : src[at..next];
+        }
+        // The admin gate comes first in the case, before the call that reaches the agent.
+        static bool GatedCall(string caseText, string call)
+        {
+            int gate = caseText.IndexOf("RequireAdmin();", StringComparison.Ordinal);
+            return gate >= 0 && caseText.IndexOf(call, StringComparison.Ordinal) > gate;
+        }
+        string jobsCase = CaseText(backendCs, jobsAt), jobLogCase = CaseText(backendCs, jobLogAt), relicLogCase = CaseText(backendCs, relicLogAt);
+        Check("logs: Backend answers agent.jobs and agent.jobLog behind RequireAdmin through WithAgent (an agent without GET /jobs as {tooOld: true}) and opens Log.LogFile on app.openLog, each in its own case; the page calls all three",
+            jobsAt >= 0 && GatedCall(jobsCase, "WithAgent(a => a.JobsAsync())")
+            && jobsCase.IndexOf("WithAgent(a => a.JobsAsync())", StringComparison.Ordinal) is int jobsCall && jobsCall >= 0
+            && jobsCase.IndexOf("return new { tooOld = true };", jobsCall, StringComparison.Ordinal) > jobsCall
+            && jobLogAt >= 0 && GatedCall(jobLogCase, "WithAgent(a => a.JobLogAsync(Str(p, \"id\")))")
+            && relicLogAt >= 0 && relicLogCase.Contains("Log.LogFile", StringComparison.Ordinal)
+            && relicLogCase.Contains("L.T(\"backend.relicLog.missing\"", StringComparison.Ordinal)
+            && UiCalls("rpc", "agent.jobs") && UiCalls("rpc", "agent.jobLog") && UiCalls("rpc", "app.openLog")
+            && L.Has("backend.relicLog.missing"));
+        Check("logs: no job snapshot reaches the page but through the projection — the Backend never reads one itself, and the two AgentClient reads return JobsForPage / JobLogForPage",
+            !backendCs.Contains("GetJobAsync(", StringComparison.Ordinal)
+            && agentClientCs.Contains("=> JobsForPage(await GetAsync(\"jobs\", ct));", StringComparison.Ordinal)
+            && agentClientCs.Contains("=> JobLogForPage(await GetJobAsync(id, 0, ct));", StringComparison.Ordinal));
+        // The Server Admin area: the confirms come first, the status target never holds the tab, one console per render, the
+        // banners' order in the strip, the address editors read-only in Server Admin mode (app.js writes the host through
+        // server.setAddress from three places alone: the start screen's Enter, a saved server's Connect and saveAddressEdit,
+        // which refuses in that mode — Quick Start's one writer, qsWriteHost in quickstart.js, is held by the Quick Start page
+        // checks), the voice job's Stop in the console, .main keyed per screen and tab.
+        Check("admin area: package download, events, public address and txt fixes behind their questions; srvTarget without the tab; ONE serverConsole call; open administration before the agent update in the strip; read-only address editors (server.setAddress sent by loginEnter, savedConnect and saveAddressEdit alone in app.js); the voice Stop in the console; .main keyed per screen and tab",
+            appJs.Contains("fetchGo: (id) => runServerJob('fetch', id),", StringComparison.Ordinal) && !appJs.Contains("fetchServer: (id) => runServerJob('fetch', id),", StringComparison.Ordinal)
+            && appJs.Contains("eventsGo: (id) => runServerJob('events', id),", StringComparison.Ordinal) && !appJs.Contains("eventsServer: (id) => runServerJob('events', id),", StringComparison.Ordinal)
+            && appJs.Contains("netfixGo: (id) => runServerJob('netfix', id),", StringComparison.Ordinal) && !appJs.Contains("netfixServer: (id) => runServerJob('netfix', id),", StringComparison.Ordinal)
+            && appJs.Contains("txtFixesGo: (arg) =>", StringComparison.Ordinal)
+            && appJs.Contains("const srvTarget = () => [S.mode, S.serverAddr.host, S.serverAddr.agentPort, S.serverConfigured].join('|');", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(appJs, @"\bserverConsole\(\)").Count == 2
+            && appJs.Contains("${openAdminNote()}${agentUpdateNote()}", StringComparison.Ordinal)
+            && appJs.Contains("if (isAdminMode()) { S.addrEdit = null; return false; }", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(appJs, @"rpc\('server\.setAddress'").Count == 3
+            && new[] { ActionBody("loginEnter"), ActionBody("savedConnect"), JsFunction(appJs, "async function saveAddressEdit() {") }
+                .All(writer => System.Text.RegularExpressions.Regex.Matches(writer, @"rpc\('server\.setAddress'").Count == 1)
+            && appJs.Contains(": voice ? 'hotpatchVoiceStop' : '';", StringComparison.Ordinal)
+            && appJs.Contains("<div class=\"main scr-${mainKey()}\">", StringComparison.Ordinal));
+        // Each of the four actions a button calls asks its question and starts nothing itself: read from the action up to
+        // the next entry of ACTIONS, it sets S.confirm, whose Yes is its …Go action, and calls no runServerJob — nor is
+        // there a txtFixes that splits its argument and starts the job at once.
+        static string OpenerText(string src, string name)
+        {
+            int at = src.IndexOf("\n  " + name + ": (", StringComparison.Ordinal);
+            if (at < 0) return "";
+            var next = System.Text.RegularExpressions.Regex.Match(src[(at + 1)..], @"\n  [A-Za-z_$][A-Za-z0-9_$]*: ");
+            return next.Success ? src.Substring(at, next.Index + 1) : src[at..];
+        }
+        var openers = new[] { ("fetchServer", "fetchGo"), ("eventsServer", "eventsGo"), ("netfixServer", "netfixGo"), ("txtFixes", "txtFixesGo") }
+            .Select(o => (name: o.Item1, go: o.Item2, text: OpenerText(appJs, o.Item1))).ToList();
+        var openersOff = openers.Where(o => !(o.text.Contains("S.confirm = {", StringComparison.Ordinal)
+            && o.text.Contains($"act: '{o.go}'", StringComparison.Ordinal) && !o.text.Contains("runServerJob(", StringComparison.Ordinal))).Select(o => o.name).ToList();
+        Check("admin area: fetchServer, eventsServer, netfixServer and txtFixes open their question (S.confirm, Yes = their …Go action) and start no job themselves"
+              + (openersOff.Count > 0 ? $" — not so: {string.Join(", ", openersOff)}" : ""),
+            openersOff.Count == 0
+            && !appJs.Contains("txtFixes: (arg) => { const p = String(arg).split(':'); runServerJob(", StringComparison.Ordinal));
+        // The tab bar's labels are translation calls with their keys written out: check_i18n.py proves only a key that
+        // is the literal argument of t / T / tf, so a label table would leave a missing text unseen. One button per tab,
+        // in the order the bar draws them, each labelled by the key of its own tab.
+        string[] adminTabs = { "overview", "players", "rules", "content", "access", "agent" };
+        int tabBarAt = appJs.IndexOf("<div class=\"lg-tabs admtabs\">", StringComparison.Ordinal);
+        int tabBarEnd = tabBarAt < 0 ? -1 : appJs.IndexOf("</div>", tabBarAt, StringComparison.Ordinal);
+        var tabLabels = tabBarEnd < 0 ? new List<(string tab, string key)>()
+            : System.Text.RegularExpressions.Regex.Matches(appJs[tabBarAt..tabBarEnd], @"\btab\('([a-z]+)', T\('(server\.tab\.[a-z]+)'\)\)")
+                .Select(m => (tab: m.Groups[1].Value, key: m.Groups[2].Value)).ToList();
+        Check($"admin area: the tab bar labels its six tabs ({string.Join(", ", tabLabels.Select(l => l.tab))}) with literal T('server.tab.<tab>') calls, in order, every key in en.json",
+            tabLabels.Select(l => l.tab).SequenceEqual(adminTabs) && tabLabels.All(l => l.key == "server.tab." + l.tab)
+            && adminTabs.All(id => L.Has("server.tab." + id)));
+        // Four label tables of the UI hold translation KEYS, which check_i18n.py does not see (it reads only a
+        // key written as the literal argument of a translation call): SRVJOBS (job kind → title), CATS (the
+        // Game commands cards: name + hint) and SRVMETA / SRVNOTE (a server card's state: its badge and its
+        // note). A job, a card or a state added there without its text draws the raw key, so every such key
+        // the scripts spell has to be in en.json.
+        var tableKeys = System.Text.RegularExpressions.Regex.Matches(uiJs, @"'((?:server\.job|cmd\.cat|server\.state|server\.note)\.[A-Za-z.]+)'")
             .Select(m => m.Groups[1].Value).Distinct().ToList();
         var tableKeysMissing = tableKeys.Where(k => !L.Has(k)).ToList();
-        Check($"i18n: every job title and command card key the UI's label tables hold ({tableKeys.Count}) has an en.json text"
+        Check($"i18n: every job title, command card, server state and server note key the UI's label tables hold ({tableKeys.Count}) has an en.json text"
               + (tableKeysMissing.Count > 0 ? " — missing: " + string.Join(", ", tableKeysMissing) : ""),
-            tableKeys.Count >= 30 && tableKeysMissing.Count == 0);
+            tableKeys.Count >= 45 && tableKeysMissing.Count == 0
+            && tableKeys.Count(k => k.StartsWith("server.state.", StringComparison.Ordinal)) >= 9
+            && tableKeys.Count(k => k.StartsWith("server.note.", StringComparison.Ordinal)) >= 9);
+        // The two state tables are read with the same key — the state srvState answers for the admin card,
+        // the one the player card works out from the public snapshot: a state one table lacks would draw
+        // `undefined` on a card. Every state either of the two can answer has to be a row of both.
+        static HashSet<string> TableRows(string js, string table)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(js, @"const " + table + @" = \{(.*?)\n\};", System.Text.RegularExpressions.RegexOptions.Singleline);
+            return m.Success
+                ? System.Text.RegularExpressions.Regex.Matches(m.Groups[1].Value, @"^\s+(\w+):", System.Text.RegularExpressions.RegexOptions.Multiline)
+                    .Select(x => x.Groups[1].Value).ToHashSet(StringComparer.Ordinal)
+                : new HashSet<string>();
+        }
+        var metaRows = TableRows(uiJs, "SRVMETA");
+        var noteRows = TableRows(uiJs, "SRVNOTE");
+        var srvStateFn = System.Text.RegularExpressions.Regex.Match(uiJs, @"function srvState\(id\) \{(.*?)\n\}", System.Text.RegularExpressions.RegexOptions.Singleline);
+        var answered = System.Text.RegularExpressions.Regex.Matches(srvStateFn.Groups[1].Value, @"\breturn ([^;]*);")
+            .SelectMany(r => System.Text.RegularExpressions.Regex.Matches(r.Groups[1].Value, @"'([a-z]+)'").Select(m => m.Groups[1].Value))
+            .ToHashSet(StringComparer.Ordinal);
+        // (the player card's expression is read from after its test of S.srv.state: 'ok' is the status
+        // read's own state, not a card's)
+        var playerSt = System.Text.RegularExpressions.Regex.Match(uiJs, @"const st = S\.srv\.state === 'checking' \? 'checking' : S\.srv\.state !== 'ok'(.*?);", System.Text.RegularExpressions.RegexOptions.Singleline);
+        var playerAnswered = System.Text.RegularExpressions.Regex.Matches(playerSt.Groups[1].Value, @"'([a-z]+)'")
+            .Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        Check($"server card: SRVMETA and SRVNOTE hold the same states ({metaRows.Count}), and every state srvState answers is one of them ({string.Join(", ", answered.OrderBy(s => s))}), the player card's too ({string.Join(", ", playerAnswered.OrderBy(s => s))})",
+            metaRows.Count >= 9 && metaRows.SetEquals(noteRows) && srvStateFn.Success && answered.Count >= 9 && answered.IsSubsetOf(metaRows)
+            && playerSt.Success && playerAnswered.Count >= 6 && playerAnswered.IsSubsetOf(metaRows)
+            && answered.Contains("loading") && answered.Contains("unlisted") && playerAnswered.Contains("loading") && playerAnswered.Contains("unlisted"));
+
+        // ── the jobs an agent install or "Add version…" leaves for the Server page (the chain) ──
+        // A server job's outcome is posted once the Backend's job slot is free again (deploy.done's rule): the page starts
+        // a chain's next job — the download after its re-point — the moment it hears the one before end, and a slot still
+        // taken would refuse it (backend.server.jobBusy). The page reads the outcome under the names the Backend writes.
+        int sjAt = backendCs.IndexOf("private object StartServerJob(string kind, string version,", StringComparison.Ordinal);
+        int sjEnd = sjAt < 0 ? -1 : backendCs.IndexOf("return new { started = true, kind, version };", sjAt, StringComparison.Ordinal);
+        string sjBody = sjAt >= 0 && sjEnd > sjAt ? backendCs[sjAt..sjEnd] : "";
+        int sjFinally = sjBody.IndexOf("finally", StringComparison.Ordinal);
+        int sjFreed = sjBody.IndexOf("Volatile.Write(ref _serverJobBusy, 0);", StringComparison.Ordinal);
+        Check("events: a server job's outcome — server.done {kind, version, result} / server.error {kind, version, message} — is posted only once the job slot is free again, and the page hands it to the chain",
+            sjFinally > 0 && sjFreed > sjFinally
+            && sjBody.IndexOf("PostEvent(\"server.done\"", StringComparison.Ordinal) > sjFreed
+            && sjBody.IndexOf("PostEvent(\"server.error\"", StringComparison.Ordinal) > sjFreed
+            && sjBody.Contains("done = new { kind, version, result };", StringComparison.Ordinal)
+            && sjBody.Contains("failed = new { kind, version, message = ex.Message };", StringComparison.Ordinal)
+            && appJs.Contains("const r = d && d.result;", StringComparison.Ordinal)
+            && appJs.Contains("j.error = (d && d.message) || t('common.unknownError');", StringComparison.Ordinal)
+            && appJs.Contains("chainJobDone(j, res);", StringComparison.Ordinal) && appJs.Contains("chainJobFailed(j);", StringComparison.Ordinal));
+        // deploy.done hands the page what the install's follow-up decided (ChainPayload): chain steps {version, dir,
+        // repoint, fetch}, held lines {version, message}, fetch (the plain downloads — all a page that runs no chain reads)
+        // and the target the install was for. The page reads the same names: one spelt otherwise on either side is a step
+        // dropped or a held line never shown.
+        Check("events: the page reads deploy.done's chain {version, dir, repoint, fetch} (fetch alone without it), held {message} and target under the names the Backend writes, and starts the chain from it",
+            modesCs.Contains("new { version = s.Version, dir = s.Dir, repoint = s.Repoint, fetch = s.Fetch }", StringComparison.Ordinal)
+            && modesCs.Contains("new { version = h.Version, message = h.Message }", StringComparison.Ordinal)
+            && System.Text.RegularExpressions.Regex.Matches(modesCs, @"done = new \{ target = ""(?:windows|linux)"", [^\r\n]*\bfetch, chain = steps, held = holds, ").Count == 2
+            && appJs.Contains("if (d && Array.isArray(d.chain)) {", StringComparison.Ordinal)
+            && appJs.Contains("({ version: s.version, dir: typeof s.dir === 'string' ? s.dir : '', repoint: s.repoint === true, fetch: s.fetch === true, stop: false })", StringComparison.Ordinal)
+            && appJs.Contains("return d && Array.isArray(d.fetch) ?", StringComparison.Ordinal)
+            && appJs.Contains("const held = Array.isArray(res.held) ? res.held.filter((h) => h && typeof h.message === 'string' && h.message) : [];", StringComparison.Ordinal)
+            && appJs.Contains("const steps = chainStepsOf(d);", StringComparison.Ordinal)
+            && appJs.Contains("win: !!d && d.target === 'windows'", StringComparison.Ordinal));
+        // One job at a time, as the agent runs them: the next starts at a status read that names no job running on the
+        // server (every admin status read calls chainNext), a step's re-point first, then its download — through the rpc
+        // names and the fields the Backend's cases read, behind RequireAdmin, without the download's question (the install
+        // form and the folder dialog named the size). A chain belongs to the server it was made for: a change of server
+        // drops it.
+        int retargetAt = appJs.IndexOf("function srvRetarget() {", StringComparison.Ordinal);
+        int retargetEnd = retargetAt < 0 ? -1 : appJs.IndexOf("\n}\n", retargetAt, StringComparison.Ordinal);
+        string retargetBody = retargetAt >= 0 && retargetEnd > retargetAt ? appJs[retargetAt..retargetEnd] : "";
+        string relocCase = CaseText(backendCs, backendCs.IndexOf("case \"server.relocate\":", StringComparison.Ordinal));
+        string fetchCase = CaseText(backendCs, backendCs.IndexOf("case \"server.fetch\":", StringComparison.Ordinal));
+        Check("chain: one job at a time — the next at a status read that names no job (ingestStatus → chainNext), a step's re-point (server.relocate {version, dir, mode: 'repoint'}) before its download (server.fetch), both behind RequireAdmin; a change of server drops the chain (srvRetarget)",
+            retargetBody.Contains("S.fetchChain = null;", StringComparison.Ordinal)
+            && appJs.Contains("if (st) chainNext();", StringComparison.Ordinal)
+            && appJs.Contains("if (c.running || jobRunning() || !S.serverConfigured || (S.srv.info && S.srv.info.busy)) return;", StringComparison.Ordinal)
+            && appJs.Contains("if (step.repoint && c.phase !== 'fetch') runChained(c, 'relocate', step, { dir: step.dir, mode: 'repoint' });", StringComparison.Ordinal)
+            && appJs.Contains("else if (step.fetch) runChained(c, 'fetch', step);", StringComparison.Ordinal)
+            && appJs.Contains("try { await rpc('server.' + kind, Object.assign({ version }, extra || {})); }", StringComparison.Ordinal)
+            && GatedCall(relocCase, "string dir = Str(p, \"dir\").Trim(), mode = RelocateMode(Str(p, \"mode\"));")
+            && relocCase.Contains("return StartServerJob(\"relocate\", Str(p, \"version\"), (a, v, log) => a.RelocateAsync(v, dir, mode, log));", StringComparison.Ordinal)
+            && GatedCall(fetchCase, "return StartServerJob(\"fetch\", Str(p, \"version\"), (a, v, log) => a.FetchServerAsync(v, log));"));
+        // After its re-point a step's download starts only in the folder the version then uses — the agent's relocate job
+        // answers it as `to` —, compared the way AgentInstallPlan.SameFolder compares (sameFolder, its twin, played below);
+        // another folder ends the chain with a word. A start refused because the Backend's job slot was still taken
+        // (backend.server.jobBusy, the text the page compares) is tried once more 1.5 s later. A start the agent refused
+        // because another operation runs on the server — its 409, inside the launcher's "answered with error" text — keeps
+        // the step first for the next status read that names no job, CHAIN_BUSY_TRIES times at most; any other failure
+        // drops the chain.
+        string agentChainSrc = File.Exists(agentPy) ? File.ReadAllText(agentPy) : "";
+        int busyFnAt = agentChainSrc.IndexOf("\ndef _busy_error(busy):", StringComparison.Ordinal);
+        int busyFnEnd = busyFnAt < 0 ? -1 : agentChainSrc.IndexOf("\ndef ", busyFnAt + 1, StringComparison.Ordinal);
+        string busyFormat = busyFnAt >= 0 && busyFnEnd > busyFnAt
+            ? string.Concat(System.Text.RegularExpressions.Regex.Matches(agentChainSrc[busyFnAt..busyFnEnd], "\"((?:[^\"\\\\]|\\\\.)*)\"").Select(m => m.Groups[1].Value))
+            : "";
+        int busyArg = 0;
+        string busySeen = busyFormat.Contains("%s", StringComparison.Ordinal)
+            ? L.T("core.agent.httpError", new { status = 409, detail = System.Text.RegularExpressions.Regex.Replace(busyFormat, "%s", _ => busyArg++ == 0 ? "fetch" : "3.2") })
+            : "";
+        var pageBusy = System.Text.RegularExpressions.Regex.Match(appJs, @"if \(/(.+?)/\.test\(String\(j\.error \|\| ''\)\) && \+\+c\.busyTries <= CHAIN_BUSY_TRIES\) return;");
+        bool pageBusyMatches = pageBusy.Success && busySeen.Length > 0 && System.Text.RegularExpressions.Regex.IsMatch(busySeen, pageBusy.Groups[1].Value);
+        Check("chain: after a re-point the download starts only in the folder the agent's job answers (to — sameFolder, else server.chain.folderMismatch); a start the job slot refused (backend.server.jobBusy) is tried once more after 1.5 s; one the agent refused while another operation ran keeps its step, 10 times at most"
+              + (pageBusyMatches ? "" : $" — the page's test {(pageBusy.Success ? "/" + pageBusy.Groups[1].Value + "/" : "(not found)")} against the agent's refusal \"{busySeen}\""),
+            agentChainSrc.Contains("return {\"version\": version, \"from\": old, \"to\": new, ", StringComparison.Ordinal)
+            && appJs.Contains("const to = res && typeof res.to === 'string' ? res.to : '';", StringComparison.Ordinal)
+            && appJs.Contains("if (!sameFolder(to, step.dir, c.win)) {", StringComparison.Ordinal)
+            && appJs.Contains("t('server.chain.folderMismatch', { version: step.version, to: to || '—', dir: step.dir })", StringComparison.Ordinal)
+            && L.Has("server.chain.folderMismatch")
+            && sjBody.Contains("throw new InvalidOperationException(L.T(\"backend.server.jobBusy\"));", StringComparison.Ordinal)
+            && appJs.Contains("if (mine && !again && e.message === t('backend.server.jobBusy')) {", StringComparison.Ordinal)
+            && appJs.Contains("setTimeout(() => runChained(c, kind, step, extra, true), 1500);", StringComparison.Ordinal)
+            && pageBusyMatches && appJs.Contains("const CHAIN_BUSY_TRIES = 10;", StringComparison.Ordinal));
+        // sameFolder is the page's twin of AgentInstallPlan.SameFolder. Played with node, when this PC has it, over one
+        // folder spelt the ways a Windows or a Linux agent may answer it and over other folders: it has to answer what
+        // SameFolder answers. A full path on a drive letter is read in the spelling the agent answers with
+        // (NormalWindowsFolder: a doubled separator and a "." segment drop out, a ".." takes the segment before it with
+        // it, and Windows' own rules for periods and spaces) — a folder an earlier build stored raw is still the folder
+        // the agent answers; the answers of the last four rows are pinned as well (sfSpeltWant).
+        int sfAt = appJs.IndexOf("function sameFolder(a, b, win) {", StringComparison.Ordinal);
+        int sfEnd = sfAt < 0 ? -1 : appJs.IndexOf("\n}\n", sfAt, StringComparison.Ordinal);
+        string sameFolderJs = sfAt >= 0 && sfEnd > sfAt ? appJs[sfAt..(sfEnd + 2)] : "";
+        var sfCases = new (string? A, string? B, bool Win)[]
+        {
+            (@"C:\relic_servers\3.2_live", "c:/relic_servers/3.2_live/", true), (@"C:\relic_servers\3.2_live", @"C:\relic_servers\3.2_live\\", true),
+            (@"D:\relic_servers\3.2_live", @"C:\relic_servers\3.2_live", true), (@"C:\relic_servers\3.2_live", @"C:\relic_servers\3.2_live2", true),
+            (" C:\\x ", "c:\\X", true), (@"C:\", "c:/", true), ("C:/Ärger", @"c:\ärger", true), ("   ", "   ", true), ("/srv/x", null, true),
+            ("/home/3.2_live", "/home/3.2_live/", false), ("/home/3.2_live", "/home/3.2_live//", false), ("/home/3.2_live", "/Home/3.2_live", false),
+            ("/srv/x\\", "/srv/x", false), ("\t/srv/x\n", "/srv/x", false), ("/srv/Ärger", "/srv/ärger", false), ("", "", false), (null, "/srv/x", false),
+            ("/", "/", false),
+            // Windows' own spelling of a full path (Path.GetFullPath, which NormalWindowsFolder asks): a lone trailing period
+            // of a segment inside the path goes, the end of the path loses its trailing periods and spaces, a path ending
+            // in "." or ".." ends in the segment before it, a name holding a NUL stays as it is.
+            (@"C:\a.\b", @"C:\a\b", true), (@"C:\a..\b", @"C:\a\b", true), (@"C:\a. \b", @"C:\a\b", true), (@"C:\x\ .\y", @"C:\x\ \y", true),
+            (@"C:\a\b...", @"C:\a\b", true), (@"C:\a\b. ", @"C:\a\b", true), (@"C:\a\b\..", "c:/A", true), (@"C:\a\b.\.", @"C:\a\b", true),
+            (@"C:\a\b\...\c", @"C:\a\b\c", true), (@"C:\a\b \", @"C:\a\b", true), (@"C:\a\..\..\b", @"C:\b", true), ("C:\\a\0b", "C:\\a\0b\\", true),
+            (@"C:\x\\y", @"C:\x\y", true), (@"C:\a\.\b", @"C:\a\b", true), (@"C:\a\..\b", @"C:\b", true), (@"C:\a\..\b", @"C:\a\b", true),
+        };
+        bool[] sfSpeltWant = { true, true, true, false };
+        if (sameFolderJs.Length == 0) Check("chain: app.js holds sameFolder(a, b, win), the twin of AgentInstallPlan.SameFolder", false);
+        else
+        {
+            string sfScript = Path.Combine(Path.GetTempPath(), "relic-samefolder-" + Guid.NewGuid().ToString("n")[..8] + ".js");
+            try
+            {
+                File.WriteAllText(sfScript, sameFolderJs + "\nconst cases = " + JsonSerializer.Serialize(sfCases.Select(sc => new object?[] { sc.A, sc.B, sc.Win }))
+                    + ";\nprocess.stdout.write(JSON.stringify(cases.map((c) => sameFolder(c[0], c[1], c[2]))));\n", new UTF8Encoding(false));
+                var nodePsi = new System.Diagnostics.ProcessStartInfo("node") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+                nodePsi.ArgumentList.Add(sfScript);
+                System.Diagnostics.Process? nodeProc = null;
+                try { nodeProc = System.Diagnostics.Process.Start(nodePsi); }
+                catch { /* no node on PATH: skipped below */ }
+                if (nodeProc is null) Console.WriteLine("        (skipped: no node on PATH — sameFolder is not played against AgentInstallPlan.SameFolder)");
+                else
+                {
+                    using (nodeProc)
+                    {
+                        var nodeErr = nodeProc.StandardError.ReadToEndAsync();
+                        string nodeOut = nodeProc.StandardOutput.ReadToEnd();
+                        bool nodeEnded = nodeProc.WaitForExit(30_000);
+                        if (!nodeEnded) { try { nodeProc.Kill(true); } catch { } }
+                        bool[]? jsSame = null;
+                        try { jsSame = JsonSerializer.Deserialize<bool[]>(nodeOut); } catch (JsonException) { }
+                        bool[] csSame = sfCases.Select(sc => AgentInstallPlan.SameFolder(sc.A, sc.B, sc.Win)).ToArray();
+                        var sfDiffer = jsSame is null || jsSame.Length != csSame.Length ? new List<string>()
+                            : sfCases.Where((sc, i) => jsSame[i] != csSame[i]).Select(sc => $"({sc.A ?? "null"} | {sc.B ?? "null"} | {(sc.Win ? "windows" : "linux")})").ToList();
+                        bool[] csSpelt = csSame[^sfSpeltWant.Length..];
+                        Check("chain: sameFolder answers what AgentInstallPlan.SameFolder answers — on Windows '/' or '\\', a trailing separator and the letter case do not count"
+                              + @" and a full path on a drive letter is read in the agent's spelling (C:\x\\y is C:\x\y, C:\a\.\b is C:\a\b, C:\a\..\b is C:\b and not C:\a\b),"
+                              + " elsewhere only a trailing '/'; a blank is no folder"
+                              + (jsSame is null ? " — node gave no answer: " + (nodeEnded ? nodeErr.Result.Trim() : "it did not end within 30 s")
+                                : sfDiffer.Count > 0 ? " — they differ on " + string.Join(", ", sfDiffer) : "")
+                              + (csSpelt.SequenceEqual(sfSpeltWant) ? "" : $" — the drive-letter rows answer {string.Join("/", csSpelt)}, not {string.Join("/", sfSpeltWant)}"),
+                            nodeEnded && jsSame is not null && jsSame.Length == csSame.Length && sfDiffer.Count == 0 && csSame.Contains(true) && csSame.Contains(false)
+                            && csSpelt.SequenceEqual(sfSpeltWant));
+                    }
+                }
+            }
+            catch (Exception ex) { Check($"chain: sameFolder played with node ({ex.Message})", false); }
+            finally { try { File.Delete(sfScript); } catch { /* best effort */ } }
+        }
+        // The hotpatch card (Content tab) says what GET /server/hotpatch answers about the version and nothing a version
+        // id would decide (I52): whether its voice packs are mirrored first is the answer's voice.shortWait — the
+        // manifest's word, which the agent passes on —, the per-file source its texts name is the answer's upstreamHosts,
+        // a bundle is named only where bundles.hotpatch / bundles.voice.<Lang> names one, and the Mirror source card's two
+        // ways are the agent's two policy words. The texts are read from the working tree's en.json.
+        string enJsonPath = Path.Combine(repoRoot, "app", "Relic.App", "ui", "lang", "en.json");
+        var enTexts = File.Exists(enJsonPath) ? JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(enJsonPath)) ?? new() : new Dictionary<string, string>();
+        string EnText(string key) => enTexts.TryGetValue(key, out var s) ? s : "";
+        JsonElement? HotpatchManifest(string v)
+        {
+            string p = Path.Combine(repoRoot, "agent", "payloads", v, "hotpatch.json");
+            try { return File.Exists(p) ? JsonDocument.Parse(File.ReadAllText(p)).RootElement.Clone() : null; }
+            catch (JsonException) { return null; }
+        }
+        static bool SaysShortWait(JsonElement? m) => m is { ValueKind: JsonValueKind.Object } e && e.TryGetProperty("voice", out var vo)
+            && vo.ValueKind == JsonValueKind.Object && vo.TryGetProperty("shortWait", out var sw) && sw.ValueKind == JsonValueKind.True;
+        var shortWaitArgs = Regex.Matches(appJs, @"\bvoiceShortWait\(([^()]*)\)").Select(m => m.Groups[1].Value.Trim()).ToList();
+        // A version id written into the page's code is a branch on it, whatever its form: a quoted version or version
+        // prefix ('2.8' compared, in an includes / indexOf list or a case; '3.' to startsWith), a version inside a regex
+        // literal (/^3\.2$/), an equality with a decimal number (=== 2.8). An SVG / HTML attribute value
+        // (stroke-width="1.6") and a comment line are no branch.
+        var versionCompares = appJs.Split('\n').Select((line, n) => (Line: line, N: n + 1)).Where(x => !Regex.IsMatch(x.Line, @"^\s*//"))
+            .SelectMany(x => Regex.Matches(x.Line, @"(?<![\w-]=)(['""`])\d+\.\d*\1|\d\\\.\d|[=!]==?\s*\d+\.\d+|\d+\.\d+\s*[=!]==?|\bcase\s+\d+\.\d+\s*:")
+                .Select(m => $"line {x.N}: {m.Value}"))
+            .ToList();
+        Check("hotpatch: \"mirror the voices first\" is the answer's voice.shortWait (the manifest's word: hotpatch_voice_short_wait, passed on by hotpatch_voice_summary) at its three uses — the on-demand note, the Enable and the voice job's questions; app.js names no version id in its code (no quoted version or version prefix, none in a regex, no equality with a decimal number; attribute values and comment lines aside)"
+              + (versionCompares.Count > 0 ? " — named: " + string.Join(", ", versionCompares) : "")
+              + (shortWaitArgs.Count != 3 || shortWaitArgs.Any(a => a != "d") ? " — called with: " + string.Join(", ", shortWaitArgs) : ""),
+            agentChainSrc.Contains("return isinstance(voice, dict) and voice.get(\"shortWait\") is True", StringComparison.Ordinal)
+            && agentChainSrc.Contains("\"shortWait\": hotpatch_voice_short_wait(man)}", StringComparison.Ordinal)
+            && agentChainSrc.Contains("out[\"voice\"] = hotpatch_voice_summary(version, man)", StringComparison.Ordinal)
+            && Regex.IsMatch(appJs, @"\nconst voiceShortWait = \(d\) => [^\n]*\bd\.voice\.shortWait === true")
+            && shortWaitArgs.Count == 3 && shortWaitArgs.All(a => a == "d") && versionCompares.Count == 0);
+        Check("hotpatch: the shipped manifests say voice.shortWait for 2.8 and 3.2 (their games do not wait for a pack fetched when they ask for it), not for 1.6",
+            !SaysShortWait(HotpatchManifest("1.6")) && SaysShortWait(HotpatchManifest("2.8")) && SaysShortWait(HotpatchManifest("3.2")));
+        // A text that names {hosts} or {source} is drawn with every value it names: each use of its key in app.js is a
+        // t / T call whose object names them — a value left out shows on the page as the bare "{hosts}".
+        static HashSet<string> JsPropNames(string obj)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            int depth = 0, start = 0;
+            for (int i = 0; i <= obj.Length; i++)
+            {
+                char c = i < obj.Length ? obj[i] : ',';
+                if (c is '(' or '[') depth++;
+                else if (c is ')' or ']') depth--;
+                else if (c == ',' && depth == 0)
+                {
+                    var m = Regex.Match(obj[start..i], @"^\s*([A-Za-z_$][\w$]*)\s*(?::|$)");
+                    if (m.Success) names.Add(m.Groups[1].Value);
+                    start = i + 1;
+                }
+            }
+            return names;
+        }
+        static bool HotpatchKey(string key) => key.StartsWith("hotpatch.", StringComparison.Ordinal) || key.StartsWith("confirm.hotpatch.", StringComparison.Ordinal)
+            || key.StartsWith("toast.hotpatch", StringComparison.Ordinal) || key.StartsWith("agentCfg.key.GIO_HOTPATCH", StringComparison.Ordinal)
+            || key.StartsWith("lib.hotpatch", StringComparison.Ordinal);
+        var sourceKeys = enTexts.Where(kv => HotpatchKey(kv.Key) && (kv.Value.Contains("{hosts}", StringComparison.Ordinal) || kv.Value.Contains("{source}", StringComparison.Ordinal)))
+            .Select(kv => kv.Key).OrderBy(k => k, StringComparer.Ordinal).ToList();
+        var unfilled = new List<string>();
+        foreach (string key in sourceKeys)
+        {
+            var wanted = Regex.Matches(enTexts[key], @"\{(\w+)\}").Select(m => m.Groups[1].Value).Distinct().ToList();
+            int uses = Regex.Matches(appJs, "'" + Regex.Escape(key) + "'").Count;
+            var calls = Regex.Matches(appJs, @"\b(?:t|T|tf)\('" + Regex.Escape(key) + @"',\s*\{([^{}]*)\}\)").Select(m => JsPropNames(m.Groups[1].Value)).ToList();
+            if (uses == 0 || calls.Count != uses || calls.Any(c => wanted.Any(w => !c.Contains(w))))
+                unfilled.Add($"{key} ({uses} uses, {calls.Count} calls naming {string.Join(" + ", wanted)})");
+        }
+        Check($"hotpatch: the per-file source is the answer's upstreamHosts (hotpatch_upstream_hosts) — each of the {sourceKeys.Count} texts that name {{hosts}} or {{source}} is drawn with every value it names"
+              + (unfilled.Count > 0 ? " — not: " + string.Join(", ", unfilled) : ""),
+            agentChainSrc.Contains("upstreamHosts=hotpatch_upstream_hosts(man), listedOnly=hotpatch_listed_only(man))", StringComparison.Ordinal)
+            && agentChainSrc.Contains("\"upstreamHosts\": [], \"listedOnly\": False,", StringComparison.Ordinal)
+            && Regex.IsMatch(appJs, @"\bd\.upstreamHosts\b") && appJs.Contains("d.listedOnly === true", StringComparison.Ordinal)
+            && sourceKeys.Count >= 8 && unfilled.Count == 0);
+        Check("hotpatch: a bundle is named only where the answer names one — bundles.hotpatch for the fix files, bundles.voice.<Lang> for a language (hotpatch_bundles_info: none = null / absent, the files then come file by file)",
+            agentChainSrc.Contains("\"dir\": HOTPATCH_BUNDLE_DIR, \"hotpatch\": None, \"voice\": {}}", StringComparison.Ordinal)
+            && agentChainSrc.Contains("out[\"hotpatch\"] = hotpatch_bundle_state(spec)", StringComparison.Ordinal)
+            && agentChainSrc.Contains("out[\"voice\"][lang] = hotpatch_bundle_state(vspec)", StringComparison.Ordinal)
+            && Regex.IsMatch(appJs, @"\bb\.hotpatch\b") && Regex.IsMatch(appJs, @"\bb\.voice\[lang\]"));
+        var agentSources = Regex.Match(agentChainSrc, @"^HOTPATCH_SOURCES = \(([^)]*)\)", RegexOptions.Multiline) is { Success: true } srcTuple
+            ? Regex.Matches(srcTuple.Groups[1].Value, "\"([^\"]*)\"").Select(m => m.Groups[1].Value).ToList() : new List<string>();
+        var pageMirrors = Regex.Match(appJs, @"\nconst HOTPATCH_MIRRORS = \{\n(.*?)\n\};", RegexOptions.Singleline) is { Success: true } mirrorTable
+            ? Regex.Matches(mirrorTable.Groups[1].Value, @"^\s*([A-Za-z_$][\w$]*): \{", RegexOptions.Multiline).Select(m => m.Groups[1].Value).ToList() : new List<string>();
+        Check($"hotpatch: the Mirror source card offers the agent's policy words ({string.Join(", ", agentSources)}) and no other ({string.Join(", ", pageMirrors)}) — `cdn` drawn as a way of filling the mirror (\"{EnText("hotpatch.mirror.cdn")}\"), never as miHoYo's CDN",
+            agentSources.Count == 2 && pageMirrors.SequenceEqual(agentSources)
+            && EnText("hotpatch.mirror.cdn").Length > 0 && !Regex.IsMatch(EnText("hotpatch.mirror.cdn"), @"\bCDN\b"));
+        // The texts that name the source by no host say none: no miHoYo, no year, and "mirror first" no time.
+        string[] neutralKeys =
+        {
+            "hotpatch.source.cdn", "hotpatch.source.bundle+cdn", "hotpatch.incompleteNoUpstream", "hotpatch.voice.unfetched",
+            "confirm.hotpatch.voiceEnableUnfetched", "hotpatch.mirror.archiveDesc", "agentCfg.key.GIO_HOTPATCH_UPSTREAM.sub",
+            "agentCfg.key.GIO_HOTPATCH_ONDEMAND_MAX.sub", "agentCfg.key.GIO_HOTPATCH_BUNDLES.sub",
+        };
+        var hotpatchTexts = enTexts.Where(kv => HotpatchKey(kv.Key)).ToList();
+        var notNeutral = hotpatchTexts.Where(kv => Regex.IsMatch(kv.Value, @"miHoYo|\b20\d\d\b")).Select(kv => kv.Key)
+            .Concat(neutralKeys.Where(k => EnText(k).Length == 0 || Regex.IsMatch(EnText(k), @"\bCDN\b")))
+            .Concat(Regex.IsMatch(EnText("hotpatch.voice.shortWait"), @"\d") || EnText("hotpatch.voice.shortWait").Length == 0 ? new[] { "hotpatch.voice.shortWait" } : Array.Empty<string>())
+            .Distinct().ToList();
+        Check($"hotpatch: no text of the card names miHoYo or a year, the {neutralKeys.Length} texts no host fills name no CDN, and \"mirror first\" names no time"
+              + (notNeutral.Count > 0 ? " — not: " + string.Join(", ", notNeutral) : ""),
+            hotpatchTexts.Count > 50 && notNeutral.Count == 0);
+        // Three texts state the agent's facts with no value of the answer in them: what a client downloads (3.2's about
+        // 281 MB the top of the range), a Disable that keeps the files (the route refuses them until the next Enable:
+        // hotpatch_route_closed) and a state reset (the fixes a stack still advertises are enabled again, their voice
+        // languages not: reconcile_hotpatch_enabled).
+        var staticTexts = new (string Key, string Says)[]
+        {
+            ("lib.hotpatchTitle", "about 130–280 MB"),
+            ("confirm.hotpatch.disableBody", "not served to anyone until the next Enable"),
+            ("confirm.stateReset.body", "still advertises stay enabled"),
+            ("confirm.stateReset.body", "voice languages have to be selected again"),
+        };
+        var staticWrong = staticTexts.Where(s => !EnText(s.Key).Contains(s.Says, StringComparison.Ordinal)).Select(s => $"{s.Key} (\"{s.Says}\")").ToList();
+        Check("hotpatch: the Library's size hint covers every version's client download (about 130–280 MB), a Disable's question says the files left on the server are served to nobody until the next Enable, and the state reset's that the fixes a stack still advertises stay enabled, their voice languages to be selected again"
+              + (staticWrong.Count > 0 ? " — not: " + string.Join(", ", staticWrong) : ""),
+            staticWrong.Count == 0
+            && agentChainSrc.Contains("def hotpatch_route_closed(rel):", StringComparison.Ordinal)
+            && agentChainSrc.Contains("def reconcile_hotpatch_enabled(data, keep_decisions=False):", StringComparison.Ordinal));
+        // The hotpatch default (I23, I52, I57): the default is data of the 3.2 manifest and of no other; the Prepare box
+        // (prepareDialog, prepareGo, confirmYes) is drawn from the agent's answer and sends a key only for the box it drew;
+        // the Quick Start step is one more step after the Prepare, judged from the facts; the Prepare request carries the
+        // tri-state key from the launcher to the agent's route.
+        JsonElement? hpMan32 = HotpatchManifest("3.2"), hpMan16 = HotpatchManifest("1.6"), hpMan28 = HotpatchManifest("2.8");
+        static bool HasDefaultKey(JsonElement? m) => m is { ValueKind: JsonValueKind.Object } e && e.TryGetProperty("defaultEnabled", out _);
+        // The agent's runtime code (everything above its selftest, which names the 3.2 manifest's key by version on purpose).
+        int hpSelftestAt = agentChainSrc.IndexOf("\ndef selftest():", StringComparison.Ordinal);
+        string agentRuntimeSrc = hpSelftestAt > 0 ? agentChainSrc[..hpSelftestAt] : agentChainSrc;
+        Check("hotpatch default is data (I23): the 3.2 manifest says defaultEnabled true, the 1.6 and 2.8 manifests carry no such key, and the agent's runtime code names no version on a line with the key",
+            hpMan32 is { ValueKind: JsonValueKind.Object } hpm32 && hpm32.TryGetProperty("defaultEnabled", out var hpDef32) && hpDef32.ValueKind == JsonValueKind.True
+            && !HasDefaultKey(hpMan16) && !HasDefaultKey(hpMan28) && hpSelftestAt > 0
+            && !Regex.IsMatch(agentRuntimeSrc, @"^.*(?:['""]\d+\.\d+['""].*defaultEnabled|defaultEnabled.*['""]\d+\.\d+['""]).*$", RegexOptions.Multiline));
+        string hpPrepareJs = JsFunction(appJs, "function prepareDialog(id, kind) {");
+        string hpGoJs = Regex.Match(appJs, @"\n  prepareGo: \(arg, ticked, selected, hotpatchTicked\) => \{.*?\n  \},\n", RegexOptions.Singleline).Value;
+        Check("hotpatch Prepare box: prepareDialog draws the hotpatch row only for kind setup and only when the agent answers available, defaultEnabled true and decided false; the row carries no ask; prepareGo sends extra.hotpatch only for a boolean; confirmYes hands the row's tick on as the fourth argument; the box's own action is confirmHotpatch",
+            hpPrepareJs.Contains("const hp = f && f.hotpatch;", StringComparison.Ordinal)
+            && hpPrepareJs.Contains("const hotpatchBox = kind === 'setup' && !!hp && hp.available === true && hp.defaultEnabled === true && hp.decided === false;", StringComparison.Ordinal)
+            && hpPrepareJs.Contains("hotpatch: hotpatchBox ? { label: t('server.prepare.hotpatch'), sub: t('server.prepare.hotpatchSub'), checked: true } : null,", StringComparison.Ordinal)
+            && !Regex.IsMatch(hpPrepareJs, @"\bask:")
+            && hpGoJs.Contains("if (kind === 'setup' && typeof hotpatchTicked === 'boolean') extra.hotpatch = hotpatchTicked;", StringComparison.Ordinal)
+            && appJs.Contains("if (ACTIONS[c.act]) ACTIONS[c.act](c.arg, c.checkbox ? !!c.checkbox.checked : undefined, c.selected, c.hotpatch ? !!c.hotpatch.checked : undefined); else render();", StringComparison.Ordinal)
+            && appJs.Contains("confirmHotpatch: () => { const c = S.confirm; if (!c || !c.hotpatch) return; c.hotpatch.checked = !c.hotpatch.checked; render(); },", StringComparison.Ordinal)
+            && appJs.Contains("data-act=\"confirmHotpatch\"", StringComparison.Ordinal));
+        string acJs = File.ReadAllText(Path.Combine(repoRoot, "app", "Relic.Core", "Server", "AgentClient.cs"));
+        Check("hotpatch Prepare request: SetupServerAsync takes the tri-state hotpatch (null = absent) and names it in its body; Backend server.setup reads BoolOrNull(p, \"hotpatch\") before its job starts and passes it on",
+            acJs.Contains("bool? pathfinding = null, bool? hotpatch = null,", StringComparison.Ordinal)
+            && acJs.Contains("new { version, txtFixes, force, progress, pathfinding, hotpatch }", StringComparison.Ordinal)
+            && backendCs.Contains("bool? hotpatch = BoolOrNull(p, \"hotpatch\");", StringComparison.Ordinal)
+            && backendCs.Contains("pathfinding: pathfinding, hotpatch: hotpatch, onLine: log", StringComparison.Ordinal)
+            && !qsJs.Contains("'server.hotpatch'", StringComparison.Ordinal));
+        Check("hotpatch Quick Start step (I57): qsStepsOf adds s.<v>.hotpatch after the Prepare and makes start wait for it; the judge reads the agent's answer (SKIP when defaultEnabled is not true, DONE when enabled); qsPumpHotpatch runs server.hotpatch through runServerJob only; the step is in QS_STATUS_KINDS, QS_HINT_KINDS and the job-kind allowlist; qsPumpPrepare is unchanged",
+            qsJs.Contains("add(`s.${v}.hotpatch`, 'server', 'hotpatch', { v, deps: [`s.${v}.prepare`] });", StringComparison.Ordinal)
+            && qsJs.Contains("add(`s.${v}.start`, 'server', 'start', { v, deps: [`s.${v}.prepare`, `s.${v}.pathfinding`, `s.${v}.hotpatch`] });", StringComparison.Ordinal)
+            && qsJs.Contains("case 'hotpatch': {\n      if (!qsOnTarget() || !qsFresh()) return null;", StringComparison.Ordinal)
+            && qsJs.Contains("if (!h || h.available !== true || h.defaultEnabled !== true) return QS_SKIP;", StringComparison.Ordinal)
+            && qsJs.Contains("return h.enabled === true ? QS_DONE : null;", StringComparison.Ordinal)
+            && qsJs.Contains("if (h.decided === true) return h.enabled === true ? QS_DONE : QS_SKIP;", StringComparison.Ordinal)
+            && qsJs.Contains("if (!h || h.available !== true || h.defaultEnabled !== true || h.decided !== false || h.enabled === true) return;", StringComparison.Ordinal)
+            && qsJs.Contains("case 'hotpatch': {\n      if (!qsOnTarget() || srvGen <= rt.gen) return null;", StringComparison.Ordinal)
+            && Regex.IsMatch(qsJs, @"const QS_STATUS_KINDS = \[[^\]]*'hotpatch'[^\]]*\];")
+            && Regex.IsMatch(qsJs, @"const QS_HINT_KINDS = \[[^\]]*'hotpatch'[^\]]*\];")
+            && qsJobKinds.Contains("hotpatch") && qsJs.Contains("qsRunJob(st, 'hotpatch', sv, { enabled: true });", StringComparison.Ordinal)
+            && qsJs.Contains("case 'hotpatch': qsPumpHotpatch(st); return;", StringComparison.Ordinal)
+            && qsJs.Contains("case 'hotpatch': return T('qs.step.hotpatch');", StringComparison.Ordinal)
+            && QsCount(qsJs, @"\bfunction qsPumpPrepare\(") == 1);
+        // The category pairs of the agent's migrate tuple and of build/save_compat.py's ID_CATEGORIES name the same nine
+        // categories with the same target table, in the same order (I27: the migrate follows the save's own rules).
+        int migAgentAt = agentChainSrc.IndexOf("MIGRATE_ID_CATEGORIES = (", StringComparison.Ordinal);
+        int migAgentEnd = migAgentAt < 0 ? -1 : agentChainSrc.IndexOf("\n# The categories an item may be of", migAgentAt, StringComparison.Ordinal);
+        string saveCompatSrc = File.Exists(Path.Combine(repoRoot, "build", "save_compat.py")) ? File.ReadAllText(Path.Combine(repoRoot, "build", "save_compat.py")) : "";
+        int migRefAt = saveCompatSrc.IndexOf("\nID_CATEGORIES = (", StringComparison.Ordinal);
+        int migRefEnd = migRefAt < 0 ? -1 : saveCompatSrc.IndexOf("\n)", migRefAt, StringComparison.Ordinal);
+        var migAgent = migAgentAt < 0 || migAgentEnd < 0 ? new List<(string Category, string Target)>()
+            : Regex.Matches(agentChainSrc[migAgentAt..migAgentEnd], @"\(""(\w+)"", ""(\w+)""\)").Select(m => (m.Groups[1].Value, m.Groups[2].Value)).ToList();
+        var migRef = migRefAt < 0 || migRefEnd < 0 ? new List<(string Category, string Target)>()
+            : Regex.Matches(saveCompatSrc[migRefAt..migRefEnd], @"\(""(\w+)"", \(""\w+"", ""\w+""\), \(""(\w+)"", ""\w+""\)\)").Select(m => (m.Groups[1].Value, m.Groups[2].Value)).ToList();
+        Check("migrate categories (I27): the agent's MIGRATE_ID_CATEGORIES and build/save_compat.py ID_CATEGORIES name the same nine categories, each with the same target table, in the same order"
+              + (migAgent.Count == migRef.Count ? "" : $" — {migAgent.Count} pairs in the agent, {migRef.Count} in save_compat.py"),
+            migAgent.Count == 9 && migRef.Count == 9 && migAgent.SequenceEqual(migRef));
+        // The voice rows: a language that is not selected is named as unserved whether or not its packs are complete on disk,
+        // a complete one that is not selected is kept (not served), and the unserved note and the Enable question name the
+        // Mirror button, because a tick alone only changes the local selection. The Prepare box and the Quick Start step
+        // have their texts too.
+        Check("hotpatch voice rows and card texts: the unserved list is every unselected language, a complete unselected one is shown as kept, the unserved note and the Enable question name the Mirror button, and the Prepare box and the Quick Start step have their texts",
+            EnText("hotpatch.voice.stateKept").Length > 0
+            && appJs.Contains("unserved: langs.filter((l) => !l.selected),", StringComparison.Ordinal)
+            && !appJs.Contains("unserved: langs.filter((l) => !l.selected && !l.full)", StringComparison.Ordinal)
+            && appJs.Contains("const st = l.full && l.selected ? ['hotpatch.voice.stateMirrored', 'var(--ok)']\n      : l.full ? ['hotpatch.voice.stateKept', 'var(--muted)']", StringComparison.Ordinal)
+            && EnText("hotpatch.voice.unserved").Contains("run \"Mirror the selected voice packs\" below", StringComparison.Ordinal)
+            && !EnText("hotpatch.voice.unserved").Contains("tick the language and mirror it", StringComparison.Ordinal)
+            && !EnText("hotpatch.voice.unserved").Contains("is mirrored when ticked", StringComparison.Ordinal)
+            && EnText("confirm.hotpatch.voiceEnableWarn").Contains("run \"Mirror the selected voice packs\" (a language not yet complete is fetched by that job)", StringComparison.Ordinal)
+            && !EnText("confirm.hotpatch.voiceEnableWarn").Contains("is mirrored then", StringComparison.Ordinal)
+            && !EnText("confirm.hotpatch.voiceEnableWarn").Contains("mirror the language first", StringComparison.Ordinal)
+            && EnText("server.prepare.hotpatch").Length > 0 && EnText("server.prepare.hotpatchSub").Length > 0 && EnText("qs.step.hotpatch").Length > 0
+            && !Regex.IsMatch(EnText("hotpatch.voice.stateKept") + EnText("server.prepare.hotpatchSub"), @"miHoYo|\b20\d\d\b"));
+        // "Add version…" and "Change folder…" open the folder dialog in its two ways, and both ask the agent a re-point of
+        // the version to the folder: the download is a step of the chain — the re-point to the folder as the agent's check
+        // spelt it, then the download, without the download's question (the dialog named the size) —, the package already
+        // there the re-point alone.
+        Check("chain: Add version… / Change folder… — both ways a re-point (relocQuery), the download a chain step (the re-point to the folder the agent's check answered, then the download), the package already there the re-point alone",
+            appJs.Contains("addVersion: (id) => openFolderFlow(id, 'add'),", StringComparison.Ordinal)
+            && appJs.Contains("changeFolder: (id) => openFolderFlow(id, 'change'),", StringComparison.Ordinal)
+            && appJs.Contains("mode: r.flow ? 'repoint' : r.mode", StringComparison.Ordinal)
+            && appJs.Contains("const dir = typeof res.to === 'string' && res.to.trim() ? res.to : q.dir;", StringComparison.Ordinal)
+            && appJs.Contains("if (r.flow && r.mode === 'download') { chainAdd({ version: q.version, dir, repoint: true, fetch: true, stop: carries }); return; }", StringComparison.Ordinal)
+            && appJs.Contains("runServerJob('relocate', q.version, { dir: q.dir, mode: q.mode });", StringComparison.Ordinal));
+        // A step of the chain, and the folder dialog's Start, are held against the version as the agent names it: the
+        // /status entry's configured / dir / present (chainDirOf, chainJudge — at every status read after the step was
+        // queued or its re-point ended) and the relocation check's from (relocFromNow). A version given a folder or a server
+        // meanwhile — another admin, another launcher, gio_agent.py --relocate — is then neither re-pointed nor downloaded
+        // into. The agent writes those names (status(), relocate_check): one spelt otherwise on either side and the guard
+        // never fires.
+        bool agentStatusNames = System.Text.RegularExpressions.Regex.IsMatch(agentChainSrc,
+            @"""dir"": meta\[""dir""\],\s*""configured"": bool\(meta\[""dir""\]\),\s*""up"": [^\r\n]*\r?\n\s*""present"": present,");
+        Check("chain / folder dialog: held against the agent's own names — /status configured / dir / present (chainDirOf, chainJudge at each status read after a step was queued) and the check's from (relocFromNow) — and the agent writes them so",
+            agentStatusNames
+            && agentChainSrc.Contains("rep = {\"version\": version, \"mode\": mode, \"from\": cur, ", StringComparison.Ordinal)
+            && appJs.Contains("if (e.configured === false) return '';", StringComparison.Ordinal)
+            && appJs.Contains("return typeof e.dir === 'string' && e.dir.trim() ? e.dir.trim() : null;", StringComparison.Ordinal)
+            && appJs.Contains("there = S.srv.versions[id].present === true;", StringComparison.Ordinal)
+            && appJs.Contains("typeof ch.res.from === 'string' ? ch.res.from.trim() : null;", StringComparison.Ordinal)
+            && appJs.Contains("if (srvGen > (step.gen || 0) && !chainJudge(c, step)) { chainNext(); return; }", StringComparison.Ordinal)
+            && appJs.Contains("if (st) srvGen++;", StringComparison.Ordinal)
+            && L.Has("server.chain.serverThere") && L.Has("server.chain.folderKept") && L.Has("server.chain.waitBusy"));
+        // The Windows install form's live line under a folder field: localagent.folderCheck reads this PC only, so it is not
+        // behind RequireAdmin (like localagent.status), and it answers under the names the form sends and reads.
+        int folderCheckAt = backendCs.IndexOf("case \"localagent.folderCheck\":", StringComparison.Ordinal);
+        Check("localagent.folderCheck: Backend answers it ({dir, version} → {kind, drive, free, problem, extractor}) without RequireAdmin, and the install form sends and reads those names",
+            backendCs.Contains("case \"localagent.folderCheck\": return await LocalFolderCheckAsync(p);", StringComparison.Ordinal)
+            && CaseFreeOfRequireAdmin(backendCs, folderCheckAt)
+            && modesCs.Contains("string dir = Str(p, \"dir\").Trim(), version = Str(p, \"version\").Trim();", StringComparison.Ordinal)
+            && modesCs.Contains("return new { kind = (string?)kind, drive, free, problem, extractor };", StringComparison.Ordinal)
+            && appJs.Contains("rpc('localagent.folderCheck', { dir, version: s.id })", StringComparison.Ordinal)
+            && appJs.Contains("rpc('localagent.folderCheck', { dir: '', version: '' })", StringComparison.Ordinal)
+            && appJs.Contains("if (typeof r.problem === 'string' && r.problem.trim()) return line(esc(r.problem), 'bad');", StringComparison.Ordinal)
+            && appJs.Contains("if (isBytes(r.free) && typeof r.drive === 'string' && r.drive) {", StringComparison.Ordinal)
+            && appJs.Contains("if (ch.res && typeof ch.res.extractor === 'boolean') a.extractor = ch.res.extractor;", StringComparison.Ordinal));
 
         // ── pre-launch status parsing: "not on this server" vs stopped vs unknown ──
         // Only an explicit present:false is absent; a version the answer does not list stays unknown.
@@ -2505,11 +6063,1098 @@ static class ServerSpike
         Check("admin: a present version under the docker error stays unknown",
             Adm(admFog, "2.8") is { Up: null, Hosted: true });
 
+        // ── an answer that carries none of the optional facts (`loading` among them): the plain results ──
+        const string plainAdm = """{"versions":{"1.6":{"present":true,"bootstrapped":true,"up":true,"healthy":true,"servicesDown":[]},"2.8":{"present":true,"bootstrapped":true,"up":false}}}""";
+        var plainUp = Adm(plainAdm, "1.6");
+        var plainDown = Adm(plainAdm, "2.8");
+        Check("admin: a status without `loading` is a plain answer — up and all good, stopped and hosted, neither loading nor unlisted",
+            plainUp is { Up: true, Hosted: true, AllGood: true, Loading: false, Unlisted: false, DegradedUnlisted: false } && plainUp.Degraded == ""
+            && plainDown is { Up: false, Hosted: true, AllGood: false, Loading: false, Unlisted: false } && plainUp.HostedVersions == "1.6, 2.8");
+        const string plainPub = """{"versions":{"1.6":{"present":true,"up":true,"healthy":true},"2.8":{"present":true,"up":false,"healthy":false}}}""";
+        Check("public: a snapshot without `loading` is a plain answer — up and all good, stopped and hosted",
+            Pub(plainPub, "1.6") is { Up: true, Hosted: true, AllGood: true, Loading: false, Unlisted: false }
+            && Pub(plainPub, "2.8") is { Up: false, Hosted: true, Loading: false, Unlisted: false });
+
+        // ── still loading: every service runs and the game server lets nobody in yet ──
+        // Only an answered true counts. The admin answer also says false and null (its log cannot tell);
+        // the public one says the key only while it is true.
+        var admLoading = Adm("""{"versions":{"1.6":{"present":true,"up":true,"healthy":true,"servicesDown":[],"loading":true}}}""", "1.6");
+        Check("admin: up + loading:true = up, hosted, NOT all good — and not degraded",
+            admLoading is { Up: true, Hosted: true, Loading: true, AllGood: false, DegradedUnlisted: false, Unlisted: false } && admLoading.Degraded == "");
+        Check("admin: loading:false and loading:null are a server that is not loading (all good)",
+            Adm("""{"versions":{"1.6":{"up":true,"healthy":true,"servicesDown":[],"loading":false}}}""", "1.6") is { AllGood: true, Loading: false }
+            && Adm("""{"versions":{"1.6":{"up":true,"healthy":true,"servicesDown":[],"loading":null}}}""", "1.6") is { AllGood: true, Loading: false });
+        var admLoadingDead = Adm("""{"versions":{"1.6":{"up":true,"healthy":false,"servicesDown":["gameserver"],"loading":true}}}""", "1.6");
+        Check("admin: dead services beside loading:true keep their list (the degraded text is the one shown)",
+            admLoadingDead is { Up: true, Loading: true, AllGood: false } && admLoadingDead.Degraded == "gameserver");
+        Check("admin: `loading` on a version that is not up says nothing (stopped, not loading)",
+            Adm("""{"versions":{"1.6":{"present":true,"up":false,"loading":true}}}""", "1.6") is { Up: false, Loading: false });
+        Check("public: up + healthy + loading:true = NOT all good, without a degraded flag",
+            Pub("""{"versions":{"1.6":{"present":true,"up":true,"healthy":true,"loading":true}}}""", "1.6")
+                is { Up: true, Hosted: true, Loading: true, AllGood: false, DegradedUnlisted: false });
+        Check("public: only a JSON true is loading (false, a string and an absent key are not)",
+            Pub("""{"versions":{"1.6":{"up":true,"healthy":true,"loading":false}}}""", "1.6") is { AllGood: true, Loading: false }
+            && Pub("""{"versions":{"1.6":{"up":true,"healthy":true,"loading":"true"}}}""", "1.6") is { AllGood: true, Loading: false });
+
+        // ── a version the agent does not list: unlisted, never "stopped" ──
+        // The agent names the versions it knows; one that is not among them cannot be started by it, so
+        // "stopped ... until the server is started" would promise what cannot happen. Claimed only on an
+        // answer that lists at least one version and could ask docker.
+        const string admTwo = """{"versions":{"1.6":{"present":true,"up":true,"healthy":true,"servicesDown":[]},"2.8":{"present":false,"up":false}}}""";
+        var admUnlisted = Adm(admTwo, "9.9");
+        Check("admin: a version the answer does not list = unknown + UNLISTED (not stopped, not absent), and what the server has is still named",
+            admUnlisted is { Up: null, Hosted: null, Unlisted: true, AllGood: false, Loading: false } && admUnlisted.HostedVersions == "1.6");
+        Check("admin: the listed versions of the same answer are not unlisted (running, absent)",
+            Adm(admTwo, "1.6") is { Up: true, Unlisted: false } && Adm(admTwo, "2.8") is { Up: false, Hosted: false, Unlisted: false });
+        var pubUnlisted = Pub("""{"versions":{"1.6":{"present":true,"up":true,"healthy":true},"2.8":{"present":false}}}""", "9.9");
+        Check("public: a version the snapshot does not list = unknown + UNLISTED",
+            pubUnlisted is { Up: null, Hosted: null, Unlisted: true, AllGood: false } && pubUnlisted.HostedVersions == "1.6" && pubUnlisted.Source == "public");
+        // The two answers that stay plain unknown: the docker fog (nothing is asserted from such an
+        // answer) and one that holds no version list to look in (not an agent's word on any version).
+        Check("admin: under the top-level docker error an unnamed version stays unknown, NOT unlisted",
+            Adm(admFog, "9.9") is { Up: null, Hosted: null, Unlisted: false });
+        Check("admin: an answer with no version list — none, an empty one, not an object — is unknown, NOT unlisted and never 'stopped'",
+            Adm("""{"agent":"1.0"}""", "9.9") is { Up: null, Unlisted: false }
+            && Adm("""{"versions":{}}""", "9.9") is { Up: null, Unlisted: false }
+            && Adm("""{"versions":[]}""", "9.9") is { Up: null, Unlisted: false }
+            && Adm("""[]""", "9.9") is { Up: null, Unlisted: false });
+        Check("public: under statusUnknown an unnamed version stays unknown, NOT unlisted",
+            Pub(fog, "9.9") is { Up: null, Hosted: null, Unlisted: false });
+        Check("public: a snapshot with no version list is unknown, NOT unlisted",
+            Pub("""{"name":"box"}""", "9.9") is { Up: null, Unlisted: false } && Pub("""{"versions":{}}""", "9.9") is { Up: null, Unlisted: false });
+        // So does an answer that NAMES the version with an entry nothing can be read from: that is a
+        // broken answer about a version it lists, not a list without the version.
+        string[] brokenEntries = { "null", "false", "\"x\"", "[]" };
+        Check("admin: a version named with an entry that is no object — null, false, a string, a list — is unknown, NOT unlisted and never 'stopped'",
+            brokenEntries.All(broken =>
+                Adm("""{"versions":{"1.6":{"present":true,"up":true},"9.9":""" + broken + "}}", "9.9") is { Up: null, Hosted: null, Unlisted: false }
+                && Adm("""{"versions":{"9.9":""" + broken + "}}", "9.9") is { Up: null, Hosted: null, Unlisted: false }));
+        Check("public: a version named with an entry that is no object is unknown, NOT unlisted",
+            brokenEntries.All(broken =>
+                Pub("""{"versions":{"1.6":{"present":true,"up":true,"healthy":true},"9.9":""" + broken + "}}", "9.9") is { Up: null, Hosted: null, Unlisted: false }
+                && Pub("""{"versions":{"9.9":""" + broken + "}}", "9.9") is { Up: null, Hosted: null, Unlisted: false }));
+        // The page reads the list the same way: "not listed" only for an id the answer does not name (the
+        // card and the PLAY pre-check share one test); an entry that is no object stays named with no fact
+        // under it, in the admin answer and in the snapshot alike (one reader, statusVersions, fills the
+        // cards' cache and the pre-check); and the player card calls MISSING only an answered present:false.
+        Check("page: 'not listed' needs an answer that names versions and not this id — a broken entry and a snapshot without the version's entry read as unverified",
+            uiJs.Contains("const versionsLack = (vs, id) => !!vs && Object.keys(vs).length > 0 && !Object.prototype.hasOwnProperty.call(vs, id);", StringComparison.Ordinal)
+            && uiJs.Contains("return S.srv.state === 'ok' && !srvDockerError() && versionsLack(S.srv.versions, id);", StringComparison.Ordinal)
+            && uiJs.Contains("if (!entry && !agentErr && versionsLack(vs, id)) {", StringComparison.Ordinal)
+            && uiJs.Contains("const isVersionEntry = (e) => !!e && typeof e === 'object' && !Array.isArray(e);", StringComparison.Ordinal)
+            && uiJs.Contains("if (!isVersionEntry(e)) { versions[id] = null; return; }", StringComparison.Ordinal)
+            && uiJs.Contains("S.srv.versions = statusVersions(st) || {};", StringComparison.Ordinal)
+            && uiJs.Contains("const e = isVersionEntry(named) ? named : null;", StringComparison.Ordinal)
+            && uiJs.Contains(": !e ? (srvUnlisted(v.id) ? 'unlisted' : 'unknown') : e.present === false ? 'absent'", StringComparison.Ordinal));
+        // The agent's word is final for an unlisted version: the mode-aware probe returns it instead of
+        // falling through to the SDK port, which answers for whichever version runs.
+        string probePath = Path.Combine(repoRoot, "app", "Relic.Core", "Server", "ServerProbe.cs");
+        string probeCs = File.Exists(probePath) ? File.ReadAllText(probePath) : "";
+        Check("probe: the admin branch returns on an unlisted answer (the SDK port never replaces the agent's word), and the SDK probe keeps its fixed client string",
+            probeCs.Contains("if (r.Up is not null || r.Unlisted) return r with { Source = \"agent\" };", StringComparison.Ordinal)
+            && probeCs.Contains("/query_region_list?version=OSRELWin1.6.0&lang=2&platform=3&binary=1&time=0", StringComparison.Ordinal));
+        // The shortcut's question and the page's own pre-check: absent first, then unlisted, then loading —
+        // each with its own text, and every one of them only asks (the game still starts on Yes).
+        string preflightPath = Path.Combine(repoRoot, "app", "Relic.App", "PlayPreflight.cs");
+        string preflightCs = File.Exists(preflightPath) ? File.ReadAllText(preflightPath) : "";
+        int pfAbsent = preflightCs.IndexOf("if (r.Hosted == false)", StringComparison.Ordinal);
+        int pfUnlisted = preflightCs.IndexOf("else if (r.Unlisted)", StringComparison.Ordinal);
+        int pfLoading = preflightCs.IndexOf("else if (r.Up == true && r.Degraded.Length == 0 && r.Loading)", StringComparison.Ordinal);
+        Check("preflight: the shortcut's question has its unlisted and its loading branch, after 'not on this server' and before stopped / degraded / unknown",
+            pfAbsent > 0 && pfUnlisted > pfAbsent && pfLoading > pfUnlisted
+            && preflightCs.Contains("L.T(\"shell.preflight.unlistedBody\"", StringComparison.Ordinal) && preflightCs.Contains("L.T(\"shell.preflight.unlistedTitle\"", StringComparison.Ordinal)
+            && preflightCs.Contains("L.T(\"shell.preflight.loadingBody\")", StringComparison.Ordinal) && preflightCs.Contains("L.T(\"shell.preflight.loadingTitle\")", StringComparison.Ordinal)
+            && new[] { "shell.preflight.unlistedBody", "shell.preflight.unlistedTitle", "shell.preflight.loadingBody", "shell.preflight.loadingTitle" }.All(L.Has));
+        int uiLoading = uiJs.IndexOf("title: t('confirm.serverLoading.title')", StringComparison.Ordinal);
+        int uiAbsent = uiJs.IndexOf("title: t('confirm.serverDown.titleAbsent', { id })", StringComparison.Ordinal);
+        int uiUnlisted = uiJs.IndexOf("title: t('confirm.serverDown.titleUnlisted', { id })", StringComparison.Ordinal);
+        int uiDown = uiJs.IndexOf("t('confirm.serverDown.titleDown')", StringComparison.Ordinal);
+        Check("PLAY pre-check: the page asks its loading and its unlisted question (both start the game on Yes), in the order loading, absent, unlisted, stopped",
+            uiLoading > 0 && uiAbsent > uiLoading && uiUnlisted > uiAbsent && uiDown > uiUnlisted
+            && uiJs.Contains("if (entry && entry.up && !agentErr && !degraded && !loading) return ACTIONS.playGo(id);", StringComparison.Ordinal)
+            && new[] { "confirm.serverLoading.title", "confirm.serverLoading.body", "confirm.serverLoading.yes", "confirm.serverDown.titleUnlisted", "confirm.serverDown.bodyUnlisted" }.All(L.Has));
+        // What the page shows per version comes from the init state and the agent's answer, never from a
+        // version id: the art a build ships, the CDN a catalogue names, the skins a version has.
+        Check("init state: a version's art and its CDN are facts of the build (heroArt / summerArt / hasCdn), and the page draws from them",
+            backendCs.Contains("heroArt = ShipsArt(\"hero\", v.Id),", StringComparison.Ordinal)
+            && backendCs.Contains("summerArt = ShipsArt(\"summer\", v.Id),", StringComparison.Ordinal)
+            && backendCs.Contains("hasCdn = v.HasCdn,", StringComparison.Ordinal)
+            && uiJs.Contains("const heroStyle = (id) => ((versionById(id) || {}).heroArt ?", StringComparison.Ordinal)
+            && uiJs.Contains("const summerStyle = (id) => ((versionById(id) || {}).summerArt ?", StringComparison.Ordinal)
+            && !uiJs.Contains("heroImg(", StringComparison.Ordinal) && !uiJs.Contains("summerHero(", StringComparison.Ordinal));
+        Check("game data: the backend asks for the selected version, or for none — no version id is a fallback",
+            backendCs.Contains("Str(p, \"version\") is { Length: > 0 } v ? v : _state.SelectedVersionId ?? \"\");", StringComparison.Ordinal));
+
+        // ── the account list (Server → Players → Accounts on this server) ──
+        // server.accounts is a plain rpc behind RequireAdmin: it never takes the job slot (_serverJobBusy) — the agent reads
+        // the list beside any job, and the list must not wait for a job this launcher follows — and an agent without the
+        // route (its 404) comes back as {tooOld: true, message} for the card's own "update the agent" text.
+        // server.accountcopy is a job behind RequireAdmin whose payload is read and judged before the job exists. Nothing of
+        // a row or of a search reaches relic.log. The agent spike plays the client against a stand-in agent; here the
+        // Backend's half (Relic.App, which the spikes do not reference) is read from its source.
+        static string MemberText(string src, string signature)
+        {
+            int at = src.IndexOf(signature, StringComparison.Ordinal);
+            if (at < 0) return "";
+            var next = System.Text.RegularExpressions.Regex.Match(src[(at + signature.Length)..], @"\r?\n    (?:///|public |private |internal |static |\})");
+            return next.Success ? src.Substring(at, signature.Length + next.Index) : src[at..];
+        }
+        string accountsCase = CaseText(backendCs, backendCs.IndexOf("case \"server.accounts\":", StringComparison.Ordinal));
+        string acctCopyCase = CaseText(backendCs, backendCs.IndexOf("case \"server.accountcopy\":", StringComparison.Ordinal));
+        string acctsGet = MemberText(modesCs, "private async Task<object?> AccountsGetAsync(JsonElement p)");
+        string copyFromPayload = MemberText(modesCs, "private static AccountCopyRequest AccountCopyFromPayload(JsonElement p)");
+        string accountsAsync = MemberText(agentClientCs, "public async Task<JsonElement> AccountsAsync(");
+        string accountsForPage = MemberText(agentClientCs, "public static JsonElement AccountsForPage(JsonElement answer)");
+        string copyAsync = MemberText(agentClientCs, "public async Task<JsonElement> AccountCopyAsync(AccountCopyRequest request,");
+        string hasList = MemberText(agentClientCs, "private async Task<bool> HasAccountListAsync(string version, CancellationToken ct)");
+        string copyForPage = MemberText(agentClientCs, "public static JsonElement AccountCopyForPage(JsonElement snapshot)");
+        Check("accounts: Backend answers server.accounts behind RequireAdmin as a plain rpc (AccountsGetAsync) — no job, never the job slot _serverJobBusy",
+            accountsCase.Length > 0 && GatedCall(accountsCase, "return await AccountsGetAsync(p);")
+            && !accountsCase.Contains("StartServerJob", StringComparison.Ordinal) && !accountsCase.Contains("_serverJobBusy", StringComparison.Ordinal)
+            && acctsGet.Length > 0 && !acctsGet.Contains("_serverJobBusy", StringComparison.Ordinal) && !acctsGet.Contains("StartServerJob", StringComparison.Ordinal)
+            && acctsGet.Contains("WithAgent(a => a.AccountsAsync(version, after, limit, q))", StringComparison.Ordinal));
+        Check("accounts: an agent without the route — AccountsAsync turns its 404 into core.agent.accountsUnsupported, and AccountsGetAsync answers it as {tooOld = true, message}, never a failed rpc",
+            accountsAsync.Contains("catch (AgentHttpException ex) when (ex.Status == 404)", StringComparison.Ordinal)
+            && accountsAsync.Contains("throw new AgentHttpException(404, L.T(\"core.agent.accountsUnsupported\"));", StringComparison.Ordinal)
+            && acctsGet.Contains("catch (AgentHttpException ex) when (ex.Status == 404) { return new { tooOld = true, message = ex.Message }; }", StringComparison.Ordinal)
+            && new[] { "core.agent.accountsUnsupported", "core.agent.accountsTimeout", "core.agent.accountCopyUnsupported", "backend.account.copyInvalid" }.All(L.Has));
+        // The read's own limit (55 s: the agent's 5 s wait + 40 s budget + a hung call killed, under the HTTP client's 60 s)
+        // ends it with a sentence that says so; a cancel of the caller's own stays a cancel (the agent spike plays that one —
+        // the limit itself is too long to play).
+        Check("accounts: AccountsAsync gives a read up after AccountsTimeout with core.agent.accountsTimeout (its seconds), only when the caller did not cancel",
+            accountsAsync.Contains("timeout.CancelAfter(AccountsTimeout);", StringComparison.Ordinal)
+            && accountsAsync.Contains("catch (OperationCanceledException) when (!ct.IsCancellationRequested)", StringComparison.Ordinal)
+            && accountsAsync.Contains("throw new TimeoutException(L.T(\"core.agent.accountsTimeout\", new { seconds = (int)AccountsTimeout.TotalSeconds }));", StringComparison.Ordinal)
+            && accountsAsync.Contains("await GetAsync(AccountsQuery(version, after, limit, q), timeout.Token)", StringComparison.Ordinal)
+            && L.T("core.agent.accountsTimeout", new { seconds = 55 }).Contains("55", StringComparison.Ordinal));
+        var acctLogging = new[] { ("AccountsGetAsync", acctsGet), ("the server.accounts case", accountsCase), ("AccountsAsync", accountsAsync), ("AccountsForPage", accountsForPage),
+            ("AccountCopyAsync", copyAsync), ("HasAccountListAsync", hasList), ("AccountCopyForPage", copyForPage), ("the server.accountcopy case", acctCopyCase) }
+            .Where(m => m.Item2.Length == 0 || m.Item2.Contains("Log.", StringComparison.Ordinal)).Select(m => m.Item1).ToList();
+        Check("accounts: nothing of a row or of a search reaches relic.log — the dispatcher logs an rpc's type alone, the account code logs nothing, a job's line names its kind and version"
+              + (acctLogging.Count > 0 ? " — missing or logging: " + string.Join(", ", acctLogging) : ""),
+            backendCs.Contains("if (type is not (\"window.drag\")) Log.Info($\"msg <- {type}\");", StringComparison.Ordinal) && acctLogging.Count == 0
+            && backendCs.Contains("Log.Info($\"server job done: {kind} {version}\");", StringComparison.Ordinal));
+        Check("accounts: Backend answers server.accountcopy behind RequireAdmin — the gate first, then the payload read and judged (AccountCopyFromPayload) before the job exists, the job's result through AgentClient.AccountCopyForPage",
+            acctCopyCase.Length > 0 && GatedCall(acctCopyCase, "var copy = AccountCopyFromPayload(p);")
+            && acctCopyCase.IndexOf("var copy = AccountCopyFromPayload(p);", StringComparison.Ordinal) < acctCopyCase.IndexOf("return StartServerJob(\"accountcopy\", copy.Version,", StringComparison.Ordinal)
+            && acctCopyCase.Contains("AgentClient.AccountCopyForPage(await a.AccountCopyAsync(copy, log))", StringComparison.Ordinal));
+        Check("accounts: AccountCopyFromPayload refuses with backend.account.copyInvalid before a job exists — dryRun a JSON bool or nothing, exactly one source and one target (Problem)",
+            copyFromPayload.Contains("_ => throw Invalid(),", StringComparison.Ordinal) && copyFromPayload.Contains("if (request.Problem is not null) throw Invalid();", StringComparison.Ordinal)
+            && copyFromPayload.Contains("L.T(\"backend.account.copyInvalid\")", StringComparison.Ordinal));
+        Check("accounts: AccountCopyAsync sends anything but the plain copy only to an agent that has the list (HasAccountListAsync: limit=0, its 404 = no) — else core.agent.accountCopyUnsupported, nothing posted",
+            copyAsync.Contains("if (!request.IsPlain && !await HasAccountListAsync(request.Version, ct))", StringComparison.Ordinal)
+            && copyAsync.Contains("throw new AgentHttpException(404, L.T(\"core.agent.accountCopyUnsupported\"));", StringComparison.Ordinal)
+            && copyAsync.IndexOf("HasAccountListAsync", StringComparison.Ordinal) < copyAsync.IndexOf("RunJobAsync(\"server/account/copy\"", StringComparison.Ordinal)
+            && hasList.Contains("&limit=0", StringComparison.Ordinal) && hasList.Contains("catch (AgentHttpException ex) when (ex.Status == 404) { return false; }", StringComparison.Ordinal));
+        // The page's half: the same rpc names and job kind; a reply for another target or an older request dropped; the card
+        // reset by a change of server, an agent install and an agent update that replaced the agent; the check of a copy sent
+        // first, the copy itself only from its question's Yes; the check and its new sources only to an agent that answered
+        // the list in this session; no timer that reads the list.
+        static string JsFunction(string src, string header, string end = "\n}\n")
+        {
+            int at = src.IndexOf(header, StringComparison.Ordinal);
+            if (at < 0) return "";
+            int stop = src.IndexOf(end, at, StringComparison.Ordinal);
+            return stop < 0 ? src[at..] : src[at..stop];
+        }
+        string loadAcctsJs = JsFunction(appJs, "async function loadAccts(more) {");
+        string acctsBlankJs = JsFunction(appJs, "function acctsBlank() {");
+        string updateEndedJs = JsFunction(appJs, "function agentUpdateEnded(u, replaced) {");
+        string deployDoneJs = JsFunction(appJs, "on('deploy.done', (d) => {", "\n});\n");
+        string copyStartJs = JsFunction(appJs, "function acctsCopyStart(kind, version, body, from, to, tpl, form) {");
+        string copyGoJs = OpenerText(appJs, "acctsCopyGo"), formGoJs = OpenerText(appJs, "acctCopyGo");
+        int replacedAt = updateEndedJs.IndexOf("if (here && replaced) {", StringComparison.Ordinal);
+        Check("accounts: the page reads the list through rpc 'server.accounts' {version, after, limit, q}, drops a reply for another target or an older request, and reads an agent without the route by the Backend's {tooOld} or its text",
+            UiCalls("rpc", "server.accounts") && loadAcctsJs.Contains("rpc('server.accounts', { version: v, after: more ? held.next : 0, limit: ACCTS_PAGE, q })", StringComparison.Ordinal)
+            && loadAcctsJs.Contains("const mine = () => S.accts === a && a.seq === seq && srvTarget() === target;", StringComparison.Ordinal)
+            && loadAcctsJs.IndexOf("if (!mine()) return;", StringComparison.Ordinal) > loadAcctsJs.IndexOf("await rpc('server.accounts'", StringComparison.Ordinal)
+            && appJs.Contains("const acctsUnsupported = (r, e) => (!!r && (r.unsupported === true || r.tooOld === true))", StringComparison.Ordinal)
+            && appJs.Contains("|| (!!e && String(e.message || '') === t('core.agent.accountsUnsupported'));", StringComparison.Ordinal)
+            && appJs.Contains("T('core.agent.accountsUnsupported')", StringComparison.Ordinal));
+        Check("accounts: the card's state is reset by a change of server (srvRetarget, which closes the card's questions), an agent install (deploy.done) and an agent update that replaced the agent",
+            acctsBlankJs.Length > 0 && retargetBody.Contains("S.accts = acctsBlank();", StringComparison.Ordinal)
+            && retargetBody.Contains("if (S.confirm && (S.confirm.act === 'acctsCopyGo' || S.confirm.act === 'acctsPwOpenFor')) S.confirm = null;", StringComparison.Ordinal)
+            && deployDoneJs.Contains("S.accts = acctsBlank();", StringComparison.Ordinal)
+            && replacedAt >= 0 && updateEndedJs.IndexOf("S.accts = acctsBlank();", replacedAt, StringComparison.Ordinal) > replacedAt);
+        // The gate (S.accts.supported) opens in ONE place: loadAccts' answer that was read — after its branch for an agent
+        // without the route and after its branch for a refused or unreadable answer, both of which return first. (Every
+        // "supported" is looked for whole: "unsupported: true" holds the same letters.) Below the gate the form keeps the
+        // question it always asked and the plain {from, to} its Yes always sent.
+        int loadNoRoute = loadAcctsJs.IndexOf("if (acctsUnsupported(r, err)) {", StringComparison.Ordinal);
+        int loadErr = loadAcctsJs.IndexOf("if (err) {", StringComparison.Ordinal);
+        int loadOk = loadAcctsJs.IndexOf("Object.assign(a, { data: acctsData(r, v, q), supported: true, unsupported: false, error: '', errorVersion: '' });", StringComparison.Ordinal);
+        var gateOpens = System.Text.RegularExpressions.Regex.Matches(uiJs, @"\bsupported\s*(?::|=(?!=))\s*true\b").Select(m => m.Value).ToList();
+        int formGate = formGoJs.IndexOf("if (S.accts.supported) return acctsCopyStart('copy', c.version, { from, to }, { text: from }, { text: to }, null, true);", StringComparison.Ordinal);
+        string formRunJs = OpenerText(appJs, "acctCopyRun");
+        Check("accounts: a copy from the card runs its check first (the job kind 'accountcopy' with dryRun) and the copy itself only from its question's Yes, with the check's body; the free-text form checks first only for an agent that answered the list"
+              + (gateOpens.Count != 1 ? $" — the gate opened in {gateOpens.Count} places" : ""),
+            copyStartJs.Contains("const job = acctsJob('accountcopy', version, Object.assign({}, body, { dryRun: true }));", StringComparison.Ordinal)
+            && copyGoJs.Contains("if (!f || f.step !== 'confirm') return render();", StringComparison.Ordinal)
+            && copyGoJs.Contains("const job = acctsJob('accountcopy', f.version, f.body);", StringComparison.Ordinal)
+            && loadNoRoute >= 0 && loadErr > loadNoRoute && loadOk > loadErr
+            && loadAcctsJs.IndexOf("return;", loadNoRoute, StringComparison.Ordinal) is int noRouteReturn && noRouteReturn > loadNoRoute && noRouteReturn < loadErr
+            && loadAcctsJs.IndexOf("return;", loadErr, StringComparison.Ordinal) is int errReturn && errReturn > loadErr && errReturn < loadOk
+            && gateOpens.Count == 1
+            && formGate >= 0 && formGoJs.IndexOf("act: 'acctCopyRun'", formGate, StringComparison.Ordinal) > formGate
+            && formRunJs.Contains("runServerJob('accountcopy', c.version, { from: c.from.trim(), to: c.to.trim() });", StringComparison.Ordinal)
+            && !formRunJs.Contains("dryRun", StringComparison.Ordinal));
+        var acctTimers = System.Text.RegularExpressions.Regex.Matches(uiJs, @"set(?:Interval|Timeout)\([^;\n]*\b(?:loadAccts|acctsOpen)\b").Select(m => m.Value).ToList();
+        Check("accounts: no timer reads the account list (it is read on open, a chip, a search, Refresh and after a job — never polled)"
+              + (acctTimers.Count > 0 ? " — " + string.Join(" | ", acctTimers) : ""),
+            acctTimers.Count == 0 && loadAcctsJs.Length > 0);
+        // The card is the Players tab's first block, and its row actions are the jobs that exist: the copy's check from a
+        // row's game uid, a starting progress from a progress template through the same check, Set password… the
+        // password job — never on a guest's row, which has no login to set one for —, and Game commands on the row's
+        // version (S.cmdVersion: a version this PC has not installed too — the Library's selection follows only to an
+        // installed one, told to the backend) with its uid filled in. A job of the version that changed something has the
+        // list read again; a copy's check changed nothing.
+        string settledJs = JsFunction(appJs, "function srvJobSettled(j, ok) {");
+        string afterJobJs = JsFunction(appJs, "function acctsAfterJob(j) {");
+        string actsJs = JsFunction(appJs, "function acctsActs(r, ctx) {");
+        string copyHereJs = OpenerText(appJs, "acctsCopyHere"), tplGoJs = OpenerText(appJs, "acctsTplGo"), pwOpenJs = OpenerText(appJs, "acctsPassword");
+        string commandsJs = OpenerText(appJs, "acctsCommands");
+        Check("accounts: the card first on the Players tab; Copy progress to… and Give a starting progress… through the copy's check (fromUid / fromTemplate), Set password… never for a guest, Game commands with the version and the uid; the list read again after a job of its version but a copy's check",
+            appJs.Contains("const playersTab = () => blk('accounts', acctsCard()) + blk('acctnew', acctNewCard())", StringComparison.Ordinal)
+            && copyHereJs.Contains("acctsCopyStart('copy', p.version, Object.assign({ fromUid: p.from.uid }, to), p.from, acctsSnap(r), null, false);", StringComparison.Ordinal)
+            && tplGoJs.Contains("acctsCopyStart('template', p.version, Object.assign({ fromTemplate: tp.id }, to), null, p.row, { id: tp.id, label: tp.label }, false);", StringComparison.Ordinal)
+            && actsJs.Contains("${r.name ? btn('acctsPassword', T('accts.act.password'), pwOk) : ''}", StringComparison.Ordinal)
+            && pwOpenJs.Contains("if (!r || !d || !r.name) return render();", StringComparison.Ordinal)
+            && commandsJs.Contains("S.cmdUid = String(r.uid);", StringComparison.Ordinal)
+            && commandsJs.Contains("S.cmdVersion = d.version;", StringComparison.Ordinal)
+            && commandsJs.Contains("if (S.selectedVersionId !== d.version && isInstalled(d.version) && !S.installing) { S.selectedVersionId = d.version; rpc('version.select', { id: d.version })", StringComparison.Ordinal)
+            && commandsJs.IndexOf("ACTIONS.go('commands');", StringComparison.Ordinal) > commandsJs.IndexOf("S.cmdVersion = d.version;", StringComparison.Ordinal)
+            && appJs.Contains("function cmdVersionId() { return S.cmdVersion || S.selectedVersionId; }", StringComparison.Ordinal)
+            && settledJs.Contains("if (here) acctsAfterJob(j);", StringComparison.Ordinal)
+            && afterJobJs.Contains("if (!v || ((j.kind === 'accountcopy' || j.kind === 'migrate') && j.dryRun)) return;", StringComparison.Ordinal));
+        // The password that Set password… generates goes to the password job and to the window its end opens (the notice's
+        // pick) alone: never into the job the page follows — none of its literals takes a field it does not name —, and it
+        // is forgotten once shown, once the job failed, or once the backend refused the rpc before any job existed (and a
+        // copy's check refused that way waits for nothing). The Backend logs that rpc's type alone (the dispatcher's rule
+        // above).
+        string pwSetJs = OpenerText(appJs, "acctsPwSet");
+        string pwDoneJs = JsFunction(appJs, "function acctsPwDone(j) {");
+        string srvErrorJs = JsFunction(appJs, "on('server.error', (d) => {", "\n});\n");
+        string runJobJs = JsFunction(appJs, "async function runServerJob(kind, version, extra) {");
+        int runJobCatch = runJobJs.IndexOf("catch (e) {", StringComparison.Ordinal);
+        string pwCase = CaseText(backendCs, backendCs.IndexOf("case \"server.account.password\":", StringComparison.Ordinal));
+        var srvJobLiterals = System.Text.RegularExpressions.Regex.Matches(appJs, @"S\.srvJob = \{(.*?)\};", System.Text.RegularExpressions.RegexOptions.Singleline)
+            .Select(m => m.Groups[1].Value).ToList();
+        Check($"accounts: a generated password goes to the password job and the notice's pick alone, never into the followed job ({srvJobLiterals.Count} literals of S.srvJob, none with a password or a spread), and is forgotten once shown or failed",
+            pwSetJs.Contains("const job = acctsJob('account.password', p.version, { name, password });", StringComparison.Ordinal)
+            && pwSetJs.Contains("acctsPwPending = { job, target: job.target, host: job.host, version: p.version, name, password: p.gen ? password : null };", StringComparison.Ordinal)
+            && pwDoneJs.IndexOf("acctsPwPending = null;", StringComparison.Ordinal) is int pwForgot && pwForgot >= 0
+            && pwDoneJs.IndexOf("pick: p.password,", StringComparison.Ordinal) > pwForgot
+            && srvErrorJs.Contains("if (acctsPwPending && acctsPwPending.job === j) acctsPwPending = null;", StringComparison.Ordinal)
+            && runJobCatch >= 0 && runJobJs.IndexOf("if (acctsPwPending && acctsPwPending.job === job) acctsPwPending = null;", runJobCatch, StringComparison.Ordinal) > runJobCatch
+            && runJobJs.IndexOf("if (S.accts.flow && S.accts.flow.job === job) S.accts.flow = null;", runJobCatch, StringComparison.Ordinal) > runJobCatch
+            && srvJobLiterals.Count >= 3 && srvJobLiterals.All(l => !l.Contains("password", StringComparison.OrdinalIgnoreCase) && !l.Contains("...", StringComparison.Ordinal))
+            && !appJs.Contains("Object.assign(S.srvJob", StringComparison.Ordinal)
+            && GatedCall(pwCase, "return StartServerJob(\"password\", Str(p, \"version\"), (a, v, log) => a.AccountPasswordAsync(v, name, pw, log));"));
+        // Open administration hands a guest the token's rights, the account list among them: the card's warning and the
+        // question that switches it on say so.
+        Check("accounts: open administration's warning and its question say whoever holds the key sees every account",
+            L.T("policy.openAdmin.warnBody").Contains("see every account", StringComparison.Ordinal)
+            && L.T("confirm.openAdmin.onBody", new { host = "game.example.com" }).Contains("see every account", StringComparison.Ordinal));
+        // A copy's question names a side typed by hand ("Copy by name or uid…", a new account's name) with what the server
+        // holds, never with a guess: the check's end reads the sides whose row the card does not hold by their typed names
+        // (acctsLookup, the list's own search) before it asks — a reply for a flow that moved on is dropped —, a side no
+        // row is found for is named by the check's uid alone (accts.who.typed), and a name typed for a new account that is
+        // an account already is said to be one (accts.confirm.exists).
+        string whoJs = JsFunction(appJs, "function acctsWho(s, uid, version) {");
+        string copyDoneJs = JsFunction(appJs, "function acctsCopyDone(j, res) {");
+        string lookupJs = JsFunction(appJs, "async function acctsLookup(f) {");
+        string questionJs = JsFunction(appJs, "function acctsQuestion(f) {");
+        int lookAt = copyDoneJs.IndexOf("f.step = 'look';", StringComparison.Ordinal);
+        Check("accounts: a side typed by hand is read by its name before the copy's question, named by the uid alone when no row is found, and a new account's name that is an account already is said to be one",
+            whoJs.Contains("if (typeof row.text === 'string') return uid != null ? t('accts.who.typed', { name, uid }) : name;", StringComparison.Ordinal)
+            && lookAt >= 0 && copyDoneJs.IndexOf("acctsLookup(f)", lookAt, StringComparison.Ordinal) > lookAt
+            && copyDoneJs.IndexOf("S.confirm = acctsQuestion(f);", lookAt, StringComparison.Ordinal) > copyDoneJs.IndexOf("acctsLookup(f)", lookAt, StringComparison.Ordinal)
+            && lookupJs.Contains("rpc('server.accounts', { version: f.version, after: 0, limit: ACCTS_PAGE, q })", StringComparison.Ordinal)
+            && lookupJs.Contains("if (S.accts.flow !== f || f.step !== 'look') return;", StringComparison.Ordinal)
+            && questionJs.Contains("t('accts.confirm.exists', { to: toName })", StringComparison.Ordinal)
+            && new[] { "accts.who.typed", "accts.confirm.exists", "accts.confirm.copy.bodyNew", "accts.confirm.tpl.bodyNew" }.All(L.Has));
+        // The two questions the card opens by itself — the copy's, once its check has ended and the sides typed by hand are
+        // read, and the offer of a new account's password once a copy created it — never cover a question already open:
+        // the copy is then not asked and a toast says that nothing was copied, and the offer becomes a toast.
+        int notAskedAt = copyDoneJs.IndexOf("if (S.confirm) { S.accts.flow = null; showToast(t('toast.acctsNotAsked'), 'bad'); return; }", StringComparison.Ordinal);
+        int pwOfferAt = copyDoneJs.IndexOf("if (S.confirm) return showToast(t('accts.pw.needed', { name }), 'bad');", StringComparison.Ordinal);
+        Check("accounts: neither question the card opens by itself (the copy's after its check, the password's after a copy) covers one already open",
+            lookAt >= 0 && notAskedAt > lookAt
+            && copyDoneJs.IndexOf("S.confirm = acctsQuestion(f);", StringComparison.Ordinal) > notAskedAt
+            && pwOfferAt >= 0 && copyDoneJs.IndexOf("S.confirm = { title: t('accts.pwNeeded.title', { name })", StringComparison.Ordinal) > pwOfferAt
+            && L.Has("toast.acctsNotAsked"));
+        // The gate of the copy's check closes again: an agent that answers the list with "no such route" after an answer of
+        // this session, and a copy the backend refused because the agent has no list (core.agent.accountCopyUnsupported),
+        // put "Copy by name or uid…" back on the plain copy and its own question.
+        Check("accounts: the gate of the copy's check closes again on a later \"no such route\" and on a copy the backend refused as sent to an agent without the list",
+            loadAcctsJs.Contains("Object.assign(a, { unsupported: true, supported: false,", StringComparison.Ordinal)
+            && srvErrorJs.IndexOf("j.error === t('core.agent.accountCopyUnsupported')", StringComparison.Ordinal) is int unsupAt && unsupAt >= 0
+            && srvErrorJs.IndexOf("Object.assign(S.accts, { unsupported: true, supported: false,", unsupAt, StringComparison.Ordinal) > unsupAt);
+        // Enter in a field that names its action starts a job the way its button does: the page goes up to the strip's
+        // console (the click handler's rule). A guest the agent names is a guest, whatever name its row carries: no login,
+        // no Set password. A search goes out as one line of plain text (a pasted control character or line break left
+        // out), and a search the agent refused keeps the search above its reason.
+        int dataEnterAt = appJs.IndexOf("const el = e.target.closest('input[data-enter]');", StringComparison.Ordinal);
+        int dataEnterEnd = dataEnterAt < 0 ? -1 : appJs.IndexOf("\n});\n", dataEnterAt, StringComparison.Ordinal);
+        string enterJs = dataEnterEnd < 0 ? "" : appJs[dataEnterAt..dataEnterEnd];
+        string rowOfJs = JsFunction(appJs, "function acctsRowOf(x) {");
+        string cardJs = JsFunction(appJs, "function acctsCard() {");
+        // (the search's own line: every C0 and C1 control character, and the two line separators JavaScript breaks at)
+        string queryJs = JsFunction(appJs, "const acctsQuery = (q) =>", "\n");
+        bool queryStrips = queryJs.Contains(".replace(/[", StringComparison.Ordinal) && queryJs.Contains("]/g, '').trim();", StringComparison.Ordinal)
+            && new[] { "\\u0000-\\u001f", "\\u007f-\\u009f" }.All(r => queryJs.Contains(r, StringComparison.Ordinal))
+            && (queryJs.Contains("\\u2028", StringComparison.Ordinal) || queryJs.Contains((char)0x2028))
+            && (queryJs.Contains("\\u2029", StringComparison.Ordinal) || queryJs.Contains((char)0x2029));
+        Check("accounts: Enter that starts a job takes the page up to the console; a row the agent marks a guest has no name; a search sent as one line, a refused one kept above its reason",
+            enterJs.Contains("const job = S.srvJob;", StringComparison.Ordinal)
+            && enterJs.IndexOf("if (S.srvJob !== job && jobHere() && isAdminMode() && (S.screen === 'server' || S.screen === 'tweaks')) mainToTop();", StringComparison.Ordinal) > enterJs.IndexOf("act(el.getAttribute('data-arg'));", StringComparison.Ordinal)
+            && enterJs.IndexOf("act(el.getAttribute('data-arg'));", StringComparison.Ordinal) > enterJs.IndexOf("const job = S.srvJob;", StringComparison.Ordinal)
+            && rowOfJs.Contains("name = guest ? null : x.name;", StringComparison.Ordinal)
+            && loadAcctsJs.Contains("const q = more ? held.query : acctsQuery(a.q);", StringComparison.Ordinal) && queryStrips
+            && cardJs.Contains("a.errorQuery ? acctsFindHtml(true) : ''", StringComparison.Ordinal));
+
+        // ── a move of accounts from another version (Server → Players → Bring progress from another version) ──
+        // server.migrate is a job behind RequireAdmin whose payload is read strictly before the job exists: a dry run must
+        // never go out as a move. A folder source needs the real token (the agent is the gate; the launcher neither offers
+        // nor sends one for an open key). server.migrate.cancel is a plain call that gets through while the job is
+        // followed. The agent spike plays the client against a stand-in agent; here the Backend's half (Relic.App, which
+        // the spikes do not reference) and the page's are read from their source, and the page's one way to a request is
+        // played with node.
+        string migrateCase = CaseText(backendCs, backendCs.IndexOf("case \"server.migrate\":", StringComparison.Ordinal));
+        string migrateStopCase = CaseText(backendCs, backendCs.IndexOf("case \"server.migrate.cancel\":", StringComparison.Ordinal));
+        string migratePayload = MemberText(modesCs, "private static MigrateRequest MigrateFromPayload(JsonElement p)");
+        string migrateAsync = MemberText(agentClientCs, "public async Task<JsonElement> MigrateAsync(MigrateRequest request,");
+        string migrateForPage = MemberText(agentClientCs, "public static JsonElement MigrateForPage(JsonElement snapshot)");
+        Check("migrate: Backend answers server.migrate in the order RequireAdmin → MigrateFromPayload → the open key's folder refusal → the job, its result through AgentClient.MigrateForPage alone",
+            migrateCase.Length > 0
+            && InOrder(migrateCase, "RequireAdmin();", "var m = MigrateFromPayload(p);", "if (m.SourceDir is not null && AdminServer()?.OpenKey == true)",
+                "throw new InvalidOperationException(L.T(\"backend.migrate.folderNeedsToken\"));", "return StartServerJob(\"migrate\", m.Version,",
+                "async (a, v, log) => AgentClient.MigrateForPage(await a.MigrateAsync(m, log)));")
+            && QsCount(backendCs + modesCs, @"StartServerJob\(""migrate""") == 1);
+        Check("migrate: MigrateFromPayload refuses with backend.migrate.invalid before a job exists — a key no move has, a flag that is no JSON bool (a null is none), not one source (one key, a null or empty twin beside it refused), accounts that are no array of objects, an item without its from, a real run without accounts (Problem)",
+            migratePayload.Contains("L.T(\"backend.migrate.invalid\")", StringComparison.Ordinal)
+            && migratePayload.Contains("OnlyKeys(p, \"version\", \"source\", \"accounts\", \"dryRun\", \"keepPassword\", \"keepUid\");", StringComparison.Ordinal)
+            && migratePayload.Contains("if (!p.TryGetProperty(\"source\", out var source)) throw Invalid();", StringComparison.Ordinal)
+            && migratePayload.Contains("OnlyKeys(source, \"version\", \"dir\");", StringComparison.Ordinal)
+            && migratePayload.Contains("if (source.EnumerateObject().Count() != 1) throw Invalid();", StringComparison.Ordinal)
+            && migratePayload.Contains("static bool Flag(JsonElement o, string name) => o.TryGetProperty(name, out var v) && v.ValueKind switch", StringComparison.Ordinal)
+            && migratePayload.Contains("if (!o.TryGetProperty(name, out var v)) return null;", StringComparison.Ordinal)
+            && migratePayload.Contains("if (p.TryGetProperty(\"accounts\", out var list) && list.ValueKind != JsonValueKind.Null)", StringComparison.Ordinal)
+            && QsCount(migratePayload, @"JsonValueKind\.Null") == 1
+            && migratePayload.Contains("if (list.ValueKind != JsonValueKind.Array) throw Invalid();", StringComparison.Ordinal)
+            && migratePayload.Contains("OnlyKeys(item, \"from\", \"to\", \"overwrite\");", StringComparison.Ordinal)
+            && migratePayload.Contains("Text(item, \"from\") ?? throw Invalid()", StringComparison.Ordinal)
+            && migratePayload.Contains("if (v.ValueKind != JsonValueKind.String) throw Invalid();", StringComparison.Ordinal)
+            && migratePayload.Contains("_ => throw Invalid(),", StringComparison.Ordinal)
+            && new[] { "Flag(p, \"dryRun\")", "Flag(p, \"keepPassword\")", "Flag(p, \"keepUid\")", "Flag(item, \"overwrite\")" }.All(c => migratePayload.Contains(c, StringComparison.Ordinal))
+            && migratePayload.Contains("if (request.Problem is not null) throw Invalid();", StringComparison.Ordinal));
+        Check("migrate: server.migrate.cancel is a plain call behind RequireAdmin — no job, never the job slot _serverJobBusy",
+            migrateStopCase.Length > 0 && GatedCall(migrateStopCase, "return await WithAgent(a => a.MigrateCancelAsync(version));")
+            && !migrateStopCase.Contains("StartServerJob", StringComparison.Ordinal) && !migrateStopCase.Contains("_serverJobBusy", StringComparison.Ordinal));
+        var migrateLogging = new[] { ("the server.migrate case", migrateCase), ("the server.migrate.cancel case", migrateStopCase), ("MigrateFromPayload", migratePayload),
+            ("MigrateAsync", migrateAsync), ("MigrateForPage", migrateForPage) }
+            .Where(m => m.Item2.Length == 0 || m.Item2.Contains("Log.", StringComparison.Ordinal)).Select(m => m.Item1).ToList();
+        Check("migrate: nothing of an account or a folder reaches relic.log — the move's code logs nothing of its own"
+              + (migrateLogging.Count > 0 ? " — missing or logging: " + string.Join(", ", migrateLogging) : ""), migrateLogging.Count == 0);
+        // The page's half. The check goes out only through migrateBody with dryRun on top, the move only from its question's
+        // Yes: the button opens the question and starts nothing, the question is asked again at its Yes, and no button
+        // names the action that runs it. The result — never the job object a console re-created from the events holds —
+        // says which of the two ended.
+        string migrateCheckJs = ActionBody("migrateCheck"), migrateGoJs = ActionBody("migrateGo"), migrateRunJs = ActionBody("migrateRun"), migrateStopJs = ActionBody("migrateCancel");
+        string migrateQuestionJs = JsFunction(appJs, "function migrateQuestion(m) {"), migrateResetJs = JsFunction(appJs, "function migrateReset() {");
+        string migrateNowJs = JsFunction(appJs, "function migrateNow() {"), migrateTargetsJs = JsFunction(appJs, "function migrateTargets() {");
+        string migrateCardJs = JsFunction(appJs, "function migrateCard() {"), migrateDoneJs = JsFunction(appJs, "function migrateDone(j, res) {");
+        string migrateSourcesJs = JsFunction(appJs, "function migrateSources(v) {"), srvDoneJs = JsFunction(appJs, "on('server.done', (d) => {", "\n});\n");
+        Check("migrate: the card follows Copy by name or uid on the Players tab, behind the pinned head of the tab",
+            appJs.Contains("const playersTab = () => blk('accounts', acctsCard()) + blk('acctnew', acctNewCard()) + blk('copy', acctCopyCard()) + blk('migrate', migrateCard())", StringComparison.Ordinal));
+        Check("migrate: the check goes out only through migrateBody + dryRun; the move only from its question's Yes (migrateGo opens it and starts nothing, its act migrateRun is on no button, its ask is migrateGo)",
+            migrateCheckJs.Contains("const body = Object.assign(migrateBody(m), { dryRun: true });", StringComparison.Ordinal)
+            && migrateCheckJs.Contains("runServerJob('migrate', n.v, body);", StringComparison.Ordinal)
+            && migrateCheckJs.Contains("if (!migrateCanCheck(n)) return render();", StringComparison.Ordinal)
+            && migrateGoJs.Contains("S.confirm = migrateQuestion(m);", StringComparison.Ordinal) && !migrateGoJs.Contains("runServerJob(", StringComparison.Ordinal)
+            && migrateGoJs.Contains("if (srvBusy() || !n.v || !acctsUp(n.v) || !migrateHeld(n)) return showToast(t('migrate.changed'), 'bad');", StringComparison.Ordinal)
+            && migrateQuestionJs.Contains("act: 'migrateRun', arg: target, ask: 'migrateGo', at: Date.now(),", StringComparison.Ordinal)
+            && InOrder(migrateRunJs, "m.run = { job: null, res: null };", "runServerJob('migrate', m.target, migrateBody(m));") && !migrateRunJs.Contains("dryRun", StringComparison.Ordinal)
+            && QsCount(uiJs, @"runServerJob\('migrate'") == 2 && !uiJs.Contains("data-act=\"migrateRun\"", StringComparison.Ordinal)
+            && !uiJs.Contains("rpc('server.migrate',", StringComparison.Ordinal));
+        Check("migrate: the card is drawn from the admin /status alone — a version on the server, prepared, with migrateFrom and a source to offer, the running one first; the source chips never the target; the folder option absent for an open key, the note in its place",
+            appJs.Contains("migrateFrom: Array.isArray(e.migrateFrom) ? e.migrateFrom.filter((x) => typeof x === 'string' && x) : [],", StringComparison.Ordinal)
+            && migrateTargetsJs.Contains("if (!S.srv.info || S.srv.info.public) return [];", StringComparison.Ordinal)
+            && migrateTargetsJs.Contains("return acctsVersions().filter((id) => {", StringComparison.Ordinal)
+            && migrateTargetsJs.Contains("return f.bootstrapped && f.migrateFrom.length > 0 && (!S.admin.openKey || migrateSources(id).length > 0);", StringComparison.Ordinal)
+            && migrateSourcesJs.Contains("id !== v && !!s && s.configured && s.present", StringComparison.Ordinal)
+            && migrateNowJs.Contains("folder = !S.admin.openKey;", StringComparison.Ordinal)
+            && migrateNowJs.Contains("const kind = folder && (m.srcKind === 'folder' || !sources.length) ? 'folder' : 'version';", StringComparison.Ordinal)
+            && migrateCardJs.Contains("+ (n.folder ? chip('migrateFolder', '', n.kind === 'folder', T('migrate.fromFolder'), false) : '');", StringComparison.Ordinal)
+            && migrateCardJs.Contains(": n.folder ? '' : `<small class=\"migfold\">${T('migrate.folderNeedsToken')}</small>`;", StringComparison.Ordinal)
+            && migrateCardJs.Contains("if (!v) return '';", StringComparison.Ordinal));
+        Check("migrate: the card's state is reset by a change of server, an agent install and an agent update that replaced the agent, each closing the question asked over it",
+            migrateResetJs.Contains("S.migrate = migrateBlank();", StringComparison.Ordinal) && migrateResetJs.Contains("if (S.confirm && S.confirm.act === 'migrateRun') S.confirm = null;", StringComparison.Ordinal)
+            && retargetBody.Contains("migrateReset();", StringComparison.Ordinal) && deployDoneJs.Contains("migrateReset();", StringComparison.Ordinal)
+            && replacedAt >= 0 && updateEndedJs.IndexOf("migrateReset();", replacedAt, StringComparison.Ordinal) > replacedAt);
+        Check("migrate: the end of a job is read from its RESULT's dryRun, never from the job a console re-created; a job refused or failed leaves no check waiting; a check leaves the account list as it is; the console names the job and offers its stop",
+            srvDoneJs.Contains("else if (j.kind === 'migrate') migrateDone(j, res);", StringComparison.Ordinal)
+            && migrateDoneJs.Contains("if (r.dryRun === true) {", StringComparison.Ordinal) && !migrateDoneJs.Contains("j.dryRun", StringComparison.Ordinal) && !migrateDoneJs.Contains("S.srvJob", StringComparison.Ordinal)
+            && srvErrorJs.Contains("if (j.kind === 'migrate' && j.target === srvTarget()) migrateFailed();", StringComparison.Ordinal)
+            && runJobJs.IndexOf("if (kind === 'migrate') migrateFailed();", runJobCatch, StringComparison.Ordinal) > runJobCatch
+            && afterJobJs.Contains("j.kind === 'migrate'", StringComparison.Ordinal)
+            && appJs.Contains("migrate: 'server.job.migrate',", StringComparison.Ordinal)
+            && appJs.Contains("if (j && j.kind === 'migrate' && j.dryRun) return t('server.job.migrateCheck');", StringComparison.Ordinal)
+            && appJs.Contains(": j.kind === 'migrate' ? 'migrateCancel' :", StringComparison.Ordinal) && appJs.Contains("stopAct === 'migrateCancel' ? T('migrate.stop')", StringComparison.Ordinal)
+            && migrateStopJs.Contains("const r = await rpc('server.migrate.cancel', { version: id });", StringComparison.Ordinal)
+            && migrateStopJs.Contains("if (r && r.unsupported) showToast(t('core.agent.migrateUnsupported'), 'bad');", StringComparison.Ordinal));
+        // What goes out is what is on screen: the question sets the card's state to the check it holds before it reads it,
+        // so a chip the status took away cannot word it from one source and send it from another.
+        Check("migrate: the move's question is worded from, and goes out with, the target and source of the check on screen — never a chip the status took away",
+            InOrder(migrateGoJs, "!migrateHeld(n)) return showToast(t('migrate.changed'), 'bad');", "Object.assign(m, { target: n.v, srcKind: n.kind, srcVersion: n.src });", "const list = migrateBody(m).accounts || [];", "S.confirm = migrateQuestion(m);"));
+        // A check reads the first accounts of a whole source: a row past them has its own switch, its accounts go into the
+        // next check (which reads what it names) and no move goes out until they are read.
+        string migrateControlJs = JsFunction(appJs, "function migrateControl(e, busy) {"), migrateCheckedJs = JsFunction(appJs, "function migrateChecked(c, n) {");
+        string migrateRanJs = JsFunction(appJs, "function migrateRan(r, target) {"), migrateMoveJs = ActionBody("migrateMove");
+        Check("migrate: a row past what a check read can be reached — Check next, off by default, puts it into the next check; no move goes out until it was read",
+            migrateControlJs.Contains("if (e.why === 'notChecked') return toggle(T('migrate.choice.checkNext'));", StringComparison.Ordinal)
+            && JsFunction(appJs, "function migrateChoices(res) {").Contains(": { action: 'skip', to: '' };", StringComparison.Ordinal)
+            && migrateMoveJs.Contains("c.action = c.action !== 'skip' ? 'skip' : e.why === 'notChecked' ? 'create' : e.verdict;", StringComparison.Ordinal)
+            && migrateCheckedJs.Contains("const go = unread ? `<span class=\"migsay\">${T('migrate.checkFirst')}</span>`", StringComparison.Ordinal)
+            && InOrder(migrateGoJs, "if (migrateUnread(m).length) return showToast(t('migrate.checkFirst'), 'bad');", "S.confirm = migrateQuestion(m);"));
+        // What the card asks stays as it is while its own check or move runs: their answer is drawn under those choices.
+        Check("migrate: the chips, the options and the folder are locked while a check or a move of the card runs",
+            migrateCardJs.Contains("const lock = busy && pending ? 'disabled' : '';", StringComparison.Ordinal) && QsCount(migrateCardJs, @"\$\{lock\}") == 3
+            && migrateCardJs.Contains("data-arg=\"${esc(arg)}\" ${lock}>", StringComparison.Ordinal) && migrateCardJs.Contains("data-act=\"migrateOpt\" data-arg=\"${key}\" ${lock}>", StringComparison.Ordinal)
+            && migrateCardJs.Contains("autocomplete=\"off\" ${lock}><small class=\"migfold\">", StringComparison.Ordinal));
+        Check("migrate: a save refused for ids it names says so in the page's words — the agent's sentence names them by its category codes — and any other refusal keeps that sentence",
+            JsFunction(appJs, "function migrateVerdict(e, target) {").Contains("case 'refused': return ['bad', t('migrate.v.refused', { reason: Object.keys(e.unknownIds || {}).map((c) => migrateUnknown(e, c, target)).join(' ') || reason })];", StringComparison.Ordinal));
+        Check("migrate: a move that moved nothing says so in a toast of its own, and its summary counts what was skipped",
+            InOrder(migrateDoneJs, "if (r.stopped === true) return showToast(t('toast.migrateStopped'", "if (!moved) return showToast(t('toast.migrateNone') + more, 'bad');", "return showToast(t('toast.migrateDone'")
+            && migrateRanJs.Contains("counts.skip ? T('migrate.sumDoneSkipped', counts) : T('migrate.sumDone', counts)", StringComparison.Ordinal));
+        var migrateTimers = Regex.Matches(uiJs, @"set(?:Interval|Timeout)\([^;\n]*\bmigrate").Select(m => m.Value).ToList();
+        Check("migrate: no timer runs or reads a check — the page never repeats one by itself"
+              + (migrateTimers.Count > 0 ? " — " + string.Join(" | ", migrateTimers) : ""), migrateTimers.Count == 0 && migrateCheckJs.Length > 0);
+        var migrateKeys = Regex.Matches(appJs, @"\b[tT]\('(migrate\.[A-Za-z.]+|toast\.migrate[A-Za-z]+|server\.job\.migrate[A-Za-z]*)'").Select(m => m.Groups[1].Value).Distinct().ToList();
+        var migrateKeysOff = migrateKeys.Where(k => !L.Has(k)).Concat(new[] { "core.agent.migrateUnsupported", "backend.migrate.invalid", "backend.migrate.folderNeedsToken" }.Where(k => !L.Has(k))).ToList();
+        Check($"migrate: every text the card names ({migrateKeys.Count} keys) has an en.json text, and the Backend's refusal of an open key's folder says what the card says"
+              + (migrateKeysOff.Count > 0 ? " — missing: " + string.Join(", ", migrateKeysOff) : ""),
+            migrateKeys.Count >= 70 && migrateKeysOff.Count == 0 && L.T("backend.migrate.folderNeedsToken") == L.T("migrate.folderNeedsToken"));
+        // migrateBody is pure: played with node (when this PC has it) on canned choices, beside the names the page refuses
+        // itself. Skips stay out, an overwrite goes out only when chosen, under the account it met, a name typed goes out
+        // trimmed while a login the agent named goes out exactly as it is written there, nothing chosen names no accounts —
+        // that check reads every account of the source — and a folder source is the folder alone.
+        string migrateBodyJs = JsFunction(appJs, "function migrateBody(m) {"), migrateNamesJs = JsFunction(appJs, "function migrateNamesProblem(list) {");
+        string acctNameJs = JsFunction(appJs, "const ACCOUNT_NAME_RE = ", ";\n"), migrateMaxJs = JsFunction(appJs, "const MIGRATE_ACCOUNTS_MAX = ", ";\n");
+        if (migrateBodyJs.Length == 0 || migrateNamesJs.Length == 0 || acctNameJs.Length == 0 || migrateMaxJs.Length == 0) Check("migrate: app.js holds migrateBody(m), migrateNamesProblem(list), MIGRATE_ACCOUNTS_MAX and ACCOUNT_NAME_RE", false);
+        else
+        {
+            var migrateNode = NodeRun(acctNameJs + ";\n" + migrateMaxJs + ";\nconst t = (k, v) => (v ? k + ':' + JSON.stringify(v) : k);\n" + migrateBodyJs + "\n}\n" + migrateNamesJs + "\n}\n"
+                + """
+                const pick = Object.create(null);
+                pick.alex = { action: 'create', to: 'alex' };
+                pick.bea = { action: 'create', to: 'bea2' };
+                pick.cy = { action: 'skip', to: 'cy' };
+                pick.dee = { action: 'rename', to: '  dee2 ' };
+                pick['e.l'] = { action: 'overwrite', to: 'Eli' };
+                pick['bob '] = { action: 'overwrite', to: 'Bob ' };
+                pick['gil '] = { action: 'create', to: 'gil ' };
+                const base = { target: '3.2', srcKind: 'version', srcVersion: '2.8', dir: '/not/this', keepPassword: true, keepUid: false };
+                const out = [
+                  migrateBody(Object.assign({}, base, { choice: pick })),
+                  migrateBody(Object.assign({}, base, { choice: Object.create(null) })),
+                  migrateBody(Object.assign({}, base, { choice: { cy: { action: 'skip', to: '' } } })),
+                  migrateBody(Object.assign({}, base, { srcKind: 'folder', dir: ' /srv/old_28 ', keepPassword: false, keepUid: true })),
+                  migrateNamesProblem([{ from: 'a' }, { from: 'b', to: 'bea2' }, { from: 'c', to: 'Weird Name', overwrite: true }]),
+                  migrateNamesProblem([{ from: 'a', to: '' }]),
+                  migrateNamesProblem([{ from: 'a', to: '12345' }]),
+                  migrateNamesProblem([{ from: 'Same' }, { from: 'b', to: 'same' }]),
+                  migrateNamesProblem(Array.from({ length: MIGRATE_ACCOUNTS_MAX }, (_, i) => ({ from: 'n' + i }))),
+                  migrateNamesProblem(Array.from({ length: MIGRATE_ACCOUNTS_MAX + 1 }, (_, i) => ({ from: 'n' + i }))),
+                ];
+                process.stdout.write(JSON.stringify(out));
+                """);
+            if (migrateNode is null) Console.WriteLine("        (skipped: no node on PATH — migrateBody is not played)");
+            else
+            {
+                var (mbEnded, mbOut, mbErr) = migrateNode.Value;
+                string[] mbWant =
+                {
+                    """{"version":"3.2","source":{"version":"2.8"},"keepPassword":true,"keepUid":false,"accounts":[{"from":"alex"},{"from":"bea","to":"bea2"},{"from":"dee","to":"dee2"},{"from":"e.l","to":"Eli","overwrite":true},{"from":"bob ","to":"Bob ","overwrite":true},{"from":"gil "}]}""",
+                    """{"version":"3.2","source":{"version":"2.8"},"keepPassword":true,"keepUid":false}""",
+                    """{"version":"3.2","source":{"version":"2.8"},"keepPassword":true,"keepUid":false}""",
+                    """{"version":"3.2","source":{"dir":"/srv/old_28"},"keepPassword":false,"keepUid":true}""",
+                    "\"\"", "\"toast.acctsNewName\"", "\"toast.acctsNewName\"", "\"migrate.sameName:{\\\"name\\\":\\\"same\\\"}\"",
+                    "\"\"", "\"migrate.tooMany:{\\\"max\\\":100}\"",
+                };
+                string mbWanted = "[" + string.Join(",", mbWant) + "]";
+                Check("migrate: migrateBody played with node on canned choices — skips left out, an overwrite only where chosen, a name typed sent trimmed and a login the agent named exactly as written, no accounts while none is chosen, a folder source alone; a blank or digit-only new name, two accounts going to one name and more accounts than a request takes refused on the page"
+                      + (mbOut == mbWanted ? "" : " — it gave " + (mbOut.Length > 0 ? mbOut : mbErr)),
+                    mbEnded && mbOut == mbWanted);
+            }
+        }
+
+        // ── a game folder of the player's own: the install wizard's check, "Find it on this PC" ──
+        // The wizard's local folder meets the Backend under three rpcs that read this PC alone, none behind RequireAdmin
+        // (like localagent.status): the check of what its field names (install.inspectGame), the search's start and its
+        // stop (install.findGames, install.findGamesStop); the search's events are findgames.progress / found / done. What
+        // the check and the search find is the import spike's; here the Backend's half (Relic.App, which the spikes do not
+        // reference) and the page's are read from their source.
+        // An entry of ACTIONS by its name, up to the next entry (a plain or an async arrow function).
+        string ActionBody(string name)
+        {
+            int at = appJs.IndexOf("\n  " + name + ": (", StringComparison.Ordinal);
+            if (at < 0) at = appJs.IndexOf("\n  " + name + ": async (", StringComparison.Ordinal);
+            if (at < 0) return "";
+            var next = System.Text.RegularExpressions.Regex.Match(appJs[(at + 1)..], @"\n  [A-Za-z_$][A-Za-z0-9_$]*: ");
+            return next.Success ? appJs.Substring(at, next.Index + 1) : appJs[at..];
+        }
+        int impCaseAt = backendCs.IndexOf("case \"install.inspectGame\":", StringComparison.Ordinal);
+        int fndCaseAt = backendCs.IndexOf("case \"install.findGames\":", StringComparison.Ordinal);
+        int fndStopCaseAt = backendCs.IndexOf("case \"install.findGamesStop\":", StringComparison.Ordinal);
+        Check("import: Backend answers install.inspectGame, install.findGames and install.findGamesStop, none behind RequireAdmin, and the page calls them and hears the search's three events by the same names",
+            backendCs.Contains("case \"install.inspectGame\": return await InspectGameAsync(p);", StringComparison.Ordinal)
+            && backendCs.Contains("case \"install.findGames\": return FindGames(Bool(p, \"deeper\"));", StringComparison.Ordinal)
+            && backendCs.Contains("case \"install.findGamesStop\": return new { stopping = StopGameSearch(\"the page asked\") };", StringComparison.Ordinal)
+            && CaseFreeOfRequireAdmin(backendCs, impCaseAt) && CaseFreeOfRequireAdmin(backendCs, fndCaseAt) && CaseFreeOfRequireAdmin(backendCs, fndStopCaseAt)
+            && UiCalls("rpc", "install.inspectGame") && UiCalls("rpc", "install.findGames") && UiCalls("rpc", "install.findGamesStop")
+            && UiCalls("on", "findgames.progress") && UiCalls("on", "findgames.found") && UiCalls("on", "findgames.done"));
+        // The check runs off the message thread — it waits while an import holds the checks, and a deep one hashes whole
+        // files — from a request copied out of the state on it, with the depth the page asked for (the record's own default
+        // is the import's deep check) and the folder the player chose to replace. None is made while a job holds the
+        // install guard (that job changes the registrations on a worker thread): the answer is {status: 'cancelled'}, which
+        // the page drops. One check at a time — a path that does not answer holds its thread until Windows gives up on it,
+        // so checks asked one after another must pile none up: a newer check cancels the one that runs and waits for its
+        // end, an older one still waiting answers {status: 'cancelled'} at once, a cancelled one answers it too, and the one
+        // that waited runs once the one before it has let go of its cancellation.
+        string impCs = MemberText(backendCs, "private async Task<object> InspectGameAsync(JsonElement p)");
+        string impRunCs = MemberText(backendCs, "private void RunInspect(InspectAsk ask) => _ = Task.Run(() =>");
+        int impBusyAt = impCs.IndexOf("if (Volatile.Read(ref _installBusy) != 0) return InspectCancelled;", StringComparison.Ordinal);
+        int impReqAt = impCs.IndexOf("request = ImportRequest.From(_state, Str(p, \"versionId\"), Str(p, \"path\")) with", StringComparison.Ordinal);
+        int impQueueAt = impCs.IndexOf("runNow = _inspectRunning is null;", StringComparison.Ordinal);
+        int impWaitAt = impCs.IndexOf("return await ask.Answer.Task;", StringComparison.Ordinal);
+        int irCheckAt = impRunCs.IndexOf("var v = ImportCheck.Run(ask.Request, ask.Cts.Token);", StringComparison.Ordinal);
+        int irCatchAt = impRunCs.IndexOf("catch (OperationCanceledException) { verdict = InspectCancelled; }", StringComparison.Ordinal);
+        int irNextAt = impRunCs.IndexOf("next = _inspectWaiting;", StringComparison.Ordinal);
+        int irDisposeAt = impRunCs.IndexOf("ask.Cts.Dispose();", StringComparison.Ordinal);
+        int irAgainAt = impRunCs.IndexOf("if (next is not null) RunInspect(next);", StringComparison.Ordinal);
+        Check("import: install.inspectGame copies its request out of the state on the message thread — none while a job holds the install guard — and runs ImportCheck.Run off it, one check at a time (the depth the page asked for, the catalogue's versions, the folder chosen to be replaced): a newer check cancels the one that runs and waits for its end, an older one waiting and a cancelled one answer {status: 'cancelled'}",
+            impBusyAt > 0 && impReqAt > impBusyAt && impQueueAt > impReqAt && impWaitAt > impQueueAt
+            && impCs.Contains("Deep = Bool(p, \"deep\"),", StringComparison.Ordinal)
+            && impCs.Contains("ReplaceInstalledAt = string.IsNullOrWhiteSpace(replace) ? null : replace,", StringComparison.Ordinal)
+            && impCs.Contains("Offered = VersionCatalog.Load().Select(v => v.Id).ToList(),", StringComparison.Ordinal)
+            && impCs.Contains("CancelQuietly(_inspectRunning!.Cts);", StringComparison.Ordinal)
+            && impCs.Contains("displaced?.Answer.TrySetResult(InspectCancelled);", StringComparison.Ordinal)
+            && !impCs.Contains("Task.Run(", StringComparison.Ordinal)
+            && irCheckAt > 0 && irCatchAt > irCheckAt && irNextAt > irCatchAt && irDisposeAt > irNextAt && irAgainAt > irDisposeAt
+            && backendCs.Contains("private static readonly object InspectCancelled = new { status = \"cancelled\" };", StringComparison.Ordinal));
+        // The search: refused while a job holds the install guard (an install or an import writes into the very folders the
+        // walk would find half made), its context copied out of the state on the message thread, its events posted under
+        // their names as the search makes them, its number the answer (0: one runs already).
+        string fndCs = MemberText(backendCs, "private object FindGames(bool deeper)");
+        int fndBusyAt = fndCs.IndexOf("if (Volatile.Read(ref _installBusy) != 0)", StringComparison.Ordinal);
+        int fndRefuseAt = fndCs.IndexOf("throw new InvalidOperationException(L.T(\"backend.find.installBusy\"));", StringComparison.Ordinal);
+        int fndCtxAt = fndCs.IndexOf("context = GameSearchContext.From(_state, VersionCatalog.Load());", StringComparison.Ordinal);
+        int fndStartAt = fndCs.IndexOf("int search = _gameSearch.Start(context, deeper,", StringComparison.Ordinal);
+        Check("import: install.findGames is refused while a job holds the install guard (backend.find.installBusy), copies its context out of the state on the message thread, posts findgames.found / progress / done as the search makes them and answers the search's number",
+            fndBusyAt > 0 && fndRefuseAt > fndBusyAt && fndCtxAt > fndRefuseAt && fndStartAt > fndCtxAt
+            && fndCs.IndexOf("found: hit => PostEvent(\"findgames.found\", hit),", fndStartAt, StringComparison.Ordinal) > fndStartAt
+            && fndCs.IndexOf("progress: now => PostEvent(\"findgames.progress\", now),", fndStartAt, StringComparison.Ordinal) > fndStartAt
+            && fndCs.IndexOf("done: end => PostEvent(\"findgames.done\", end));", fndStartAt, StringComparison.Ordinal) > fndStartAt
+            && fndCs.Contains("return new { search };", StringComparison.Ordinal)
+            && backendCs.Contains("private readonly GameSearch _gameSearch = new();", StringComparison.Ordinal)
+            && L.Has("backend.find.installBusy"));
+        // Every job that takes the install guard — an install, an import, a voice download (RunInstallJob), a removal, Apply
+        // Relic's game files — stops the search and cancels the folder's check right after it took the guard, before its
+        // work; the window going to the tray stops the search too. Apply holds the checks while its files go in, as an
+        // import does (no check holds a file its renames need).
+        string guardCs = MemberText(backendCs, "private void InstallGuardTaken(string job)");
+        bool GuardThenStop(string body, string call)
+        {
+            int taken = body.IndexOf("if (Interlocked.Exchange(ref _installBusy, 1) != 0)", StringComparison.Ordinal);
+            int stop = taken < 0 ? -1 : body.IndexOf(call, taken, StringComparison.Ordinal);
+            int work = stop < 0 ? -1 : body.IndexOf("Task.Run(", StringComparison.Ordinal);
+            return taken > 0 && stop > taken && work > stop;
+        }
+        string runJobCs = MemberText(backendCs, "private void RunInstallJob(GameVersionInfo v, string cache, string logLine, Action? preflight,");
+        string removeCs = MemberText(modesCs, "private object StartRemove(string versionId, bool deleteFiles)");
+        string applyAllCs = MemberText(backendCs, "private async Task<object> ApplyAllGameFilesAsync()");
+        int holdAt = applyAllCs.IndexOf("using var hold = ImportCheck.HoldChecks();", StringComparison.Ordinal);
+        string cancelInspectsCs = MemberText(backendCs, "private void CancelInspects()");
+        Check("import: an install / import / voice download, a removal and Apply Relic's game files stop the search and give up the folder's checks (the one that runs cancelled, the one waiting answered) right after they take the install guard, before their work; the window going to the tray stops the search; Apply holds the checks while it writes",
+            guardCs.Contains("StopGameSearch(job);", StringComparison.Ordinal)
+            && guardCs.Contains("CancelInspects();", StringComparison.Ordinal)
+            && cancelInspectsCs.Contains("_inspectWaiting = null;", StringComparison.Ordinal)
+            && cancelInspectsCs.Contains("if (_inspectRunning is { } running) CancelQuietly(running.Cts);", StringComparison.Ordinal)
+            && cancelInspectsCs.Contains("waiting?.Answer.TrySetResult(InspectCancelled);", StringComparison.Ordinal)
+            && GuardThenStop(runJobCs, "InstallGuardTaken($\"an install job of {versionId} started\");")
+            && GuardThenStop(removeCs, "InstallGuardTaken($\"the removal of {versionId} started\");")
+            && GuardThenStop(applyAllCs, "InstallGuardTaken(\"Apply Relic's game files started\");")
+            && holdAt > 0 && holdAt < applyAllCs.IndexOf("return versions.Select(v => ApplyGameFiles(v.Id, v.GameDir, withInjectables)).ToList();", StringComparison.Ordinal)
+            && w11MainForm.Contains("_backend?.StopGameSearch(\"the window went to the tray\");", StringComparison.Ordinal));
+        // An import carries the folder the player chose to replace (the check named it): without it a copy of an installed
+        // version is refused. The page sends it only when the ready check was made with that very choice.
+        Check("import: install.start hands the import the replaceInstalledAt the player chose, and the page sends it only with the ready check that carried it",
+            backendCs.Contains("StartInstall(Str(p, \"versionId\"), Str(p, \"localPath\"), Strings(p, \"voices\"), Str(p, \"replaceInstalledAt\"));", StringComparison.Ordinal)
+            && backendCs.Contains("string? replace = isLocal && !string.IsNullOrWhiteSpace(replaceInstalledAt) ? replaceInstalledAt : null;", StringComparison.Ordinal)
+            && backendCs.Contains("if (isLocal) await svc.ImportLocalAsync(v, localPath, progress, ct, replace);", StringComparison.Ordinal)
+            && appJs.Contains("const replaceAt = ready && ready.replaceInstalled ? impReplaceAt() : '';", StringComparison.Ordinal)
+            && appJs.Contains("replaceAt ? { replaceInstalledAt: replaceAt } : {}) };", StringComparison.Ordinal)
+            && appJs.Contains("return r && r.path === impPath() && r.versionId === impVersion() ? r.installedAt : '';", StringComparison.Ordinal));
+        // The page asks the check while the field changes (debounced, never a render: the caret stays) and at once after
+        // Browse… or a found folder: the instant check, then — only when it answers 'checking' — the deep one with the same
+        // request; the last one asked wins (an older answer is dropped), and an answer {status: 'cancelled'} ends it with no
+        // verdict.
+        string impCheckJs = JsFunction(appJs, "async function impCheck(force) {");
+        int impQuickAt = impCheckJs.IndexOf("let a = await ask(false);", StringComparison.Ordinal);
+        int impDoneAt = impCheckJs.IndexOf("if (a.v.status !== 'checking') { im.phase = 'done'; syncImp(); return; }", StringComparison.Ordinal);
+        int impDeepAt = impCheckJs.IndexOf("a = await ask(true);", StringComparison.Ordinal);
+        Check("import page: the field's check is debounced (impTyped, no render) — the instant check, then the deep one only on 'checking', the last one asked winning and a cancelled one drawing no verdict",
+            appJs.Contains("if (path === 'wiz.localPath') impTyped();", StringComparison.Ordinal)
+            && appJs.Contains("impTimer = setTimeout(() => { impTimer = 0; impCheck(); }, IMP_TYPED_MS);", StringComparison.Ordinal)
+            && impCheckJs.Contains("try { return { v: await rpc('install.inspectGame', Object.assign({}, req, { deep })) }; }", StringComparison.Ordinal)
+            && impQuickAt > 0 && impDoneAt > impQuickAt && impDeepAt > impDoneAt
+            && System.Text.RegularExpressions.Regex.Matches(impCheckJs, @"if \(seq !== impSeq \|\| impSettled\(im, a\)\) return;").Count == 2
+            && appJs.Contains("if (v.status === 'cancelled') { im.phase = 'cancelled'; syncImp(); return true; }", StringComparison.Ordinal)
+            && appJs.Contains("function impNow() { const im = S.imp; return impPath() && im.key === impKey() && !im.stale ? im : null; }", StringComparison.Ordinal));
+        // START of an import waits for a deep "ready" about what the field names now, the version and the choice it was
+        // asked with: the button is drawn dead without it, and the action refuses too (a click that raced the redraw) —
+        // before anything starts; the search stops with the install.
+        string startJs = ActionBody("startInstall");
+        int startReadyAt = startJs.IndexOf("if (isLocal && !ready) { impEnsure(); return showToast(t('toast.importNotReady'), 'bad'); }", StringComparison.Ordinal);
+        Check("import page: START waits for a deep 'ready' about the field's text, the version and the choice — the button drawn dead, the action refusing before anything starts — and the search stops with the install",
+            appJs.Contains("function impReady() { const im = impNow(); return im && im.phase === 'done' && im.verdict && im.verdict.status === 'ready' ? im.verdict : null; }", StringComparison.Ordinal)
+            && appJs.Contains("const wizStartOk = () => S.wiz.source !== 'local' || !!impReady();", StringComparison.Ordinal)
+            && appJs.Contains("data-act=\"startInstall\" ${wizStartOk() ? '' : 'disabled'}", StringComparison.Ordinal)
+            && startReadyAt > 0 && startReadyAt < startJs.IndexOf("S.installing = true;", StringComparison.Ordinal)
+            && startJs.IndexOf("findHalt();", startReadyAt, StringComparison.Ordinal) > startReadyAt
+            && L.Has("toast.importNotReady"));
+        // Browse… opens the file dialog on GenshinImpact.exe — the existing pickFile rpc, whose dialog reads title, filter and
+        // initialDir — and checks the folder of the file chosen at once.
+        Check("import page: Browse… is pickFile with the filter 'Genshin Impact (GenshinImpact.exe)|GenshinImpact.exe' (en.json wizard.pickLocalFilter), the dialog's three names on both sides, the folder of the file chosen checked at once",
+            appJs.Contains("const r = await rpc('pickFile', { title: t('wizard.pickLocalTitle'), filter: t('wizard.pickLocalFilter'), initialDir: impInitialDir() });", StringComparison.Ordinal)
+            && ActionBody("pickLocalGame").Contains("S.wiz.localPath = pickedGameDir(r.path); S.imp.replace = null; S.imp.hit = null; render(); impCheck(true);", StringComparison.Ordinal)
+            && backendCs.Contains("return new { path = _form.PickFile(Str(p, \"title\"), Str(p, \"filter\"), Str(p, \"initialDir\")) };", StringComparison.Ordinal)
+            && L.Has("wizard.pickLocalFilter") && L.T("wizard.pickLocalFilter") == "Genshin Impact (GenshinImpact.exe)|GenshinImpact.exe"
+            && !appJs.Contains("pickLocalFolder", StringComparison.Ordinal));
+        // A refusal offers the one way its reason has: a folder of another version Relic offers → "Add it as version X"; a
+        // copy of a version installed elsewhere → "Use this folder instead" (asked again with that folder's installedAt); a
+        // folder that contradicts itself, or holds a version Relic does not offer, gets none.
+        string impHtmlJs = JsFunction(appJs, "function impHtml(mode) {");
+        string useInsteadJs = ActionBody("impUseInstead");
+        Check("import page: otherVersion with foundOffered offers Add it as version {found}, installedElsewhere Use this folder instead (asked again with its installedAt), contradiction / notOffered nothing",
+            impHtmlJs.Contains("const other = v.reason === 'otherVersion' && v.foundOffered && v.found && versionById(v.found)", StringComparison.Ordinal)
+            && impHtmlJs.Contains("? btn('impSwitch', T('wizard.verdict.switch', { version: v.found }), v.found) : '';", StringComparison.Ordinal)
+            && impHtmlJs.Contains("const instead = v.reason === 'installedElsewhere' && v.installedAt ? btn('impUseInstead', T('wizard.verdict.useInstead')) : '';", StringComparison.Ordinal)
+            && !impHtmlJs.Contains("'contradiction'", StringComparison.Ordinal) && !impHtmlJs.Contains("'notOffered'", StringComparison.Ordinal)
+            && useInsteadJs.Contains("if (!v || v.reason !== 'installedElsewhere' || !v.installedAt) return;", StringComparison.Ordinal)
+            && useInsteadJs.Contains("S.imp.replace = { path: impPath(), versionId: impVersion(), installedAt: v.installedAt };", StringComparison.Ordinal)
+            && ActionBody("impSwitch").Contains("S.wiz.versionId = id; S.imp.replace = null;", StringComparison.Ordinal));
+        // The page follows the search Start answered: events that land before that answer wait for it, every event of
+        // another search and anything after that search's done is dropped; it stops the search when the Source step leaves
+        // the screen (render() asks after every drawing), when an install starts and when the window goes to the tray.
+        string fndRunJs = JsFunction(appJs, "async function findRun(deeper) {");
+        int fndNumberAt = fndRunJs.IndexOf("f.search = n;", StringComparison.Ordinal);
+        Check("import page: the search's events count only for the number Start answered (those before the answer held for it), never after its done; the search stops when its list leaves the screen, at an install and in the tray",
+            appJs.Contains("if (S.find.starting) { if (findBuf.length < FIND_BUF_MAX) findBuf.push([kind, d]); return; }", StringComparison.Ordinal)
+            && appJs.Contains("if (Number(d.search) !== f.search || f.done) return false;", StringComparison.Ordinal)
+            && fndRunJs.Contains("let r = await rpc('install.findGames', payload);", StringComparison.Ordinal)
+            && fndNumberAt > 0 && fndRunJs.IndexOf("buf.forEach(([kind, d]) => findApply(kind, d));", fndNumberAt, StringComparison.Ordinal) > fndNumberAt
+            && appJs.Contains("function findLeft() { if (findLive() && !S.find.stopping && !findShown()) setTimeout(findHalt, 0); }", StringComparison.Ordinal)
+            && appJs.Contains("const findShown = () => S.screen === 'install' && S.installStep === 2 && S.wiz.source === 'local' && !S.installing;", StringComparison.Ordinal)
+            && JsFunction(appJs, "function render() {").Contains("findLeft();", StringComparison.Ordinal)
+            && appJs.Contains("LOGIN_MEDIA.sync(); if (S.login.hidden) findHalt(); });", StringComparison.Ordinal));
+        // A folder found: use / pick go into the field — as the version its files or its config.ini name, or, naming none,
+        // as the one chosen, its note kept beside the check as a warning —, registered says it is in the Library already,
+        // none stays greyed in a folded list, never with a button.
+        string hitJs = JsFunction(appJs, "function findHitHtml(h, i) {");
+        string findUseJs = ActionBody("findUse");
+        Check("import page: a found folder — use / pick into the field (as its own version, else the chosen one with its note as a warning), registered 'Already in your Library' without a button, none folded away and greyed, never a button",
+            hitJs.Contains("const act = h.status === 'registered' ? `<span class=\"fhit-tag\">${T('wizard.find.registered')}</span>`", StringComparison.Ordinal)
+            && hitJs.Contains(": off ? ''", StringComparison.Ordinal)
+            && appJs.Contains("const usable = rows.filter((r) => r.h.status !== 'none'), others = rows.filter((r) => r.h.status === 'none');", StringComparison.Ordinal)
+            && findUseJs.Contains("if (!h || (h.status !== 'use' && h.status !== 'pick') || S.installing) return;", StringComparison.Ordinal)
+            && findUseJs.Contains("if (h.version && versionById(h.version)) S.wiz.versionId = h.version;", StringComparison.Ordinal)
+            && findUseJs.Contains("S.imp.hit = h.status === 'pick' && typeof h.note === 'string' && h.note ? { dir: h.dir, text: h.note } : null;", StringComparison.Ordinal)
+            && findUseJs.IndexOf("impCheck(true);", StringComparison.Ordinal) > findUseJs.IndexOf("S.wiz.localPath = h.dir;", StringComparison.Ordinal)
+            && L.Has("wizard.find.registered"));
+
+        // ── the end of a play session: the notices ──
+        // The session's client seen gone posts play.closing at once (before the settle window), play.done carries what the
+        // post-exit step did (the session's result), the recovery loop's restore is profile.changed with the profile status;
+        // each goes to the tray as well (Backend.Notice). The shortcut's session in this process posts the same two — its
+        // window may be opened during the game, and the page keeps PLAY off between them — and, when its session end fails
+        // after the closing was said, play.error, which takes that notice away (its error is the caller's dialog).
+        int sesPlayAt = backendCs.IndexOf("private void StartPlay(string versionId, string? ownFiles = null)", StringComparison.Ordinal);
+        int sesClosingAt = sesPlayAt < 0 ? -1 : backendCs.IndexOf("session.GameClosed += n => { PostEvent(\"play.closing\", n); RaiseNotice(n); };", sesPlayAt, StringComparison.Ordinal);
+        int sesAwaitAt = sesClosingAt < 0 ? -1 : backendCs.IndexOf("await session.PlayAsync(versionId);", sesClosingAt, StringComparison.Ordinal);
+        int sesDoneAt = sesAwaitAt < 0 ? -1 : backendCs.IndexOf("PostEvent(\"play.done\", (object?)session.Result ?? new { versionId });", sesAwaitAt, StringComparison.Ordinal);
+        string sesShortcutCs = MemberText(backendCs, "public void StartPlayFromShortcut(string versionId, Action<string> log, Action appeared, Action<Exception?> finished,");
+        int sesScClosingAt = sesShortcutCs.IndexOf("session.GameClosed += n => { closingPosted = true; PostEvent(\"play.closing\", n); RaiseNotice(n); };", StringComparison.Ordinal);
+        int sesScAwaitAt = sesScClosingAt < 0 ? -1 : sesShortcutCs.IndexOf("await session.PlayAsync(versionId);", sesScClosingAt, StringComparison.Ordinal);
+        int sesScDoneAt = sesScAwaitAt < 0 ? -1 : sesShortcutCs.IndexOf("PostEvent(\"play.done\", (object?)session.Result ?? new { versionId });", sesScAwaitAt, StringComparison.Ordinal);
+        int sesScFinallyAt = sesScDoneAt < 0 ? -1 : sesShortcutCs.IndexOf("finally", sesScDoneAt, StringComparison.Ordinal);
+        int sesScErrorAt = sesScFinallyAt < 0 ? -1 : sesShortcutCs.IndexOf("if (error is not null && closingPosted) PostEvent(\"play.error\", new { message = error.Message });", sesScFinallyAt, StringComparison.Ordinal);
+        int sesScFinishedAt = sesScErrorAt < 0 ? -1 : sesShortcutCs.IndexOf("finished(error);", sesScErrorAt, StringComparison.Ordinal);
+        string loopRecoveredCs = MemberText(backendCs, "private void OnLoopRecovered(SessionNotice notice)");
+        string raiseCs = MemberText(backendCs, "private void RaiseNotice(SessionNotice notice)");
+        Check("session: play.closing is posted the moment the client is seen gone and play.done carries the session's result, both to the tray as well — from PLAY and from the shortcut's session in this process, whose session end that fails after the closing takes it away with play.error; the loop's restore is profile.changed with the profile status; a tray that fails costs the notice only",
+            sesPlayAt > 0 && sesClosingAt > sesPlayAt && sesAwaitAt > sesClosingAt && sesDoneAt > sesAwaitAt
+            && backendCs.IndexOf("if (session.Result is { } result) RaiseNotice(result);", sesDoneAt, StringComparison.Ordinal) > sesDoneAt
+            && sesScClosingAt > 0 && sesScAwaitAt > sesScClosingAt && sesScDoneAt > sesScAwaitAt
+            && sesShortcutCs.IndexOf("if (session.Result is { } result) RaiseNotice(result);", sesScDoneAt, StringComparison.Ordinal) > sesScDoneAt
+            && sesScErrorAt > sesScFinallyAt && sesScFinishedAt > sesScErrorAt
+            && System.Text.RegularExpressions.Regex.Matches(sesShortcutCs, @"PostEvent\(""play\.").Count == 3
+            && loopRecoveredCs.Contains("PostEvent(\"profile.changed\", new", StringComparison.Ordinal) && loopRecoveredCs.Contains("status = ProfileStatus(),", StringComparison.Ordinal)
+            && loopRecoveredCs.IndexOf("RaiseNotice(notice);", StringComparison.Ordinal) > loopRecoveredCs.IndexOf("PostEvent(\"profile.changed\"", StringComparison.Ordinal)
+            && raiseCs.Contains("try { Notice?.Invoke(notice); }", StringComparison.Ordinal) && raiseCs.Contains("catch (Exception ex)", StringComparison.Ordinal));
+        // The tray: Backend.Notice is subscribed once, right after the Backend is built and before a shortcut's session can
+        // raise a notice; the handler hands the notice to the window's thread and never waits for it (a blocking handler
+        // would delay the settle window's start); a balloon only while nobody sees the page — the window in the tray or
+        // minimized —, a warning for a deferred restore and for a game never seen; nothing once the tray icon is gone (the
+        // recovery loop runs until the exit's own pass).
+        int mfBuiltAt = w11MainForm.IndexOf("_backend = new Backend(this);", StringComparison.Ordinal);
+        int mfSubAt = w11MainForm.IndexOf("_backend.Notice += OnSessionNotice;", StringComparison.Ordinal);
+        int mfShortcutAt = w11MainForm.IndexOf("if (_shortcutPlay is string shortcutVersion) StartShortcutPlay(shortcutVersion);", StringComparison.Ordinal);
+        string onNoticeCs = MemberText(w11MainForm, "private void OnSessionNotice(SessionNotice notice)");
+        string balloonCs = MemberText(w11MainForm, "private void ShowNoticeBalloon(SessionNotice notice)");
+        string disposeTrayCs = MemberText(w11MainForm, "private void DisposeTray()");
+        int balloonHiddenAt = balloonCs.IndexOf("if (!IsHiddenToTray && WindowState != FormWindowState.Minimized) return;", StringComparison.Ordinal);
+        Check("tray: Backend.Notice subscribed once, after the Backend is built and before the shortcut's session starts; handed to the window's thread with BeginInvoke (never waited for); a balloon only while the window is in the tray or minimized, a warning for a deferred restore or a game never seen; none once the tray icon is gone",
+            mfBuiltAt > 0 && mfSubAt > mfBuiltAt && mfShortcutAt > mfSubAt
+            && System.Text.RegularExpressions.Regex.Matches(w11MainForm, @"\.Notice \+= ").Count == 1
+            && onNoticeCs.Contains("BeginInvoke(() => ShowNoticeBalloon(notice));", StringComparison.Ordinal)
+            && !onNoticeCs.Replace("BeginInvoke(", "", StringComparison.Ordinal).Contains("Invoke(", StringComparison.Ordinal)
+            && balloonCs.Contains("if (_tray is not { } tray || string.IsNullOrWhiteSpace(notice.Text)) return;", StringComparison.Ordinal)
+            && balloonHiddenAt > 0 && balloonCs.IndexOf("tray.ShowBalloonTip(5000, \"Relic\", notice.Text, NoticeIcon(notice));", balloonHiddenAt, StringComparison.Ordinal) > balloonHiddenAt
+            && w11MainForm.Contains("notice.Kind is SessionNotice.KindDeferredOwn or SessionNotice.KindDeferredForeign || notice.Appeared == false", StringComparison.Ordinal)
+            && disposeTrayCs.IndexOf("_tray = null;", StringComparison.Ordinal) is int nulledAt && nulledAt > 0
+            && disposeTrayCs.IndexOf("tray?.Dispose();", nulledAt, StringComparison.Ordinal) > nulledAt
+            && !w11MainForm.Contains("_tray?.Dispose()", StringComparison.Ordinal));
+        // The desktop shortcut pressed while the launcher runs plays in a process of its own, with no window once the splash
+        // has closed: its message loop is a tray of its own (PlayTray, an ApplicationContext whose loop outlives the
+        // splash), which shows the game's closing and the session's result as balloons and ends once the work is done and
+        // the last balloon had its time on screen.
+        int rpAt = w11Program.IndexOf("private static void RunPlay(string versionId, EventWaitHandle ownFilesSignal, EventWaitHandle showSignal)", StringComparison.Ordinal);
+        int rpTrayAt = rpAt < 0 ? -1 : w11Program.IndexOf("using (var tray = new PlayTray(splash, () => showSignal.Set()))", rpAt, StringComparison.Ordinal);
+        int rpClosedAt = rpTrayAt < 0 ? -1 : w11Program.IndexOf("session.GameClosed += tray.Notify;", rpTrayAt, StringComparison.Ordinal);
+        int rpStartedAt = rpClosedAt < 0 ? -1 : w11Program.IndexOf("tray.WorkStarted();", rpClosedAt, StringComparison.Ordinal);
+        int rpWorkAt = rpStartedAt < 0 ? -1 : w11Program.IndexOf("work = Task.Run(async () =>", rpStartedAt, StringComparison.Ordinal);
+        int rpPlayAt = rpWorkAt < 0 ? -1 : w11Program.IndexOf("await session.PlayAsync(versionId);", rpWorkAt, StringComparison.Ordinal);
+        int rpResultAt = rpPlayAt < 0 ? -1 : w11Program.IndexOf("if (session.Result is { } result) tray.Notify(result);", rpPlayAt, StringComparison.Ordinal);
+        int rpCloseAt = rpResultAt < 0 ? -1 : w11Program.IndexOf("splash.CloseSafe();", rpResultAt, StringComparison.Ordinal);
+        int rpDoneAt = rpCloseAt < 0 ? -1 : w11Program.IndexOf("tray.WorkDone(waitForBalloons: error is null);", rpCloseAt, StringComparison.Ordinal);
+        int rpRunAt = rpDoneAt < 0 ? -1 : w11Program.IndexOf("Application.Run(tray);", rpDoneAt, StringComparison.Ordinal);
+        Check("shortcut beside a running launcher: RunPlay's message loop is a tray of its own (PlayTray, started with the splash) — the game's closing and the session's result as its balloons, the work's end told in the finally after the splash closed",
+            rpAt > 0 && rpTrayAt > rpAt && rpClosedAt > rpTrayAt && rpStartedAt > rpClosedAt && rpWorkAt > rpStartedAt && rpPlayAt > rpWorkAt
+            && rpResultAt > rpPlayAt && rpCloseAt > rpResultAt && rpDoneAt > rpCloseAt && rpRunAt > rpDoneAt
+            && !w11Program.Contains("Application.Run(splash)", StringComparison.Ordinal)
+            && w11Program.Contains("if (playVersion is not null) { RunPlay(playVersion, ownFilesSignal, showSignal); return; }", StringComparison.Ordinal));
+        string playTrayCs = MemberText(w11Program, "private sealed class PlayTray : ApplicationContext");
+        int ptClosedAt = playTrayCs.IndexOf("protected override void OnMainFormClosed(object? sender, EventArgs e)", StringComparison.Ordinal);
+        int ptExitAt = playTrayCs.IndexOf("protected override void ExitThreadCore()", StringComparison.Ordinal);
+        Check("shortcut beside a running launcher: PlayTray keeps its loop past the splash (OnMainFormClosed without the base's exit, ending at once only when the work never started), shows a notice on its own thread without waiting for it, takes its icon away when the loop ends and lingers no longer than the system's notification time and a margin",
+            ptClosedAt > 0 && playTrayCs.IndexOf("if (!_workStarted) End();", ptClosedAt, StringComparison.Ordinal) > ptClosedAt
+            && !playTrayCs.Contains("base.OnMainFormClosed", StringComparison.Ordinal)
+            && ptExitAt > 0 && playTrayCs.IndexOf("RemoveIcon();", ptExitAt, StringComparison.Ordinal) is int ptRemoveAt && ptRemoveAt > ptExitAt
+            && playTrayCs.IndexOf("base.ExitThreadCore();", ptRemoveAt, StringComparison.Ordinal) > ptRemoveAt
+            && playTrayCs.Contains("public void Notify(SessionNotice notice) => OnLoop(() => Show(notice));", StringComparison.Ordinal)
+            && playTrayCs.Contains("_loop.BeginInvoke(action);", StringComparison.Ordinal) && !playTrayCs.Contains("_loop.Invoke(", StringComparison.Ordinal)
+            && playTrayCs.Contains("_icon.ShowBalloonTip(5000, \"Relic\", notice.Text, global::Relic.App.MainForm.NoticeIcon(notice));", StringComparison.Ordinal)
+            && playTrayCs.Contains("return Math.Clamp((long)seconds, 5, 60) * 1000 + 2000;", StringComparison.Ordinal));
+        // The page: play.closing draws the Library's notice at once (a toast on another screen) and keeps PLAY off until
+        // play.done, play.error or play.fiddlerClosed — the button drawn dead, every way into PLAY refusing; play.done takes
+        // its place, its tone read from the kind AND from appeared (false: a launch that never started), and reads the
+        // profile again; play.error / play.fiddlerClosed take the closing notice away; profile.changed sets the profile from
+        // the status it carries (a read asked before it never takes its place).
+        string closingJs = JsFunction(appJs, "on('play.closing', (d) => {", "\n});\n");
+        string doneJs = JsFunction(appJs, "on('play.done', (d) => {", "\n});\n");
+        string sesErrorJs = JsFunction(appJs, "on('play.error', (d) => {", "\n});\n");
+        string sesFiddlerJs = JsFunction(appJs, "on('play.fiddlerClosed', (d) => {", "\n});\n");
+        string sesProfileJs = JsFunction(appJs, "on('profile.changed', (d) => {", "\n});\n");
+        string sesToneJs = JsFunction(appJs, "function sessionTone(n) {");
+        var playWays = new[] { "play", "playOwnFiles", "playChecked", "playGo" }
+            .Where(a => !ActionBody(a).Contains("if (sessionClosing()) return showToast(t('toast.sessionClosing'), 'bad');", StringComparison.Ordinal)).ToList();
+        string playGoJs = ActionBody("playGo");
+        Check("session page: play.closing draws the notice at once and PLAY stays off until play.done / play.error / play.fiddlerClosed (the button dead, every way into PLAY refusing); play.done replaces it, styled by kind AND appeared, and reads the profile again; play.error / play.fiddlerClosed clear it; profile.changed sets S.profile from its status"
+              + (playWays.Count > 0 ? " — no refusal in: " + string.Join(", ", playWays) : ""),
+            closingJs.Contains("sessionSay({ phase: 'closing', kind: 'closing', text: sessionText(d, t('core.play.closing')), versionId: (d && d.versionId) || '', appeared: true });", StringComparison.Ordinal)
+            && doneJs.Contains("if (!(S.playing && S.playing.check)) S.playing = null;", StringComparison.Ordinal)
+            && doneJs.Contains("sessionSay({ phase: 'done',", StringComparison.Ordinal)
+            && doneJs.Contains("appeared: d && typeof d.appeared === 'boolean' ? d.appeared : null", StringComparison.Ordinal)
+            && doneJs.IndexOf("loadProfileStatus();", StringComparison.Ordinal) > doneJs.IndexOf("sessionSay(", StringComparison.Ordinal)
+            && sesErrorJs.Contains("if (sessionClosing()) S.session = null;", StringComparison.Ordinal)
+            && sesFiddlerJs.Contains("if (sessionClosing()) S.session = null;", StringComparison.Ordinal)
+            && sesProfileJs.Contains("if (d.status && typeof d.status === 'object') { profSeq++; S.profile = d.status; }", StringComparison.Ordinal)
+            && JsFunction(appJs, "async function loadProfileStatus() {").Contains("if (seq !== profSeq) return;", StringComparison.Ordinal)
+            && sesToneJs.IndexOf("if (n.appeared === false) return 'bad';", StringComparison.Ordinal) is int badAt && badAt > 0
+            && sesToneJs.IndexOf("return n.kind === 'deferredOwn' || n.kind === 'deferredForeign' ? 'warn' : 'ok';", badAt, StringComparison.Ordinal) > badAt
+            && appJs.Contains("const sessionClosing = () => !!S.session && S.session.phase === 'closing';", StringComparison.Ordinal)
+            && appJs.Contains("data-act=\"play\" data-arg=\"${sel.id}\" ${sessionClosing() ? 'disabled' : ''}", StringComparison.Ordinal)
+            && playWays.Count == 0
+            && playGoJs.IndexOf("S.session = null;", StringComparison.Ordinal) > playGoJs.IndexOf("if (sessionClosing()) return", StringComparison.Ordinal)
+            && JsFunction(appJs, "function library() {").Contains("${sessionNote()}", StringComparison.Ordinal)
+            && L.Has("toast.sessionClosing") && L.Has("core.play.closing"));
+        // One set of names and one vocabulary on both sides: what the page reads of a verdict, a found folder, the search's
+        // progress and end, and a session's notice are names those records serialize to (camelCase, as MainForm.PostJson
+        // writes them), and the words it compares them with are the Core's own.
+        var camelJson = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        HashSet<string> JsonNamesOf(object value)
+        {
+            using var doc = JsonDocument.Parse(JsonSerializer.Serialize(value, value.GetType(), camelJson));
+            return doc.RootElement.EnumerateObject().Select(x => x.Name).ToHashSet(StringComparer.Ordinal);
+        }
+        HashSet<string> JsReads(string js, string obj) => System.Text.RegularExpressions.Regex.Matches(js,
+                @"(?<![A-Za-z0-9_$.])" + System.Text.RegularExpressions.Regex.Escape(obj) + @"\.([A-Za-z][A-Za-z0-9]*)")
+            .Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        HashSet<string> Tokens(string js, string pattern) => System.Text.RegularExpressions.Regex.Matches(js, pattern)
+            .Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        string impNotesJs = JsFunction(appJs, "function impNotes(v, full) {");
+        string hitsListJs = JsFunction(appJs, "function findHitsHtml() {");
+        string progJs = JsFunction(appJs, "function findProgHtml() {");
+        string diskJs = JsFunction(appJs, "function findDiskHtml(d) {");
+        string applyJs = JsFunction(appJs, "function findApply(kind, d) {");
+        string sesTextJs = JsFunction(appJs, "const sessionText = (d, fallback) =>", "\n");
+        var namesOff = new List<string>();
+        void Names(string what, HashSet<string> reads, HashSet<string> names, params string[] mustRead)
+        {
+            foreach (var r in reads.Where(r => !names.Contains(r)).OrderBy(r => r, StringComparer.Ordinal)) namesOff.Add($"the page reads {r} of {what}, which it does not carry");
+            foreach (var m in mustRead.Where(m => !reads.Contains(m))) namesOff.Add($"the page's read of {m} of {what} is not where this check looks");
+        }
+        var hitNames = JsonNamesOf(new GameSearchHit(1, @"D:\Games\GI", GameSearch.StatusUse, "2.8", "", GameSearch.ProofIdentity, true, "", "", "", GameSearch.SourceDisk, 0));
+        var progNames = JsonNamesOf(new GameSearchProgress(1, GameSearch.PhaseDisks, 3, 0, 0.5, new[] { new GameSearchDiskState("C:", 3, false, GameSearch.DiskSearching) }));
+        var doneNames = JsonNamesOf(new GameSearchDone(1, true, true, false, 0, 3, 0.5, ""));
+        Names("a verdict", JsReads(impHtmlJs + impNotesJs + useInsteadJs, "v"), JsonNamesOf(new ImportVerdict()),
+            "status", "reason", "message", "found", "foundOffered", "build", "installedAt", "installedAtGone", "replaceInstalled",
+            "windows11Unsupported", "notes", "writes", "bytesNeeded", "versionId");
+        Names("a verdict's note", JsReads(impNotesJs, "n"), JsonNamesOf(new ImportNote("unknownBuild", "x")), "code", "text");
+        Names("a found folder", JsReads(hitJs + findUseJs, "h"), hitNames, "status", "dir", "version", "build", "source", "proof", "installedAt", "note");
+        Names("the search's progress", JsReads(progJs, "p"), progNames, "phase", "dirs", "disks");
+        Names("a disk of the search", JsReads(diskJs, "d"), JsonNamesOf(new GameSearchDiskState("C:", 3, true, GameSearch.DiskDone)), "state", "name", "hdd", "dirs");
+        Names("the search's end", JsReads(progJs, "d"), doneNames, "dirs", "error", "stopped", "budget", "deeper");
+        foreach (var (what, names) in new[] { ("a found folder", hitNames), ("the search's progress", progNames), ("the search's end", doneNames) })
+            Names(what, JsReads(applyJs, "d").Where(n => n == "search").ToHashSet(StringComparer.Ordinal), names, "search");
+        Names("a session's notice", JsReads(closingJs + doneJs + sesTextJs, "d"),
+            JsonNamesOf(new Relic.Core.Play.SessionNotice(Relic.Core.Play.SessionNotice.KindDeferredOwn, "x") { VersionId = "2.8", Appeared = true }),
+            "kind", "text", "versionId", "appeared");
+        Check("import / session page: one set of names on both sides — what the page reads of a verdict, a found folder, the search's progress and end and a session's notice is what those records serialize to (camelCase, MainForm.PostJson)"
+              + (namesOff.Count > 0 ? " — " + string.Join("; ", namesOff) : ""),
+            namesOff.Count == 0 && w11MainForm.Contains("PropertyNamingPolicy = JsonNamingPolicy.CamelCase,", StringComparison.Ordinal));
+        var vocabOff = new List<string>();
+        void Words(string what, HashSet<string> used, IEnumerable<string> known, bool all = false)
+        {
+            var knownSet = known.ToHashSet(StringComparer.Ordinal);
+            if (used.Count == 0) vocabOff.Add($"no word of {what} where this check looks");
+            foreach (var w in used.Where(w => !knownSet.Contains(w)).OrderBy(w => w, StringComparer.Ordinal)) vocabOff.Add($"'{w}' is no word of {what} the Core writes");
+            if (all) foreach (var w in knownSet.Where(w => !used.Contains(w)).OrderBy(w => w, StringComparer.Ordinal)) vocabOff.Add($"the page never tells '{w}' of {what} apart");
+        }
+        Words("a found folder's status", Tokens(hitJs + findUseJs + hitsListJs, @"\bh\.status [!=]== '([a-z]+)'"),
+            new[] { GameSearch.StatusUse, GameSearch.StatusRegistered, GameSearch.StatusPick, GameSearch.StatusNone }, all: true);
+        Words("a found folder's source", Tokens(hitJs, @"\bh\.source === '([a-z]+)'"),
+            new[] { GameSearch.SourceRelic, GameSearch.SourceRunning, GameSearch.SourceTraces, GameSearch.SourceDisk });
+        Words("a found folder's proof", Tokens(hitJs, @"\bh\.proof === '([a-z]+)'"), new[] { GameSearch.ProofIdentity, GameSearch.ProofList, GameSearch.ProofConfig });
+        Words("the search's phase", Tokens(progJs, @"\bp\.phase === '([a-z]+)'"), new[] { GameSearch.PhasePlaces, GameSearch.PhaseDisks });
+        Words("a disk's state", Tokens(diskJs, @"\bst === '([a-z]+)'"),
+            new[] { GameSearch.DiskWaiting, GameSearch.DiskSearching, GameSearch.DiskDone, GameSearch.DiskStopped });
+        // (a comparison of the status's type — typeof v.status !== 'string' — names no status)
+        var verdictWords = Tokens(impCheckJs + impHtmlJs + JsFunction(appJs, "function impSettled(im, a) {"), @"(?<!typeof [A-Za-z0-9_.]*)\.status [!=]== '([a-z]+)'");
+        verdictWords.UnionWith(Tokens(appJs, @"\bim\.verdict\.status === '([a-z]+)'"));
+        bool cancelledOneWord = verdictWords.Remove("cancelled") && backendCs.Contains("private static readonly object InspectCancelled = new { status = \"cancelled\" };", StringComparison.Ordinal);
+        if (!cancelledOneWord) vocabOff.Add("the page's 'cancelled' is not the answer install.inspectGame gives a cancelled check");
+        Words("a verdict's status", verdictWords, new[] { ImportVerdict.Ready, ImportVerdict.Checking, ImportVerdict.Refused }, all: true);
+        Words("a refusal's reason", Tokens(impHtmlJs + useInsteadJs, @"\bv\.reason [!=]== '([a-zA-Z]+)'"), new[]
+        {
+            ImportVerdict.NoVersion, ImportVerdict.UnknownVersion, ImportVerdict.NoPath, ImportVerdict.NotFullPath, ImportVerdict.NotGameExe,
+            ImportVerdict.FolderMissing, ImportVerdict.NoExe, ImportVerdict.NoData, ImportVerdict.Contradiction, ImportVerdict.OtherVersion,
+            ImportVerdict.NotOffered, ImportVerdict.WrongBuild, ImportVerdict.RegisteredOther, ImportVerdict.InstalledElsewhere, ImportVerdict.Running,
+            ImportVerdict.Patch, ImportVerdict.ReadOnly, ImportVerdict.Attributes, ImportVerdict.InUse, ImportVerdict.InTheWay, ImportVerdict.NoRoom,
+        });
+        string importCheckPath = Path.Combine(repoRoot, "app", "Relic.Core", "Install", "ImportCheck.cs");
+        var noteCodes = Tokens(File.Exists(importCheckPath) ? File.ReadAllText(importCheckPath) : "", @"\bNote\(verdict, ""([a-zA-Z]+)""");
+        var warnNotes = System.Text.RegularExpressions.Regex.Match(appJs, @"const IMP_NOTE_WARN = \[([^\]]*)\];");
+        Words("a verdict's note", warnNotes.Success ? Tokens(warnNotes.Groups[1].Value, @"'([a-zA-Z]+)'") : new HashSet<string>(), noteCodes);
+        Words("a session's end", Tokens(sesToneJs, @"\bn\.kind === '([a-zA-Z]+)'"),
+            new[] { Relic.Core.Play.SessionNotice.KindDeferredOwn, Relic.Core.Play.SessionNotice.KindDeferredForeign }, all: true);
+        Check("import / session page: one vocabulary on both sides — the words the page tells a found folder, the search's phase, a disk, a verdict, a refusal, a warning note and a session's end by are the Core's own constants"
+              + (vocabOff.Count > 0 ? " — " + string.Join("; ", vocabOff) : ""),
+            vocabOff.Count == 0);
+
         int fail = results.Count(r => !r.ok);
         Console.WriteLine();
         Console.WriteLine($"server spike: {results.Count - fail}/{results.Count} checks passed");
         return fail == 0 ? 0 : 1;
     }
+
+    /// <summary>A TCP port of 127.0.0.1 that nothing listens on at this moment, asked of the system. The
+    /// stand-in processes of this spike listen on such ports, never on fixed ones: two runs at the same
+    /// time (two work trees of one PC) would otherwise find each other's stand-ins where they expect
+    /// their own, or a silent port.</summary>
+    internal static int FreeLoopbackPort()
+    {
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        try { return ((System.Net.IPEndPoint)probe.LocalEndpoint).Port; }
+        finally { probe.Stop(); }
+    }
+
+    /// <summary>The agent's version table as its source writes it: one entry per row of <c>VERSIONS</c> in
+    /// gio_agent.py, in the table's order — the version id, and whether the row names the folder a Linux box
+    /// is assumed to use (<c>_version_row("&lt;id&gt;", "/home/&lt;id&gt;_live")</c>) or none
+    /// (<c>_version_row("&lt;id&gt;")</c>). The one reading of the agent's versions: every other list of
+    /// versions (the installers' rows, the launcher's) is held to what this answers. Empty when the table
+    /// is not there or holds a line that is not such a row.</summary>
+    internal static List<(string Id, bool Implicit)> AgentVersionRows(string agentPy)
+    {
+        if (!File.Exists(agentPy)) return [];
+        var table = System.Text.RegularExpressions.Regex.Match(File.ReadAllText(agentPy).Replace("\r\n", "\n"),
+            @"\nVERSIONS = \{\n(.*?)\n\}\n", System.Text.RegularExpressions.RegexOptions.Singleline);
+        if (!table.Success) return [];
+        var rows = new List<(string Id, bool Implicit)>();
+        foreach (string line in table.Groups[1].Value.Split('\n'))
+        {
+            var row = System.Text.RegularExpressions.Regex.Match(line, "^    \"([^\"]+)\": _version_row\\(\"([^\"]+)\"(, \"[^\"]+\")?\\),$");
+            if (!row.Success || row.Groups[1].Value != row.Groups[2].Value) return [];
+            rows.Add((row.Groups[1].Value, row.Groups[3].Success));
+        }
+        return rows;
+    }
+
+    /// <summary>The version rows of an installer script, in the script's order, in the shape of
+    /// <see cref="AgentVersionRows"/>: <c>STACK_VERSIONS=("&lt;id&gt;[:implicit]" …)</c> of install_agent.sh
+    /// (<paramref name="bash"/>) or the <c>@{ id = '&lt;id&gt;'; implicit = $true|$false }</c> lines of
+    /// <c>$stackVersions</c> in deploy_from_windows.ps1. Empty when the list is not there or holds anything
+    /// that is not such a row.</summary>
+    internal static List<(string Id, bool Implicit)> InstallerVersionRows(string script, bool bash)
+    {
+        script = script.Replace("\r\n", "\n");
+        var list = bash
+            ? System.Text.RegularExpressions.Regex.Match(script, @"^STACK_VERSIONS=\(([^)\n]*)\)$", System.Text.RegularExpressions.RegexOptions.Multiline)
+            : System.Text.RegularExpressions.Regex.Match(script, @"^\$stackVersions = @\(\n(.*?)\n\)$",
+                System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.Singleline);
+        if (!list.Success) return [];
+        var rows = new List<(string Id, bool Implicit)>();
+        string rowPattern = bash ? "^\"([0-9]+\\.[0-9]+)(:implicit)?\"$" : @"^@\{ id = '([0-9]+\.[0-9]+)'; implicit = \$(true|false) \},?$";
+        foreach (string item in list.Groups[1].Value.Split(bash ? ' ' : '\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var row = System.Text.RegularExpressions.Regex.Match(item.Trim(), rowPattern);
+            if (!row.Success) return [];
+            rows.Add((row.Groups[1].Value, bash ? row.Groups[2].Success : row.Groups[2].Value == "true"));
+        }
+        return rows;
+    }
+
+    /// <summary>The statements of an installer script that turn its version rows into config keys and
+    /// config lines, each as the whole lines the script must carry: install_agent.sh
+    /// (<paramref name="bash"/>) or deploy_from_windows.ps1. They are what the <c>server</c> spike's count
+    /// of an installer's keys stands on — a key is <c>GIO_DIR_</c> + the id without its dot; in bash every
+    /// key of the managed list carries its own blank and every config line its own newline; in PowerShell
+    /// the keys are a list and the lines are joined by a newline.</summary>
+    internal static (string What, string Text)[] InstallerBuilders(bool bash)
+    {
+        (string What, string Text)[] builders = bash
+            ?
+            [
+                ("the ids taken from STACK_VERSIONS", """
+                    STACK_IDS=(); declare -A STACK_IMPLICIT=()
+                    for row in "${STACK_VERSIONS[@]}"; do
+                      STACK_IDS+=("${row%%:*}")
+                    """),
+                ("dir_key", """dir_key() { echo "GIO_DIR_${1//./}"; }"""),
+                ("fetch_key", """fetch_key() { echo "GIO_FETCH_${1//./}"; }"""),
+                ("the loop that fills DIR_KEYS and DIR_LINES", """
+                    DIR_LINES=""; DIR_KEYS=""
+                    for v in "${STACK_IDS[@]}"; do
+                      key=$(dir_key "$v")
+                      DIR_KEYS="$DIR_KEYS$key "
+                      if [ "${STACK_IMPLICIT[$v]}" = 1 ] || [ -n "${DIR[$v]}" ] || [ -n "${!key+given}" ]; then
+                        DIR_LINES="$DIR_LINES$key=${DIR[$v]}"$'\n'
+                      fi
+                    done
+                    """),
+            ]
+            :
+            [
+                ("DirKey", """function DirKey([string]$id) { 'GIO_DIR_' + $id.Replace('.', '') }"""),
+                ("$dirKeys", """$dirKeys = @($stackVersions | ForEach-Object { DirKey $_.id })"""),
+                ("$dirLines", """
+                    $dirLines = (@($stackVersions | Where-Object { $_.implicit -or $stackDir[$_.id] -or $existing.ContainsKey((DirKey $_.id)) } | ForEach-Object { (DirKey $_.id) + '=' + $stackDir[$_.id] })) -join "`n"
+                    """),
+            ];
+        return [.. builders.Select(b => (b.What, b.Text.Replace("\r\n", "\n")))];
+    }
+
+    /// <summary>Whether the agent derives a version's folder key the way every other list of versions is
+    /// held to — <c>dir_setting_key</c> of gio_agent.py returns <c>"GIO_DIR_" + version.replace(".", "")</c>.</summary>
+    internal static bool AgentDirKeyIsIdWithoutDot(string agentPy) =>
+        File.Exists(agentPy) && System.Text.RegularExpressions.Regex.IsMatch(File.ReadAllText(agentPy).Replace("\r\n", "\n"),
+            "\ndef dir_setting_key\\(version\\):\n(?:    \"\"\"[^\n]*\"\"\"\n)?    return \"GIO_DIR_\" \\+ version\\.replace\\(\"\\.\", \"\"\\)\n");
+
+    /// <summary>One top-level function of a Python script as its source writes it: from its <c>def</c> line
+    /// up to the next line that is not indented. Empty when the script has no function of that name.</summary>
+    internal static string PythonFunction(string source, string name)
+    {
+        var def = Regex.Match(source, "^def " + Regex.Escape(name) + @"\(.*?(?=^\S|\z)", RegexOptions.Multiline | RegexOptions.Singleline);
+        return def.Success ? def.Value : "";
+    }
+
+    /// <summary>The statements of one top-level function of a Python script (<see cref="PythonFunction"/>),
+    /// in order and each on one line: the <c>def</c> line, then every statement of the body without its
+    /// indentation. A statement written over several lines is joined — the blanks between its parts read
+    /// as one blank —, a comment is dropped, a string stays as it is written (the docstring is one
+    /// statement), and the header of a block (<c>if …:</c>, <c>for …:</c>) is a statement of its own even
+    /// with its body on the same line. So a statement found here is one the function holds WHOLE: a text
+    /// that only begins or ends like it is another statement. Empty when the script has no function of
+    /// that name.</summary>
+    internal static List<string> PythonStatements(string source, string function)
+    {
+        string text = PythonFunction(source, function);
+        var statements = new List<string>();
+        var line = new StringBuilder();
+        int depth = 0;
+        void End()
+        {
+            string statement = line.ToString().Trim();
+            if (statement.Length > 0) statements.Add(statement);
+            line.Clear();
+        }
+        void Blank() { if (line.Length > 0 && line[^1] != ' ') line.Append(' '); }
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (c is '"' or '\'')
+            {
+                // A string runs to its closing quote — three of them when it opens with three.
+                string quote = new(c, i + 2 < text.Length && text[i + 1] == c && text[i + 2] == c ? 3 : 1);
+                int end = i + quote.Length;
+                while (end < text.Length && string.CompareOrdinal(text, end, quote, 0, quote.Length) != 0) end += text[end] == '\\' ? 2 : 1;
+                end = Math.Min(text.Length, end + quote.Length);
+                line.Append(text, i, end - i);
+                i = end - 1;
+            }
+            else if (c == '#') { while (i + 1 < text.Length && text[i + 1] != '\n') i++; }
+            else if (c == '\\' && i + 1 < text.Length && text[i + 1] is '\r' or '\n')
+            {
+                // A backslash carries the line on: the line break after it ends nothing.
+                i += text[i + 1] == '\r' && i + 2 < text.Length && text[i + 2] == '\n' ? 2 : 1;
+                Blank();
+            }
+            else if (c == '\n' && depth == 0) End();
+            else if (char.IsWhiteSpace(c)) Blank();
+            else
+            {
+                if (c is '(' or '[' or '{') depth++;
+                else if (c is ')' or ']' or '}') depth--;
+                line.Append(c);
+                // (the colon that ends a block's header — never the one of `:=`)
+                if (c == ':' && depth == 0 && !(i + 1 < text.Length && text[i + 1] == '=')
+                    && Regex.IsMatch(line.ToString(), @"^(?:if|elif|else|for|while|with|try|except|finally|def|class)\b")) End();
+            }
+        }
+        End();
+        return statements;
+    }
+
+    /// <summary>What one top-level function of a Python script tests, in order: of each <c>if</c> /
+    /// <c>elif</c> among its statements (<see cref="PythonStatements"/>) the condition — all that stands
+    /// between the keyword and the colon.</summary>
+    internal static List<string> PythonConditions(string source, string function) =>
+        [.. PythonStatements(source, function).Select(statement => Regex.Match(statement, "^(?:el)?if (.+):$"))
+            .Where(header => header.Success).Select(header => header.Groups[1].Value)];
 }
 
 /// <summary>
@@ -2824,20 +7469,26 @@ static class AgentUpdateSpike
 
 /// <summary>
 /// Validates the download mechanics. Local half (no network): cancel mid-transfer + resume — the
-/// exact pause/cancel mechanic the install overlay exposes — against a tiny in-process TCP server.
-/// Network half: a 1 KB range-probe of the CDN (expects HTTP 206 + exact total size + a ZIP
-/// signature + arbitrary-offset resume) and of the Google Drive confirm-token URL (expects real zip
-/// bytes, not an HTML interstitial). Real links are read from the gitignored readme so no private
-/// ids are committed.
+/// exact pause/cancel mechanic the install overlay exposes — against a tiny in-process TCP server, and the
+/// catalogue rules. Network half (<see cref="NetworkChecks"/>): every url of the catalogue the repository ships
+/// (<c>config/versions.sample.json</c>: the client and each voice pack of every version, on the CDN and on each
+/// mirror) is asked for its first KB with a Range — HTTP 206, the byte count the catalogue gives that host, a ZIP
+/// signature —, one url of each host for a Range in the middle of the file, and a Google Drive id, where the
+/// catalogue names one, for real zip bytes rather than an HTML interstitial. <see cref="CatalogueVariable"/> names
+/// another catalogue to ask instead (the private versions.json, whose Drive ids the shipped file never carries).
+/// A host's passing trouble (a 5xx, a 429, no answer) is asked again before it counts (<see cref="Retried{T}"/>).
+/// A PC that reaches none of the catalogue's hosts skips the half; one it cannot reach while another answers is
+/// skipped by name — either way the run ends with 3 when every check it made passed.
 /// </summary>
 static class DownloadSpike
 {
-    // Known-good size for the 1.6 audio zip (the smallest source), from the de-risk pass.
-    const long Audio16Size = 3_708_267_740L;
+    /// <summary>The environment variable that names a catalogue (the versions.json form) whose urls the network half
+    /// asks instead of the shipped <c>config/versions.sample.json</c>.</summary>
+    const string CatalogueVariable = "RELIC_DOWNLOAD_CATALOG";
 
     public static int Run()
     {
-        Console.WriteLine("== download spike: cancel/resume (local) + CDN 206/resume + Drive confirm-token ==");
+        Console.WriteLine("== download spike: cancel/resume (local) + every catalogue url: 206, its size, a resume + Drive confirm-token ==");
         var results = new List<(string name, bool ok)>();
         void Check(string name, bool ok)
         {
@@ -2887,126 +7538,190 @@ static class DownloadSpike
             Check("stall: a silent connection is reconnected and resumed via Range", false);
         }
 
-        string? readme = FindUp("link-uri_download_versiuni_ref/readme.txt");
-        if (readme is null)
-        {
-            Console.Error.WriteLine("  could not locate link-uri_download_versiuni_ref/readme.txt (gitignored) — skipping the network half");
-            int localFail = results.Count(r => !r.ok);
-            Console.WriteLine();
-            Console.WriteLine($"download spike: {results.Count - localFail}/{results.Count} checks passed (network half skipped)");
-            return localFail == 0 ? 3 : 1;
-        }
-        string text = File.ReadAllText(readme);
-
-        // The catalogue the app would load from here (the private versions.json, else the committed
-        // sample): what the readme lists must be what Relic actually dials. The readme carries no Drive
-        // ids — those live only in the private catalogue — so the Drive probe reads its id
-        // from there and is SKIPPED, not failed, when it is empty (a public build).
-        string? catalogPath = FindUp("config/versions.json") ?? FindUp("config/versions.sample.json");
-        var catalog = catalogPath is null ? Array.Empty<GameVersionInfo>() : VersionCatalog.Load(catalogPath);
-        var v16 = catalog.FirstOrDefault(v => v.Id == "1.6");
-        var en16 = v16?.VoicePack(VoiceLanguages.Default);
-
-        // Pinned to the 1.6.1 FILE NAMES: the readme may list 1.6.0 too, and "contains Audio and
-        // 1.6" would match whichever comes first.
-        string? cdnAudio16 = Regex.Matches(text, @"https://autopatchhk\.yuanshen\.com/\S+?\.zip")
-            .Select(m => m.Value)
-            .FirstOrDefault(u => u.EndsWith("/Audio_English(US)_1.6.1.zip", StringComparison.Ordinal));
-        string? archiveAudio16 = Regex.Matches(text, @"https://archive\.org/download/\S+?\.zip")
-            .Select(m => m.Value)
-            .FirstOrDefault(u => u.EndsWith("/Audio_English%28US%29_1.6.1.zip", StringComparison.Ordinal));
-        string? driveAudio16 = string.IsNullOrWhiteSpace(en16?.DriveId) ? null : en16!.DriveId;
-
-        Check("found the 1.6.1 English audio CDN url in the readme", cdnAudio16 is not null);
-        Check("found the 1.6.1 English audio archive.org url in the readme", archiveAudio16 is not null);
-        if (catalogPath is null || v16 is null || en16 is null)
-        {
-            Check("catalogue: 1.6 with an English(US) pack loads next to the readme", false);
-        }
-        else
-        {
-            Console.WriteLine($"    catalogue: {catalogPath}");
-            // The private catalogue spells out every url; the sample abbreviates the CLIENT folder
-            // ("/.../") while its voice packs are complete — compare whatever is not a placeholder.
-            if (!en16.CdnUrl.Contains("/.../"))
-                Check("catalogue: the 1.6 English(US) CDN url is the readme's", cdnAudio16 is not null && en16.CdnUrl == cdnAudio16);
-            var archiveMirror = en16.Mirrors.FirstOrDefault(m => m.Id == "archive");
-            Check("catalogue: the 1.6 English(US) archive.org mirror url is the readme's",
-                archiveMirror is not null && archiveAudio16 is not null && archiveMirror.Url == archiveAudio16);
-            Check($"catalogue: the 1.6 English(US) pack still says {Audio16Size} bytes", en16.Size == Audio16Size);
-            var clientMirror = v16.Client.Mirrors.FirstOrDefault(m => m.Id == "archive");
-            Check("catalogue: the 1.6 client archive.org url appears in the readme",
-                clientMirror is not null && text.Contains(clientMirror.Url, StringComparison.Ordinal));
-        }
-        if (driveAudio16 is null)
-            Console.WriteLine("  [SKIP] Drive probe: the catalogue carries no Drive id for the 1.6 English pack (public build)");
-
-        try
-        {
-            if (cdnAudio16 is not null)
-            {
-                var p = Downloader.ProbeAsync(cdnAudio16).GetAwaiter().GetResult();
-                Console.WriteLine($"    CDN: status={p.Status} total={p.Total} type={p.ContentType} zip={p.LooksLikeZip}");
-                Check("CDN honors Range (HTTP 206)", p.SupportsRange);
-                Check($"CDN reports exact size ({Audio16Size})", p.Total == Audio16Size);
-                Check("CDN body is a ZIP (PK header)", p.LooksLikeZip);
-
-                // arbitrary-offset resume: fetch bytes [1024,2047] and confirm the server starts there
-                using var http = Downloader.CreateClient();
-                using var req = new HttpRequestMessage(HttpMethod.Get, cdnAudio16);
-                req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(1024, 2047);
-                using var resp = http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
-                long? start = resp.Content.Headers.ContentRange?.From;
-                Check("CDN resume: range [1024,2047] returns 206 @ offset 1024",
-                    (int)resp.StatusCode == 206 && start == 1024);
-            }
-
-            if (driveAudio16 is not null)
-            {
-                string url = Downloader.DriveDirectUrl(driveAudio16);
-                var p = Downloader.ProbeAsync(url).GetAwaiter().GetResult();
-                Console.WriteLine($"    Drive: status={p.Status} type={p.ContentType} html={p.IsHtml} zip={p.LooksLikeZip}");
-                Check("Drive confirm-token returns bytes, not HTML interstitial", !p.IsHtml);
-                Check("Drive body is a ZIP (PK header)", p.LooksLikeZip);
-            }
-
-            // The other voice languages: the catalogue's urls must be the reference list's, and one CDN
-            // probe per version (its smallest pack) proves 206 + the catalogued byte count. Gated on the
-            // gitignored languages.txt like the readme half — an "all" run never depends on it.
-            string? languages = FindUp("link-uri_download_versiuni_ref/languages.txt");
-            if (languages is null)
-            {
-                Console.WriteLine("  [SKIP] non-English packs: link-uri_download_versiuni_ref/languages.txt not found");
-            }
-            else
-            {
-                string langText = File.ReadAllText(languages);
-                foreach (var v in catalog)
-                {
-                    var packs = v.VoicePacks().Where(p => p.Lang != VoiceLanguages.Default).ToList();
-                    Check($"catalogue {v.Id}: every non-English CDN url is in languages.txt",
-                        packs.Count == 3 && packs.All(p => langText.Contains(p.Pack.CdnUrl, StringComparison.Ordinal)));
-                    Check($"catalogue {v.Id}: every non-English archive.org url is in languages.txt",
-                        packs.Count == 3 && packs.All(p => p.Pack.Mirrors.Any(m => m.Id == "archive" && langText.Contains(m.Url, StringComparison.Ordinal))));
-                    var smallest = packs.OrderBy(p => p.Pack.Size).FirstOrDefault();
-                    if (smallest.Pack is null) continue;
-                    var lp = Downloader.ProbeAsync(smallest.Pack.CdnUrl).GetAwaiter().GetResult();
-                    Console.WriteLine($"    CDN {v.Id} {smallest.Lang}: status={lp.Status} total={lp.Total} zip={lp.LooksLikeZip}");
-                    Check($"CDN {v.Id} {smallest.Lang}: 206 + the catalogued size ({smallest.Pack.Size})",
-                        lp.SupportsRange && lp.Total == smallest.Pack.Size && lp.LooksLikeZip);
-                }
-            }
-        }
+        // The network half: what it did not ask is named in the summary line and makes the exit 3.
+        string? notAsked;
+        try { notAsked = NetworkChecks(Check); }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"  network error: {ex.GetType().Name}: {ex.Message}");
-            Check("network reachable", false);
+            Console.Error.WriteLine($"  network half error: {ex.GetType().Name}: {ex.Message}");
+            Check("network half: ran to its end", false);
+            notAsked = null;
         }
 
         int fail = results.Count(r => !r.ok);
         Console.WriteLine();
-        Console.WriteLine($"download spike: {results.Count - fail}/{results.Count} checks passed");
-        return fail == 0 ? 0 : 1;
+        Console.WriteLine($"download spike: {results.Count - fail}/{results.Count} checks passed{(notAsked is null ? "" : $" ({notAsked})")}");
+        return fail > 0 ? 1 : notAsked is null ? 0 : 3;
+    }
+
+    /// <summary>
+    /// The network half (see the class summary). The urls come from what the repository ships — the catalogue
+    /// <c>config/versions.sample.json</c>, found up from here — or from the catalogue <see cref="CatalogueVariable"/>
+    /// names; never from a reference folder. Every archive (a version's client, each voice pack) is asked on every
+    /// host it names, with the byte count the catalogue gives that host: the archive's own for the CDN, the mirror's
+    /// for a mirror (none given = any count). Returns null when every url was asked, else the words for the summary
+    /// line: the half skipped (no catalogue from here, or no host of it reachable) or the hosts left out.
+    /// </summary>
+    static string? NetworkChecks(Action<string, bool> check)
+    {
+        string named = (Environment.GetEnvironmentVariable(CatalogueVariable) ?? "").Trim();
+        if (named.Length > 0 && !File.Exists(named))
+        {
+            check($"network half: {CatalogueVariable} names a catalogue file ({named})", false);
+            return null;
+        }
+        string? path = named.Length > 0 ? named : FindUp("config/versions.sample.json");
+        if (path is null)
+        {
+            Console.WriteLine("  [SKIP] network half: config/versions.sample.json not found from here");
+            return "network half skipped";
+        }
+        var catalog = VersionCatalog.Load(path);
+        Console.WriteLine($"    network half: the urls of {path}{(named.Length > 0 ? $" ({CatalogueVariable})" : "")}");
+        check("network half: the catalogue names at least one version", catalog.Count > 0);
+
+        static string? HostOf(string url) =>
+            Uri.TryCreate(url, UriKind.Absolute, out var u) && (u.Scheme == Uri.UriSchemeHttps || u.Scheme == Uri.UriSchemeHttp) && u.Host.Length > 0 ? u.Host : null;
+        var probes = new List<(string What, string Url, string Host, long Size)>();
+        var driveIds = new List<(string What, string Id)>();
+        foreach (var v in catalog)
+            foreach (var (what, src) in v.VoicePacks().Select(p => ($"{v.Id} {p.Lang}", p.Pack)).Prepend(($"{v.Id} client", v.Client)))
+            {
+                var hosts = new List<(string Name, string Url, long Size)>();
+                if (!string.IsNullOrWhiteSpace(src.CdnUrl)) hosts.Add(("CDN", src.CdnUrl.Trim(), src.Size));
+                foreach (var m in src.Mirrors.Where(m => !string.IsNullOrWhiteSpace(m.Url)))
+                    hosts.Add((string.IsNullOrWhiteSpace(m.Id) ? "mirror" : m.Id, m.Url.Trim(), m.Size));
+                foreach (var (name, url, size) in hosts)
+                {
+                    if (HostOf(url) is { } host) probes.Add(($"{what} on {name}", url, host, size));
+                    else check($"{what} on {name}: the catalogue names an absolute http(s) url ({url})", false);
+                }
+                if (!string.IsNullOrWhiteSpace(src.DriveId)) driveIds.Add(($"{what} on Google Drive", src.DriveId.Trim()));
+            }
+
+        // The hosts, in the catalogue's order: one this PC opens no connection to is left out by name, and with none
+        // reachable there is no network to test against.
+        string driveHost = HostOf(Downloader.DriveDirectUrl("x")) ?? "";
+        var hostNames = probes.Select(p => p.Host).Concat(Enumerable.Repeat(driveHost, driveIds.Count > 0 ? 1 : 0))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        int PortOf(string host) => probes.Where(p => string.Equals(p.Host, host, StringComparison.OrdinalIgnoreCase))
+            .Select(p => new Uri(p.Url).Port).DefaultIfEmpty(443).First();
+        var reach = hostNames.Select(h => Task.Run(() => (Host: h, Why: Unreachable(h, PortOf(h), TimeSpan.FromSeconds(10))))).ToArray();
+        Task.WaitAll(reach);
+        var down = reach.Select(r => r.Result).Where(r => r.Why is not null).ToList();
+        if (hostNames.Count == 0 || down.Count == hostNames.Count)
+        {
+            Console.WriteLine("  [SKIP] network half: " + (hostNames.Count == 0 ? "the catalogue names no url"
+                : "no connection to any host of the catalogue from this PC — " + string.Join(", ", down.Select(d => $"{d.Host}: {d.Why}"))));
+            return "network half skipped";
+        }
+        foreach (var (host, why) in down)
+            Console.WriteLine($"  [SKIP] {host}: no connection from this PC ({why}) — its urls are not asked");
+        var up = reach.Select(r => r.Result).Where(r => r.Why is null).Select(r => r.Host).ToList();
+        bool Up(string host) => up.Contains(host, StringComparer.OrdinalIgnoreCase);
+
+        // Every url of a reachable host, four at a time, reported in the catalogue's order. The host's own passing
+        // trouble is asked again (Retried): a fault of the catalogue counts at its first answer.
+        var asked = probes.Where(p => Up(p.Host)).ToList();
+        var answers = new (RangeProbe? Probe, string? Error, int Tries)[asked.Count];
+        Parallel.For(0, asked.Count, new ParallelOptions { MaxDegreeOfParallelism = 4 }, i =>
+            answers[i] = Retried(() => Downloader.ProbeAsync(asked[i].Url).GetAwaiter().GetResult(), p => p.Status));
+        bool ProbePassed(int i) => answers[i].Probe is { SupportsRange: true, LooksLikeZip: true } p && (asked[i].Size <= 0 || p.Total == asked[i].Size);
+        for (int i = 0; i < asked.Count; i++)
+        {
+            var (what, _, host, size) = asked[i];
+            var (p, error, tries) = answers[i];
+            bool ok = ProbePassed(i);
+            string got = (p is null ? error ?? "no answer"
+                : $"status {p.Status}, {(p.Total is long n ? n + " bytes" : "no byte count")}, {p.ContentType ?? "no type"}, {(p.LooksLikeZip ? "PK" : "not a zip")}")
+                + (tries > 1 ? $" (asked {tries} times)" : "");
+            check($"{what} ({host}): 206 + {(size > 0 ? $"the catalogued {size} bytes" : "a byte count (the catalogue gives this host none)")} + a zip"
+                  + (ok ? "" : $" — got {got}"), ok);
+        }
+
+        // A resume asks for the rest of a partial file: one url of each host — the first whose own probe passed — is
+        // asked for a KB in the middle of the file (past 4 GB for the large archives), which has to come back from
+        // exactly that byte. A host none of whose urls passed is not asked: its failures are counted above.
+        foreach (string host in up)
+        {
+            if (!asked.Any(p => string.Equals(p.Host, host, StringComparison.OrdinalIgnoreCase))) continue; // a host only the Drive probe uses
+            int first = Enumerable.Range(0, asked.Count).FirstOrDefault(i => string.Equals(asked[i].Host, host, StringComparison.OrdinalIgnoreCase) && ProbePassed(i), -1);
+            if (first < 0)
+            {
+                Console.WriteLine($"  [SKIP] {host}: no Range from the middle of a file — none of its urls passed its own probe above");
+                continue;
+            }
+            var (what, url, _, size) = asked[first];
+            long at = size > 4096 ? size / 2 / 1024 * 1024 : 1024;
+            var (answer, error, tries) = Retried(() =>
+            {
+                using var cts = new CancellationTokenSource(Downloader.ProbeTimeout);
+                using var http = Downloader.CreateClient();
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(at, at + 1023);
+                using var resp = http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token).GetAwaiter().GetResult();
+                return (Status: (int)resp.StatusCode, Range: resp.Content.Headers.ContentRange);
+            }, a => a.Status);
+            bool ok = error is null && answer.Status == 206 && answer.Range?.From == at && (size <= 0 || answer.Range?.Length == size);
+            string got = (error ?? $"status {answer.Status}, Content-Range {answer.Range?.ToString() ?? "none"}") + (tries > 1 ? $" (asked {tries} times)" : "");
+            check($"{host}: a Range from byte {at} of {what} answers 206 from that byte" + (ok ? "" : $" — got {got}"), ok);
+        }
+
+        // Google Drive: the confirm-token url of each id the catalogue names answers the file itself, not a page. The
+        // id is private: no line names it.
+        if (driveIds.Count == 0)
+            Console.WriteLine($"  [SKIP] Google Drive: the catalogue names no Drive id (the shipped one never does; {CatalogueVariable} can name one that does)");
+        else if (Up(driveHost))
+            foreach (var (what, id) in driveIds)
+            {
+                RangeProbe? p = null;
+                string error = "";
+                try { p = Downloader.ProbeAsync(Downloader.DriveDirectUrl(id)).GetAwaiter().GetResult(); }
+                catch (Exception ex) { error = $"{ex.GetType().Name}: {ex.Message}".Replace(id, "<id>", StringComparison.Ordinal); }
+                bool ok = p is not null && !p.IsHtml && p.LooksLikeZip;
+                check($"{what}: the confirm-token url answers the file's bytes (a zip), not a web page"
+                      + (ok ? "" : " — got " + (p is null ? error : $"status {p.Status}, {p.ContentType ?? "no type"}, {(p.IsHtml ? "a web page" : "not a zip")}")), ok);
+            }
+
+        return down.Count == 0 ? null : $"network half partly skipped: no connection to {string.Join(", ", down.Select(d => d.Host))}";
+    }
+
+    /// <summary>Null when this PC opens a TCP connection to <paramref name="host"/>:<paramref name="port"/> within
+    /// <paramref name="budget"/> — directly, as the downloader connects (no proxy) —, else why it does not: the name
+    /// that does not resolve, the route that is not there, the time that ran out.</summary>
+    static string? Unreachable(string host, int port, TimeSpan budget)
+    {
+        using var cts = new CancellationTokenSource(budget);
+        using var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+        try
+        {
+            socket.ConnectAsync(new DnsEndPoint(host, port), cts.Token).AsTask().GetAwaiter().GetResult();
+            return null;
+        }
+        catch (OperationCanceledException) { return $"no connection within {budget.TotalSeconds:0} s"; }
+        catch (SocketException ex) { return ex.SocketErrorCode.ToString(); }
+    }
+
+    /// <summary>
+    /// <paramref name="ask"/>, asked again while its answer is the host's passing trouble rather than the url's — an
+    /// HTTP status of 500 or more, a 429, or no answer at all (a timeout, a cut) —, at most three times, 3 s and then
+    /// 6 s apart: a host such as archive.org now and then answers a small request with a passing 500, which says
+    /// nothing about the catalogue. Any other answer (a 404, another byte count, a web page instead of the file) counts
+    /// at once. Returns the last answer (its default when it threw), why it threw, and how many times it was asked.
+    /// </summary>
+    static (T Answer, string? Error, int Tries) Retried<T>(Func<T> ask, Func<T, int> status)
+    {
+        TimeSpan[] waits = { TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(6) };
+        for (int tries = 1; ; tries++)
+        {
+            T answer = default!;
+            string? error = null;
+            try { answer = ask(); }
+            catch (Exception ex) { error = $"{ex.GetType().Name}: {ex.Message}"; }
+            bool passing = error is not null || status(answer) is >= 500 or 429;
+            if (!passing || tries > waits.Length) return (answer, error, tries);
+            Thread.Sleep(waits[tries - 1]);
+        }
     }
 
     /// <summary>
@@ -3803,8 +8518,11 @@ static class DownloadSpike
             check("IsOnDisk never throws on garbage",
                 !VoiceLanguages.IsOnDisk("", "Japanese") && !VoiceLanguages.IsOnDisk(game, "Klingon"));
 
-            // (6) the committed sample: all four languages per version, per-host sizes, the verified
-            // byte counts, no Drive ids, and a non-English pack plans archive -> cdn when asked to.
+            // (6) the committed sample: versions an agent serves, all four languages per version, per-host
+            // sizes, the verified byte counts, no Drive ids. The Internet Archive mirror is the host every
+            // pack has; the official CDN is one a version may lack — its url is checked where a pack names
+            // one, a version names it on every archive or on none, and a pack asked for on 'archive' plans
+            // the archive first, then the CDN when it has one.
             string? sample = FindUp("config/versions.sample.json");
             if (sample is null)
             {
@@ -3819,31 +8537,116 @@ static class DownloadSpike
                     ["1.6|Japanese"] = 3_939_900_622, ["1.6|Korean"] = 3_246_209_458,
                     ["2.8|English(US)"] = 8_575_243_551, ["2.8|Chinese"] = 7_441_982_887,
                     ["2.8|Japanese"] = 9_363_410_719, ["2.8|Korean"] = 7_279_819_313,
+                    ["3.2|English(US)"] = 8_636_049_015, ["3.2|Chinese"] = 7_563_404_448,
+                    ["3.2|Japanese"] = 9_600_817_791, ["3.2|Korean"] = 7_416_460_811,
                 };
-                check("sample: versions 1.6 and 2.8", cat.Count == 2 && cat.Any(v => v.Id == "1.6") && cat.Any(v => v.Id == "2.8"));
+                // The client archives, by the same rule: the size of the pack itself and of its archive mirror.
+                var clientSizes = new Dictionary<string, long>
+                {
+                    ["1.6"] = 14_960_991_320, ["2.8"] = 31_800_020_923, ["3.2"] = 43_486_495_057,
+                };
+                static bool NamesCdn(GameSourceInfo source) => !string.IsNullOrWhiteSpace(source.CdnUrl);
+                check($"sample: every version is one an agent serves ({string.Join(", ", ServerVersions.All)}), each listed once",
+                    cat.Count > 0 && cat.Select(v => v.Id).Distinct().Count() == cat.Count && cat.All(v => ServerVersions.All.Contains(v.Server)));
+                // The catalogue and the launcher's server list are one list of versions: a version an agent can
+                // be set up for has a client to install, and the other way round.
+                check($"sample: its versions are the launcher's server list, in its order ({string.Join(", ", cat.Select(v => v.Id))})",
+                    cat.Select(v => v.Id).SequenceEqual(ServerVersions.All) && cat.All(v => v.Server == v.Id));
+                // The private catalogue (gitignored) shadows the sample wherever it exists — a version it lacks is
+                // missing from every local and private build. Its versions are the sample's.
+                string? privateCatalogue = FindUp("config/versions.json");
+                if (privateCatalogue is null)
+                    Console.WriteLine("  [SKIP] config/versions.json (private) not found from here");
+                else
+                    check("private catalogue: the same versions as the sample, in the same order",
+                        VersionCatalog.Load(privateCatalogue).Select(v => v.Id).SequenceEqual(cat.Select(v => v.Id)));
+                // The table above is the list of packs as much as their sizes: a pack the sample drops, and
+                // one it gains without a verified byte count, both show here.
+                check($"sample: its voice packs are the {sizes.Count} whose byte counts are verified here",
+                    cat.SelectMany(v => v.VoicePacks().Select(p => $"{v.Id}|{p.Lang}")).ToHashSet().SetEquals(sizes.Keys));
                 foreach (var v in cat)
                 {
                     check($"sample {v.Id}: all four languages", VoiceLanguages.All.All(l => v.VoicePack(l) is not null));
                     foreach (var (lang, pack) in v.VoicePacks())
                     {
                         var archive = pack.Mirrors.FirstOrDefault(m => m.Id == "archive");
-                        check($"sample {v.Id} {lang}: CDN url + size, archive mirror with the SAME size",
-                            !string.IsNullOrWhiteSpace(pack.CdnUrl) && pack.Size > 0
-                            && archive is not null && !string.IsNullOrWhiteSpace(archive.Url) && archive.Size == pack.Size);
-                        check($"sample {v.Id} {lang}: size is the verified {sizes[$"{v.Id}|{lang}"]}", pack.Size == sizes[$"{v.Id}|{lang}"]);
+                        check($"sample {v.Id} {lang}: a size, and an archive mirror with the SAME size",
+                            pack.Size > 0 && archive is not null && !string.IsNullOrWhiteSpace(archive.Url) && archive.Size == pack.Size);
+                        bool verified = sizes.TryGetValue($"{v.Id}|{lang}", out long want);
+                        check($"sample {v.Id} {lang}: size is the verified {(verified ? want.ToString() : "(no row)")}", verified && pack.Size == want);
                         // The CDN spells the parentheses raw, archive.org percent-encodes them — and the
                         // .src marker compares urls byte for byte, so the spelling must not drift.
                         check($"sample {v.Id} {lang}: urls name the language as the game does",
-                            pack.CdnUrl.Contains($"Audio_{lang}_", StringComparison.Ordinal)
+                            (!NamesCdn(pack) || pack.CdnUrl.Contains($"Audio_{lang}_", StringComparison.Ordinal))
                             && (archive?.Url.Contains(lang == "English(US)" ? "Audio_English%28US%29_" : $"Audio_{lang}_", StringComparison.Ordinal) ?? false));
                     }
                     check($"sample {v.Id}: no Drive ids in the committed file",
                         !v.Voices.Values.Any(p => !string.IsNullOrWhiteSpace(p.DriveId)));
-                    var plan = InstallService.BuildCandidates(v.VoicePack("Japanese")!, "archive");
-                    check($"sample {v.Id}: a non-English pack on 'archive' plans archive -> cdn",
-                        plan.Count == 2 && plan[0].Id == "archive" && plan[1].Id == "cdn");
+                    // HasCdn is what hides the wizard's "Official CDN" card: in the sample it is one fact of
+                    // the whole version — a CDN url missing from one archive of a version that names the
+                    // CDN elsewhere is a hole in the file, not a version without the CDN.
+                    var cdnNamed = v.VoicePacks().Select(p => NamesCdn(p.Pack)).Append(NamesCdn(v.Client)).Distinct().ToList();
+                    check($"sample {v.Id}: the official CDN is named by every archive of the version or by none, and HasCdn says which ({v.HasCdn})",
+                        cdnNamed.Count == 1 && cdnNamed[0] == v.HasCdn);
+                    if (v.VoicePack("Japanese") is { } nonEnglish)
+                    {
+                        var plan = InstallService.BuildCandidates(nonEnglish, "archive");
+                        string[] wanted = NamesCdn(nonEnglish) ? ["archive", "cdn"] : ["archive"];
+                        check($"sample {v.Id}: a non-English pack on 'archive' plans {string.Join(" -> ", wanted)}",
+                            plan.Select(c => c.Id).SequenceEqual(wanted));
+                    }
+                    var clientArchive = v.Client.Mirrors.FirstOrDefault(m => m.Id == "archive");
+                    bool clientVerified = clientSizes.TryGetValue(v.Id, out long clientWant);
+                    check($"sample {v.Id}: the client is the verified {(clientVerified ? clientWant.ToString() : "(no row)")} bytes, on the pack and on its archive mirror",
+                        clientVerified && v.Client.Size == clientWant && clientArchive is not null && clientArchive.Size == clientWant
+                        && !string.IsNullOrWhiteSpace(clientArchive.Url) && string.IsNullOrWhiteSpace(v.Client.DriveId));
+                    // A version hosted on the mirror alone: its plan is that mirror whatever the saved
+                    // preference is — the CDN preferred included, which it does not have.
+                    if (!v.HasCdn)
+                        check($"sample {v.Id}: hosted on the archive mirror alone, its client and every pack plan that mirror whatever is preferred",
+                            new[] { "cdn", "archive", "drive" }.All(pref =>
+                                InstallService.BuildCandidates(v.Client, pref).Select(c => c.Id).SequenceEqual(new[] { "archive" })
+                                && v.VoicePacks().All(p => InstallService.BuildCandidates(p.Pack, pref).Select(c => c.Id).SequenceEqual(new[] { "archive" }))));
                 }
             }
+
+            // (7) a version hosted on mirrors alone — no CDN url on the client or on any pack. A made-up
+            // catalogue, beside a version that has the CDN: the entry loads whole, says so (HasCdn — what
+            // hides the wizard's "Official CDN" card), and its plan is its mirrors whatever was preferred.
+            string mirrorOnlyPath = Path.Combine(tmp, "mirror-only.json");
+            File.WriteAllText(mirrorOnlyPath, """
+                { "versions": [
+                  { "id": "1.6", "client": { "cdnUrl": "https://cdn.example/c16.zip", "size": 11, "mirrors": [ { "id": "archive", "label": "Internet Archive", "url": "https://archive.example/c16.zip", "size": 11 } ] },
+                    "voices": { "English(US)": { "cdnUrl": "https://cdn.example/a16.zip", "size": 3, "mirrors": [] } } },
+                  { "id": "9.9", "client": { "cdnUrl": "", "size": 40, "mirrors": [ { "id": "archive", "label": "Internet Archive", "url": "https://archive.example/c99.zip", "size": 40 } ] },
+                    "voices": {
+                      "English(US)": { "cdnUrl": "", "driveId": "", "size": 8, "mirrors": [ { "id": "archive", "label": "Internet Archive", "url": "https://archive.example/Audio_English%28US%29_9.9.zip", "size": 8 } ] },
+                      "Korean": { "size": 7, "mirrors": [ { "id": "archive", "url": "https://archive.example/Audio_Korean_9.9.zip", "size": 7 }, { "id": "other", "label": "Other host", "url": "https://other.example/Audio_Korean_9.9.zip", "size": 7 } ] } } },
+                  { "id": "8.8", "client": { "cdnUrl": " ", "size": 5, "mirrors": [ { "id": "archive", "url": "https://archive.example/c88.zip", "size": 5 } ] },
+                    "voices": { "Japanese": { "cdnUrl": "https://cdn.example/a88.zip", "size": 2, "mirrors": [] } } }
+                ] }
+                """);
+            var mixed = VersionCatalog.Load(mirrorOnlyPath);
+            var with = mixed.Single(v => v.Id == "1.6");
+            var without = mixed.Single(v => v.Id == "9.9");
+            var packOnly = mixed.Single(v => v.Id == "8.8");
+            check("mirror-only: a version without any CDN url loads with its client and its packs",
+                mixed.Count == 3 && without.Client.HasAnySource && without.Voices.Count == 2
+                && without.VoicePack("English(US)") is not null && without.VoicePack("Korean") is not null
+                && without.DefaultInstallSize == 48);
+            check("mirror-only: HasCdn is false for it and true for a version that names the CDN — on its client, or on a pack alone",
+                !without.HasCdn && with.HasCdn && packOnly.HasCdn);
+            var mirrorPlan = InstallService.BuildCandidates(without.Client, "cdn");
+            check("mirror-only: the plan is the mirror alone, also when the CDN is the saved preference (no empty url is dialled)",
+                mirrorPlan is [{ Id: "archive", Size: 40 }] && mirrorPlan[0].Url == "https://archive.example/c99.zip"
+                && InstallService.BuildCandidates(without.Client, "archive") is [{ Id: "archive" }]
+                && InstallService.BuildCandidates(without.Client, "drive") is [{ Id: "archive" }]);
+            var koreanPlan = InstallService.BuildCandidates(without.VoicePack("Korean")!, "cdn");
+            check("mirror-only: a pack with two mirrors keeps the catalogue's order under a preference it does not have, and a preferred mirror goes first",
+                koreanPlan.Select(c => c.Id).SequenceEqual(new[] { "archive", "other" })
+                && InstallService.BuildCandidates(without.VoicePack("Korean")!, "other").Select(c => c.Id).SequenceEqual(new[] { "other", "archive" }));
+            check("mirror-only: the version beside it still plans the CDN first",
+                InstallService.BuildCandidates(with.Client, "cdn").Select(c => c.Id).SequenceEqual(new[] { "cdn", "archive" }));
         }
         finally
         {
@@ -4292,6 +9095,58 @@ static class AgentSpike
                     && fetchCancel is { ValueKind: JsonValueKind.Object } fc
                     && fc.TryGetProperty("stopping", out var fcs) && fcs.ValueKind == JsonValueKind.False);
 
+                // The navmesh archive download: exactly {version, url, sha256, size} — the catalogue's entry the
+                // backend hands it —, a counted body, the job followed; a 404 on the POST is an agent without
+                // the route and reads as the "update the agent" text.
+                const string nmUrl = "https://example.com/relic-navmesh-2.8.zip", nmSha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+                before = seen.Count;
+                var (nm, nmErr) = Follow(ct => a.NavmeshFetchAsync("2.8", nmUrl, nmSha, 127650863, ct: ct));
+                var nmReqs = Since(before);
+                Check("/server/navmesh posts the counted body {\"version\",\"url\",\"sha256\",\"size\"} with the token and follows the job to its result"
+                      + (nmErr is null ? "" : $" ({nmErr})"),
+                    nmReqs.Count > 0 && nmReqs[0].method == "POST" && nmReqs[0].path == "/server/navmesh"
+                    && nmReqs[0].body == $"{{\"version\":\"2.8\",\"url\":\"{nmUrl}\",\"sha256\":\"{nmSha}\",\"size\":127650863}}" && !nmReqs[0].chunked
+                    && nmReqs.All(r => r.auth == $"Bearer {Token}")
+                    && nm is { } nmDone && nmDone.GetProperty("state").GetString() == "done"
+                    && nmDone.GetProperty("result").GetProperty("installed").GetInt32() == 55);
+                var (nmOld, nmOldErr) = Follow(ct => a.NavmeshFetchAsync("0.0", nmUrl, nmSha, 1, ct: ct));
+                Check("/server/navmesh: a 404 on the POST (an agent without the route) reads as core.agent.navmeshUnsupported",
+                    nmOld is null && nmOldErr == L.T("core.agent.navmeshUnsupported") && L.Has("core.agent.navmeshUnsupported"));
+                before = seen.Count;
+                var (nmCancel, _) = Follow(ct => a.NavmeshCancelAsync("2.8", ct));
+                var nmCancelReqs = Since(before);
+                Check("/server/navmesh cancel posts the counted body {\"version\":\"2.8\",\"cancel\":true}, once, and returns {ok, stopping}",
+                    nmCancelReqs.Count == 1 && nmCancelReqs[0].path == "/server/navmesh"
+                    && nmCancelReqs[0].body == "{\"version\":\"2.8\",\"cancel\":true}" && !nmCancelReqs[0].chunked
+                    && nmCancel is { ValueKind: JsonValueKind.Object } nmc && nmc.TryGetProperty("stopping", out var nmcs) && nmcs.ValueKind == JsonValueKind.True);
+
+                // The pathfinding data download: {version} alone — the archive is the agent's own catalogue
+                // entry —, the same counted body, follow and 404 rule.
+                before = seen.Count;
+                var ndLog = new List<string>();
+                var (nd, ndErr) = Follow(ct => a.NavdataFetchAsync("2.8", ndLog.Add, ct));
+                var ndReqs = Since(before);
+                Check("/server/navdata posts the counted body {\"version\":\"2.8\"} with the token and follows the job to its result"
+                      + (ndErr is null ? "" : $" ({ndErr})"),
+                    ndReqs.Count > 0 && ndReqs[0].method == "POST" && ndReqs[0].path == "/server/navdata"
+                    && ndReqs[0].body == "{\"version\":\"2.8\"}" && !ndReqs[0].chunked
+                    && ndReqs.Select(r => r.path).SequenceEqual(new[] { "/server/navdata", "/jobs/navdata-28?since=0", "/jobs/navdata-28?since=1" })
+                    && ndReqs.All(r => r.auth == $"Bearer {Token}")
+                    && ndLog.SequenceEqual(new[] { "Downloading the pathfinding data of 2.8 (643.0 MB)", "828 files put in place." })
+                    && nd is { } ndDone && ndDone.GetProperty("state").GetString() == "done"
+                    && ndDone.GetProperty("result").GetProperty("installed").GetInt32() == 828);
+                var (ndOld, ndOldErr) = Follow(ct => a.NavdataFetchAsync("0.0", ct: ct));
+                Check("/server/navdata: a 404 on the POST (an agent without the route) reads as core.agent.navdataUnsupported, nothing is followed",
+                    ndOld is null && ndOldErr == L.T("core.agent.navdataUnsupported") && L.Has("core.agent.navdataUnsupported"));
+                before = seen.Count;
+                var (ndCancel, _) = Follow(ct => a.NavdataCancelAsync("2.8", ct));
+                var ndCancelReqs = Since(before);
+                Check("/server/navdata cancel posts the counted body {\"version\":\"2.8\",\"cancel\":true}, once, with the token, and returns {ok, stopping}",
+                    ndCancelReqs.Count == 1 && ndCancelReqs[0].method == "POST" && ndCancelReqs[0].path == "/server/navdata"
+                    && ndCancelReqs[0].body == "{\"version\":\"2.8\",\"cancel\":true}" && !ndCancelReqs[0].chunked
+                    && ndCancelReqs[0].auth == $"Bearer {Token}"
+                    && ndCancel is { ValueKind: JsonValueKind.Object } ndc && ndc.TryGetProperty("stopping", out var ndcs) && ndcs.ValueKind == JsonValueKind.True);
+
                 // ── admin account creation ──
                 // Exactly {version, name, template} — the password key only when one was typed ("" and null
                 // are the ABSENT key, never "password":"" / null) — as a counted body, then the job followed
@@ -4341,6 +9196,113 @@ static class AgentSpike
                     acctGone is null && acctGoneErr is not null && acctGoneErr != L.T("core.agent.accountCreateUnsupported")
                     && acctGoneErr.Contains("404")
                     && acctGoneReqs.Select(r => r.path).SequenceEqual(new[] { "/server/account/create", "/jobs/acct-gone?since=0" }));
+
+                // ── the Logs: the agent's last jobs and one job's lines, as the page may see them ──
+                // The stand-in hands out every snapshot whole, the generated password of the account creation above in
+                // its result included (as the agent does to every holder of the token or of the open key): what the
+                // client hands back carries only the fields its whitelist names.
+                static bool HasExactly(JsonElement e, params string[] names)
+                {
+                    if (e.ValueKind != JsonValueKind.Object) return false;
+                    var got = e.EnumerateObject().Select(p => p.Name).ToList();
+                    return got.Count == names.Length && got.ToHashSet(StringComparer.Ordinal).SetEquals(names);
+                }
+                static string? JobStr(JsonElement e, string name)
+                    => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+                static double? JobNum(JsonElement e, string name)
+                    => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : null;
+                before = seen.Count;
+                var (jobsList, jobsErr) = Follow(ct => a.JobsAsync(ct));
+                var jobsReqs = Since(before);
+                string jobsRaw = jobsList?.GetRawText() ?? "";
+                Check("/jobs: one GET with the token; per job exactly {id, kind, version, state, error, elapsed}, in the agent's order — never its result (the generated password) or its lines"
+                      + (jobsErr is null ? "" : $" ({jobsErr})"),
+                    jobsReqs.Count == 1 && jobsReqs[0].method == "GET" && jobsReqs[0].path == "/jobs" && jobsReqs[0].auth == $"Bearer {Token}"
+                    && jobsList is { } jl && HasExactly(jl, "jobs")
+                    && jl.GetProperty("jobs") is { ValueKind: JsonValueKind.Array } jla && jla.GetArrayLength() == 2
+                    && jla.EnumerateArray().All(j => HasExactly(j, "id", "kind", "version", "state", "error", "elapsed"))
+                    && JobStr(jla[0], "id") == "acct-ok" && JobStr(jla[0], "kind") == "accountcreate" && JobStr(jla[0], "version") == "1.6"
+                    && JobStr(jla[0], "state") == "done" && jla[0].GetProperty("error").ValueKind == JsonValueKind.Null && JobNum(jla[0], "elapsed") == 1
+                    && JobStr(jla[1], "id") == "fetch-16" && JobStr(jla[1], "kind") == "fetch" && JobStr(jla[1], "state") == "running"
+                    && JobNum(jla[1], "elapsed") == 12.5
+                    && !jobsRaw.Contains("Gen3rated-Pw", StringComparison.Ordinal) && !jobsRaw.Contains("\"result\"", StringComparison.Ordinal));
+                before = seen.Count;
+                var (jobLog, jobLogErr) = Follow(ct => a.JobLogAsync("acct-ok", ct));
+                var jobLogReqs = Since(before);
+                string jobLogRaw = jobLog?.GetRawText() ?? "";
+                Check("/jobs/<id>: one GET of /jobs/acct-ok?since=0 with the token; exactly {id, kind, version, state, elapsed, lines}, the lines the agent holds — never the job's result, error or next"
+                      + (jobLogErr is null ? "" : $" ({jobLogErr})"),
+                    jobLogReqs.Count == 1 && jobLogReqs[0].method == "GET" && jobLogReqs[0].path == "/jobs/acct-ok?since=0"
+                    && jobLogReqs[0].auth == $"Bearer {Token}"
+                    && jobLog is { } jg && HasExactly(jg, "id", "kind", "version", "state", "elapsed", "lines")
+                    && JobStr(jg, "id") == "acct-ok" && JobStr(jg, "kind") == "accountcreate" && JobStr(jg, "state") == "done"
+                    && jg.GetProperty("lines") is { ValueKind: JsonValueKind.Array } jgl
+                    && jgl.EnumerateArray().Select(l => l.ValueKind == JsonValueKind.String ? l.GetString() : null)
+                        .SequenceEqual(new[] { "Admin account creation: name=friend1 version=1.6 template=post-gaa" })
+                    && !jobLogRaw.Contains("Gen3rated-Pw", StringComparison.Ordinal) && !jobLogRaw.Contains("\"result\"", StringComparison.Ordinal));
+                // An agent without the list answers it with its plain 404, carried as AgentHttpException{404} — the
+                // Backend answers it as {tooOld: true}, for the card's own text. A job the agent no longer has (it
+                // restarted, or the job left its last 20) is the same 404 on the job's own path, with the agent's text.
+                static int JobsStatus(Func<Task<JsonElement>> call, out string message)
+                {
+                    try { call().GetAwaiter().GetResult(); message = ""; return 0; }
+                    catch (AgentHttpException ex) { message = ex.Message; return ex.Status; }
+                    catch (Exception ex) { message = ex.Message; return -1; }
+                }
+                int jobsOldStatus;
+                _jobsMissing = true;
+                try { jobsOldStatus = JobsStatus(() => a.JobsAsync(), out _); }
+                finally { _jobsMissing = false; }
+                Check("/jobs on an agent without the route throws AgentHttpException with Status 404", jobsOldStatus == 404);
+                before = seen.Count;
+                int jobGoneStatus = JobsStatus(() => a.JobLogAsync("gone"), out string jobGoneMsg);
+                var jobGoneReqs = Since(before);
+                Check("/jobs/<id> of a job the agent no longer has throws AgentHttpException with Status 404 and the agent's own text",
+                    jobGoneStatus == 404 && jobGoneMsg == L.T("core.agent.httpError", new { status = 404, detail = "not found" })
+                    && jobGoneReqs.Select(r => r.path).SequenceEqual(new[] { "/jobs/gone?since=0" }));
+                // The projections are pure and never throw: an answer of another shape is an empty list, an entry
+                // without a string id is left out, a snapshot without lines has none.
+                static string Projected(Func<JsonElement> project)
+                {
+                    try { return project().GetRawText(); }
+                    catch (Exception ex) { return "threw " + ex.GetType().Name; }
+                }
+                var oddLists = new[] { "[]", """{"jobs":5}""", """{"jobs":[5,"x",{"id":3}]}""" }
+                    .Select(json => (json, got: Projected(() => AgentClient.JobsForPage(ParseBody(json)!.Value)))).ToList();
+                string oddLog = Projected(() => AgentClient.JobLogForPage(ParseBody("{}")!.Value));
+                Check("AgentClient.JobsForPage: an answer of another shape, or entries without a string id, give an empty list ("
+                      + string.Join("; ", oddLists.Select(o => $"{o.json} → {o.got}")) + "); JobLogForPage of {} has lines [] — neither throws",
+                    oddLists.All(o => ParseBody(o.got) is { } ol && HasExactly(ol, "jobs") && ol.GetProperty("jobs") is { ValueKind: JsonValueKind.Array } ola && ola.GetArrayLength() == 0)
+                    && ParseBody(oddLog) is { } lg && HasExactly(lg, "id", "kind", "version", "state", "elapsed", "lines")
+                    && lg.GetProperty("lines") is { ValueKind: JsonValueKind.Array } lgl && lgl.GetArrayLength() == 0);
+
+                // ── a job's text the agent could not decode ──
+                // Python's json writes an undecodable byte of a file name as an escaped lone surrogate (\udcXX), which
+                // .NET's GetString refuses. The follow reads every line and the error through TextOf: the line reaches the
+                // console as the agent wrote it and the job is followed to its end; an error ends the job with the agent's
+                // own sentence — never with .NET's complaint about invalid UTF-16.
+                before = seen.Count;
+                var undecodedLog = new List<string>();
+                var (undecoded, undecodedErr) = Follow(ct => a.EventsAsync("1.6", undecodedLog.Add, ct));
+                var undecodedReqs = Since(before);
+                Check("job follow: a line with an escaped lone surrogate reaches the console as the agent wrote it, and the job is followed to done"
+                      + (undecodedErr is null ? "" : $" ({undecodedErr})"),
+                    undecoded is { } undecodedDone && JobStr(undecodedDone, "state") == "done"
+                    && undecodedReqs.Select(r => r.path).SequenceEqual(new[] { "/server/events", "/jobs/events-odd?since=0", "/jobs/events-odd?since=1" })
+                    && undecodedReqs[0].body == "{\"version\":\"1.6\"}" && !undecodedReqs[0].chunked
+                    && undecodedLog.SequenceEqual(new[] { @"Events: skipped /home/1.6_live/server/data/caf\udce9.lua (not in the list)", "Events re-applied." }));
+                var (undecodedBad, undecodedBadErr) = Follow(ct => a.NetFixAsync("1.6", ct: ct));
+                Check("job follow: an error with an escaped lone surrogate ends the job with the agent's own sentence, as the agent wrote it"
+                      + (undecodedBadErr is null ? "" : $" ({undecodedBadErr})"),
+                    undecodedBad is null && undecodedBadErr == @"Cannot rewrite /home/1.6_live/server/caf\udce9.xml: Permission denied");
+                // The same text in a refusal (a 4xx before any job): its status survives, its sentence as the agent wrote it.
+                int undecodedStatus = JobsStatus(() => a.TxtFixesAsync("1.6"), out string undecodedMsg);
+                Check($"a refusal with an escaped lone surrogate keeps its status (409) and the agent's sentence ({undecodedStatus}: {undecodedMsg})",
+                    undecodedStatus == 409 && undecodedMsg == L.T("core.agent.httpError", new
+                    {
+                        status = 409,
+                        detail = @"/home/1.6_live/server/data/caf\udce9.txt is not a file the txt fixes know -- nothing was changed.",
+                    }));
 
                 // ── the agent's settings, its restart, and the stack relocation ──
                 before = seen.Count;
@@ -4531,19 +9493,21 @@ static class AgentSpike
                     twOddReqs.Count == 1 && twOddReqs[0].path == "/server/tweaks?version=1.6%20%26version%3D2.8%2Fx"
                     && twOddErr is not null && twOddErr.Contains("400") && twOddErr.Contains("unknown version"));
 
-                // The write: exactly {version, tweaks}, the document as the page built it — the same keys in the
-                // same order, ids still strings, nothing sorted, renamed or dropped — as a counted body, then the
-                // job followed like every other and its result handed back.
-                const string twDocJson = """{"resin":{"cap":300,"minutes":4},"abyss":{"slots":{"233701003":{"3001":21010201}},"levels":{"25":90}},"domains":{"multiplier":2,"cost":10,"byId":{"5006":{"multiplier":3,"cost":5,"extra":[{"item":104003,"count":3}]}}},"quests":{"multiplier":{"archon":2,"story":2,"world":2,"event":2,"commission":2},"byReward":{"100351":{"items":[{"item":201,"count":600},{"item":104003,"count":5}]}}}}""";
+                // The write: exactly {version, tweaks, takenKey}, the document as the page built it — the same keys
+                // in the same order, ids still strings, nothing sorted, renamed or dropped — and the takenKey of the
+                // answer it was built on, as a counted body, then the job followed like every other and its result
+                // handed back.
+                const string twDocJson = """{"resin":{"cap":300,"minutes":4},"abyss":{"slots":{"233701003":{"3001":21010201}},"levels":{"25":90}},"domains":{"multiplier":2,"cost":10,"byId":{"5006":{"multiplier":3,"cost":5,"extra":[{"item":104003,"count":3}]}}},"quests":{"multiplier":{"archon":2,"story":2,"world":2,"event":2,"commission":2,"hangout":2},"byReward":{"100351":{"items":[{"item":201,"count":600},{"item":104003,"count":5}]}}}}""";
+                const string twKey = "1193652b17cd30744fd0ba6789d281b2258b745dda78b78ee25029cc1a9442f4";
                 var twDoc = ParseBody(twDocJson)!.Value;
                 before = seen.Count;
                 var twLog = new List<string>();
-                var (tw, twErr) = Follow(ct => a.TweaksSetAsync("1.6", twDoc, twLog.Add, ct));
+                var (tw, twErr) = Follow(ct => a.TweaksSetAsync("1.6", twDoc, twKey, twLog.Add, ct));
                 var twReqs = Since(before);
-                Check("/server/tweaks posts the counted body {\"version\":\"1.6\",\"tweaks\":<the document, untouched>} with the token"
+                Check("/server/tweaks posts the counted body {\"version\":\"1.6\",\"tweaks\":<the document, untouched>,\"takenKey\":<the answer's key>} with the token"
                       + (twErr is null ? "" : $" ({twErr})"),
                     twReqs.Count > 0 && twReqs[0].method == "POST" && twReqs[0].path == "/server/tweaks"
-                    && twReqs[0].body == "{\"version\":\"1.6\",\"tweaks\":" + twDocJson + "}"
+                    && twReqs[0].body == "{\"version\":\"1.6\",\"tweaks\":" + twDocJson + ",\"takenKey\":\"" + twKey + "\"}"
                     && !twReqs[0].chunked && twReqs.All(r => r.auth == $"Bearer {Token}"));
                 Check("/server/tweaks follows its job to done (since=0, then next), streams each line once, returns the result",
                     twReqs.Select(r => r.path).SequenceEqual(new[] { "/server/tweaks", "/jobs/tweaks-16?since=0", "/jobs/tweaks-16?since=1" })
@@ -4552,14 +9516,15 @@ static class AgentSpike
                     && twDone.GetProperty("result").GetProperty("changed").GetInt32() == 3
                     && twDone.GetProperty("result").GetProperty("effect").GetString() == "live"
                     && twDone.GetProperty("result").GetProperty("clamped").GetInt32() == 0);
-                // "Restore the original game" is the EMPTY document: it must go out as {} — never null, never
-                // left out, both of which would leave the agent guessing.
+                // "Restore the original game" on an agent that cannot put a card's files back is the EMPTY document:
+                // it must go out as {} — never null, never left out, both of which would leave the agent guessing —,
+                // with an empty takenKey for an answer that named none.
                 before = seen.Count;
-                var (twReset, twResetErr) = Follow(ct => a.TweaksSetAsync("1.6", ParseBody("{}")!.Value, ct: ct));
+                var (twReset, twResetErr) = Follow(ct => a.TweaksSetAsync("1.6", ParseBody("{}")!.Value, "", ct: ct));
                 var twResetReqs = Since(before);
-                Check("/server/tweaks with the empty document posts {\"version\":\"1.6\",\"tweaks\":{}}, counted, and follows the job"
+                Check("/server/tweaks with the empty document posts {\"version\":\"1.6\",\"tweaks\":{},\"takenKey\":\"\"}, counted, and follows the job"
                       + (twResetErr is null ? "" : $" ({twResetErr})"),
-                    twResetReqs.Count > 0 && twResetReqs[0].body == "{\"version\":\"1.6\",\"tweaks\":{}}" && !twResetReqs[0].chunked
+                    twResetReqs.Count > 0 && twResetReqs[0].body == "{\"version\":\"1.6\",\"tweaks\":{},\"takenKey\":\"\"}" && !twResetReqs[0].chunked
                     && twReset is { } twResetDone && twResetDone.GetProperty("state").GetString() == "done"
                     && twResetDone.GetProperty("result").GetProperty("effect").GetString() == "next-start");
                 // ...and a value that is no document at all never leaves this PC: the agent reads {} as "everything
@@ -4567,7 +9532,7 @@ static class AgentSpike
                 before = seen.Count;
                 bool RefusedHere(JsonElement doc)
                 {
-                    try { a.TweaksSetAsync("1.6", doc).GetAwaiter().GetResult(); return false; }
+                    try { a.TweaksSetAsync("1.6", doc, "").GetAwaiter().GetResult(); return false; }
                     catch (ArgumentException) { return true; }
                     catch (Exception) { return false; }
                 }
@@ -4579,22 +9544,81 @@ static class AgentSpike
                 // the way. One request, nothing followed, and not the update advice: only a 404 is that.
                 const string twBadJson = """{"Zeta_New":[1,true,null,"x"],"resin":{"cap":"300"}}""";
                 before = seen.Count;
-                var (twBad, twBadErr) = Follow(ct => a.TweaksSetAsync("1.6", ParseBody(twBadJson)!.Value, ct: ct));
+                var (twBad, twBadErr) = Follow(ct => a.TweaksSetAsync("1.6", ParseBody(twBadJson)!.Value, "", ct: ct));
                 var twBadReqs = Since(before);
                 Check("/server/tweaks: an unknown key and a wrong-kind value go out as given, and the agent's 400 comes back with its own text"
                       + (twBadErr is null ? "" : $" ({twBadErr})"),
-                    twBad is null && twBadReqs.Count == 1 && twBadReqs[0].body == "{\"version\":\"1.6\",\"tweaks\":" + twBadJson + "}"
+                    twBad is null && twBadReqs.Count == 1 && twBadReqs[0].body == "{\"version\":\"1.6\",\"tweaks\":" + twBadJson + ",\"takenKey\":\"\"}"
                     && twBadErr is not null && twBadErr.Contains("400") && twBadErr.Contains("tweaks.resin.cap")
                     && twBadErr != L.T("core.agent.tweaksUnsupported"));
                 // The game server refusing the new files ends the job in error (the agent has put the previous
                 // files back by then): the agent's own sentence is what the admin reads.
-                var (twRefused, twRefusedErr) = Follow(ct => a.TweaksSetAsync("2.8", twDoc, ct: ct));
+                var (twRefused, twRefusedErr) = Follow(ct => a.TweaksSetAsync("2.8", twDoc, twKey, ct: ct));
                 Check("/server/tweaks: a job that ends in error throws the agent's own message",
                     twRefused is null
                     && twRefusedErr == "The server refused the new settings: RewardData.txt was not loaded. The previous settings are back in place.");
+                // A Revert and a Reset of cards: exactly {version, revert | reset: [the cards, in the order given],
+                // takenKey}, counted, never a document — then the job followed like an Apply's.
+                before = seen.Count;
+                var twFilesLog = new List<string>();
+                var (twRevert, twRevertErr) = Follow(ct => a.TweaksRevertAsync("1.6", new[] { "resin", "quests" }, twKey, twFilesLog.Add, ct));
+                var twRevertReqs = Since(before);
+                Check("/server/tweaks revert posts the counted body {\"version\":\"1.6\",\"revert\":[\"resin\",\"quests\"],\"takenKey\":<the key>} with the token, follows the job to done and returns its result"
+                      + (twRevertErr is null ? "" : $" ({twRevertErr})"),
+                    twRevertReqs.Count > 0 && twRevertReqs[0].method == "POST" && twRevertReqs[0].path == "/server/tweaks"
+                    && twRevertReqs[0].body == "{\"version\":\"1.6\",\"revert\":[\"resin\",\"quests\"],\"takenKey\":\"" + twKey + "\"}"
+                    && !twRevertReqs[0].chunked && twRevertReqs.All(r => r.auth == $"Bearer {Token}")
+                    && twRevertReqs.Select(r => r.path).SequenceEqual(new[] { "/server/tweaks", "/jobs/tweaks-files?since=0" })
+                    && twFilesLog.SequenceEqual(new[] { "Gameplay settings: Revert of the Resin and Quest rewards cards -- 2 files are the originals again." })
+                    && twRevert is { } twRevertDone && twRevertDone.GetProperty("result").GetProperty("effect").GetString() == "live"
+                    && twRevertDone.GetProperty("result").GetProperty("blocked").GetArrayLength() == 0);
+                before = seen.Count;
+                var (twResetCards, twResetCardsErr) = Follow(ct => a.TweaksResetAsync("1.6", new[] { "abyss" }, "", ct: ct));
+                var twResetCardsReqs = Since(before);
+                Check("/server/tweaks reset posts the counted body {\"version\":\"1.6\",\"reset\":[\"abyss\"],\"takenKey\":\"\"} and follows the job"
+                      + (twResetCardsErr is null ? "" : $" ({twResetCardsErr})"),
+                    twResetCardsReqs.Count > 0 && twResetCardsReqs[0].body == "{\"version\":\"1.6\",\"reset\":[\"abyss\"],\"takenKey\":\"\"}" && !twResetCardsReqs[0].chunked
+                    && twResetCards is { } twResetCardsDone && twResetCardsDone.GetProperty("state").GetString() == "done");
+                // A list of cards the agent would refuse never leaves this PC: none, a card named twice, an empty name.
+                bool CardsRefusedHere(Func<Task<JsonElement>> call)
+                {
+                    try { call().GetAwaiter().GetResult(); return false; }
+                    catch (ArgumentException) { return true; }
+                    catch (Exception) { return false; }
+                }
+                before = seen.Count;
+                Check("/server/tweaks revert / reset: no card, a card named twice, an empty name are refused before any request",
+                    CardsRefusedHere(() => a.TweaksRevertAsync("1.6", Array.Empty<string>(), twKey)) && CardsRefusedHere(() => a.TweaksResetAsync("1.6", new[] { "resin", "resin" }, twKey))
+                    && CardsRefusedHere(() => a.TweaksResetAsync("1.6", new[] { "" }, twKey)) && Since(before).Count == 0);
+                // The guard and a refusal of phase 2 end the JOB in error: the agent's own sentence is what the admin reads.
+                var (twFilesRefused, twFilesRefusedErr) = Follow(ct => a.TweaksResetAsync("2.8", new[] { "quests" }, twKey, ct: ct));
+                Check("/server/tweaks reset: a job that ends in error throws the agent's own message",
+                    twFilesRefused is null
+                    && twFilesRefusedErr == "The server refused the new settings: RewardData.txt was not loaded. The previous settings are back in place.");
+                // An agent that cannot put a card's files back: one whose route only takes a document answers 400
+                // ("tweaks is required"), one without the route 404. Both are the "update the agent" text with their
+                // status kept, after one request that started nothing.
+                (int status, string message) FilesRefusal(Func<Task<JsonElement>> call)
+                {
+                    try { call().GetAwaiter().GetResult(); return (0, ""); }
+                    catch (AgentHttpException ex) { return (ex.Status, ex.Message); }
+                    catch (Exception ex) { return (-1, ex.Message); }
+                }
+                (int status, string message) filesOld, filesGone;
+                List<(string method, string path, string auth, string body, bool chunked)> filesOldReqs;
+                _tweaksStopMissing = true;
+                try { before = seen.Count; filesOld = FilesRefusal(() => a.TweaksRevertAsync("1.6", new[] { "resin" }, twKey)); filesOldReqs = Since(before); }
+                finally { _tweaksStopMissing = false; }
+                _tweaksMissing = true;
+                try { filesGone = FilesRefusal(() => a.TweaksResetAsync("1.6", new[] { "resin" }, twKey)); }
+                finally { _tweaksMissing = false; }
+                Check("/server/tweaks revert / reset on an agent that cannot do it: its 400 (a route that only takes a document) and its 404 (no route) read as core.agent.tweaksFilesUnsupported, the status kept, one request",
+                    filesOld == (400, L.T("core.agent.tweaksFilesUnsupported")) && filesGone == (404, L.T("core.agent.tweaksFilesUnsupported"))
+                    && L.Has("core.agent.tweaksFilesUnsupported")
+                    && filesOldReqs.Count == 1 && filesOldReqs[0].path == "/server/tweaks" && !filesOldReqs[0].body.Contains("\"tweaks\"", StringComparison.Ordinal));
                 // A 404 while FOLLOWING the job is the forgotten job, with its own text — not the update advice.
                 before = seen.Count;
-                var (twGone, twGoneErr) = Follow(ct => a.TweaksSetAsync("0.0", twDoc, ct: ct));
+                var (twGone, twGoneErr) = Follow(ct => a.TweaksSetAsync("0.0", twDoc, twKey, ct: ct));
                 var twGoneReqs = Since(before);
                 Check("/server/tweaks: a 404 while following the job keeps its own text (not the update advice)"
                       + (twGoneErr is null ? "" : $" ({twGoneErr})"),
@@ -4615,7 +9639,7 @@ static class AgentSpike
                     catch (AgentHttpException ex) { twOldStatus = ex.Status; }
                     catch (Exception) { twOldStatus = -1; }
                     before = seen.Count;
-                    twOld = Follow(ct => a.TweaksSetAsync("1.6", twDoc, ct: ct));
+                    twOld = Follow(ct => a.TweaksSetAsync("1.6", twDoc, "", ct: ct));
                     twOldReqs = Since(before);
                 }
                 finally { _tweaksMissing = false; }
@@ -4623,6 +9647,43 @@ static class AgentSpike
                 Check("/server/tweaks: a 404 on the POST (an agent without the route) reads as core.agent.tweaksUnsupported, nothing is followed",
                     twOld.snap is null && twOld.error == L.T("core.agent.tweaksUnsupported") && L.Has("core.agent.tweaksUnsupported")
                     && twOldReqs.Select(r => r.path).SequenceEqual(new[] { "/server/tweaks" }));
+                // Stopping the gameplay settings' waits of a running job is a plain POST to the SAME path —
+                // {version, cancel: true}, never a document (an agent whose route only applies documents would
+                // read one as settings to apply) —, answered at once with {ok, stopping}: one request, nothing
+                // followed, the answer handed back as it came.
+                before = seen.Count;
+                var (twStop, twStopErr) = Follow(ct => a.TweaksStopAsync("1.6", ct));
+                var twStopReqs = Since(before);
+                Check("/server/tweaks stop posts the counted body {\"version\":\"1.6\",\"cancel\":true}, once, with the token, and returns {ok, stopping}"
+                      + (twStopErr is null ? "" : $" ({twStopErr})"),
+                    twStopReqs.Count == 1 && twStopReqs[0].method == "POST" && twStopReqs[0].path == "/server/tweaks"
+                    && twStopReqs[0].body == "{\"version\":\"1.6\",\"cancel\":true}" && !twStopReqs[0].chunked
+                    && twStopReqs[0].auth == $"Bearer {Token}"
+                    && twStop is { ValueKind: JsonValueKind.Object } tws && tws.TryGetProperty("stopping", out var twss) && twss.ValueKind == JsonValueKind.True);
+                var (twStopNone, _) = Follow(ct => a.TweaksStopAsync("2.8", ct));
+                Check("/server/tweaks stop: stopping:false (no such job of the version runs) comes back as the agent sent it",
+                    twStopNone is { ValueKind: JsonValueKind.Object } twn && twn.TryGetProperty("stopping", out var twns) && twns.ValueKind == JsonValueKind.False);
+                // An agent that cannot stop those waits: one whose route only applies documents answers 400 ("tweaks
+                // is required"), one without the route 404. Both are the "update the agent" text with their status
+                // kept (the Backend answers them as {unsupported: true}), after one request that started nothing.
+                (int status, string message) StopRefusal(string version)
+                {
+                    try { a.TweaksStopAsync(version).GetAwaiter().GetResult(); return (0, ""); }
+                    catch (AgentHttpException ex) { return (ex.Status, ex.Message); }
+                    catch (Exception ex) { return (-1, ex.Message); }
+                }
+                (int status, string message) stopOld, stopGone;
+                List<(string method, string path, string auth, string body, bool chunked)> stopOldReqs;
+                _tweaksStopMissing = true;
+                try { before = seen.Count; stopOld = StopRefusal("1.6"); stopOldReqs = Since(before); }
+                finally { _tweaksStopMissing = false; }
+                _tweaksMissing = true;
+                try { stopGone = StopRefusal("1.6"); }
+                finally { _tweaksMissing = false; }
+                Check("/server/tweaks stop on an agent that cannot do it: its 400 (a route that only applies documents) and its 404 (no route) read as core.agent.tweaksStopUnsupported, the status kept, one request",
+                    stopOld == (400, L.T("core.agent.tweaksStopUnsupported")) && stopGone == (404, L.T("core.agent.tweaksStopUnsupported"))
+                    && L.Has("core.agent.tweaksStopUnsupported")
+                    && stopOldReqs.Count == 1 && stopOldReqs[0].path == "/server/tweaks" && !stopOldReqs[0].body.Contains("\"tweaks\"", StringComparison.Ordinal));
                 // A refused bearer while FOLLOWING the job — the admin closed open administration, a token rotated
                 // on the box — is never transient: the 401 reaches the caller at once as the 401 (one poll, no retry),
                 // so the launcher reads a revoked open key from it; retried, it would come back ten seconds later as
@@ -4634,7 +9695,7 @@ static class AgentSpike
                 var revokedSw = System.Diagnostics.Stopwatch.StartNew();
                 using (var revokedDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
                 {
-                    try { a.TweaksSetAsync("1.6", twDoc, ct: revokedDeadline.Token).GetAwaiter().GetResult(); }
+                    try { a.TweaksSetAsync("1.6", twDoc, "", ct: revokedDeadline.Token).GetAwaiter().GetResult(); }
                     catch (Exception ex) { revoked = ex; }
                 }
                 revokedSw.Stop();
@@ -4645,6 +9706,382 @@ static class AgentSpike
                     revoked is AgentHttpException { Status: 401 }
                     && revokedReqs.Select(r => r.path).SequenceEqual(new[] { "/server/tweaks", "/jobs/tweaks-16?since=0" })
                     && revokedSw.Elapsed < TimeSpan.FromSeconds(5));
+
+                // ── the account list (Server → Players → Accounts on this server) and the account copy ──
+                // GET /server/accounts: ONE request with the token, every value of the query percent-encoded (the agent reads
+                // it as a form, where a bare '+' is a space), and the answer as the page may see it — the fields the route
+                // documents and nothing else. A 404 is an agent without the route: the "update the agent" text; every other
+                // refusal keeps the agent's own sentence and its status.
+                string[] acctTop = { "version", "running", "asOf", "total", "matched", "withCharacter", "online", "characters", "presence", "reason", "next", "accounts" };
+                string[] acctRow = { "name", "sdkUid", "guest", "created", "lastLogin", "uid", "uidCreated", "nickname", "level", "lastSave", "online", "presenceStale", "origin" };
+                before = seen.Count;
+                var (accts, acctsErr) = Follow(ct => a.AccountsAsync("2.8", 1000, 100, " fri end+&=Ü ", ct));
+                var acctsReqs = Since(before);
+                Check("/server/accounts: ONE GET with the token; version, after, limit and q (trimmed) percent-encoded — a space %20, '+' %2B, '&' %26, '=' %3D, a non-ASCII letter as its UTF-8 bytes"
+                      + (acctsErr is null ? "" : $" ({acctsErr})") + (acctsReqs.Count == 1 ? $" — sent {acctsReqs[0].path}" : ""),
+                    acctsReqs.Count == 1 && acctsReqs[0].method == "GET" && acctsReqs[0].path == "/server/accounts?version=2.8&after=1000&limit=100&q=fri%20end%2B%26%3D%C3%9C"
+                    && acctsReqs[0].auth == $"Bearer {Token}" && acctsReqs[0].body == "");
+                string acctsRaw = accts?.GetRawText() ?? "";
+                var acctList = accts is { } acc0 && acc0.TryGetProperty("accounts", out var accl) && accl.ValueKind == JsonValueKind.Array ? accl.EnumerateArray().ToList() : new List<JsonElement>();
+                Check("/server/accounts: the page gets exactly the documented fields — the answer's twelve, each row's thirteen; the row whose sdkUid is no whole number left out",
+                    accts is { } acc1 && HasExactly(acc1, acctTop) && acctList.Count == 3 && acctList.All(r => HasExactly(r, acctRow))
+                    && acctList.Select(r => JobNum(r, "sdkUid")).SequenceEqual(new double?[] { 1001, 1002, 1004 }));
+                var acctLeaks = new[] { "relic.local", "$2b$", "192.0.2.44", "dev-0123", "SPIKETOKEN", "/home/", "example.com" }.Where(s => acctsRaw.Contains(s, StringComparison.Ordinal)).ToList();
+                Check("/server/accounts: nothing the route does not document reaches the page — no e-mail, password hash, address, device, token or path"
+                      + (acctLeaks.Count > 0 ? " — found: " + string.Join(", ", acctLeaks) : ""),
+                    acctsRaw.Length > 0 && acctLeaks.Count == 0);
+                Check("/server/accounts: the values as the agent wrote them — the counts, the states, next; a login with its character and presence, a guest (name null), an account without a game uid",
+                    accts is { } acc2 && acctList.Count == 3 && JobStr(acc2, "version") == "2.8" && acc2.GetProperty("running").ValueKind == JsonValueKind.True && JobStr(acc2, "asOf") == "2026-10-17T12:00:00Z"
+                    && JobNum(acc2, "total") == 4 && JobNum(acc2, "matched") == 4 && JobNum(acc2, "withCharacter") == 2 && JobNum(acc2, "online") == 1
+                    && JobStr(acc2, "characters") == "ok" && JobStr(acc2, "presence") == "ok" && acc2.GetProperty("reason").ValueKind == JsonValueKind.Null && JobNum(acc2, "next") == 1004
+                    && JobStr(acctList[0], "name") == "Alice" && JobNum(acctList[0], "uid") == 3 && JobStr(acctList[0], "nickname") == "Lumine" && JobNum(acctList[0], "level") == 22
+                    && JobStr(acctList[0], "lastSave") == "2026-10-17T11:55:00Z" && acctList[0].GetProperty("online").ValueKind == JsonValueKind.True
+                    && acctList[0].GetProperty("presenceStale").ValueKind == JsonValueKind.False && JobStr(acctList[0], "origin") == "signup"
+                    && acctList[1].GetProperty("name").ValueKind == JsonValueKind.Null && acctList[1].GetProperty("guest").ValueKind == JsonValueKind.True
+                    && acctList[2].GetProperty("uid").ValueKind == JsonValueKind.Null && acctList[2].GetProperty("online").ValueKind == JsonValueKind.Null && JobStr(acctList[2], "origin") == "relic");
+                before = seen.Count;
+                int acctsOld = JobsStatus(() => a.AccountsAsync("0.0"), out string acctsOldMsg);
+                Check("/server/accounts on an agent without the route (its 404): AgentHttpException 404 carrying core.agent.accountsUnsupported, one request",
+                    acctsOld == 404 && acctsOldMsg == L.T("core.agent.accountsUnsupported") && L.Has("core.agent.accountsUnsupported") && Since(before).Count == 1);
+                int acctsBusy = JobsStatus(() => a.AccountsAsync("9.9"), out string acctsBusyMsg);
+                Check("/server/accounts: the route's own 409 keeps its status and the agent's sentence — never the update text",
+                    acctsBusy == 409 && acctsBusyMsg == L.T("core.agent.httpError", new { status = 409, detail = "The account list is being read for another request -- try again in a moment." }));
+                // A read the CALLER gives up (the page went away, the launcher closes) stays a cancel: only the read's own
+                // limit (AccountsTimeout) is worded as the agent taking too long.
+                Exception? acctsCancel = null;
+                var acctsCancelSw = System.Diagnostics.Stopwatch.StartNew();
+                using (var gaveUp = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
+                {
+                    try { a.AccountsAsync("7.7", ct: gaveUp.Token).GetAwaiter().GetResult(); }
+                    catch (Exception ex) { acctsCancel = ex; }
+                }
+                acctsCancelSw.Stop();
+                // (the stand-in records a request before it answers: once it is in, no later block counts it)
+                bool acctsCancelSeen = SpinWait.SpinUntil(() => { lock (seen) return seen.Any(r => r.path == "/server/accounts?version=7.7"); }, TimeSpan.FromSeconds(2));
+                Check($"/server/accounts: a read its caller gives up while it is in flight is a cancel (OperationCanceledException), never the \"did not answer within {(int)AgentClient.AccountsTimeout.TotalSeconds} s\" text ({acctsCancel?.GetType().Name ?? "no exception"}, {acctsCancelSw.ElapsedMilliseconds} ms)",
+                    acctsCancel is OperationCanceledException && acctsCancelSeen
+                    && acctsCancel.Message != L.T("core.agent.accountsTimeout", new { seconds = (int)AgentClient.AccountsTimeout.TotalSeconds })
+                    && acctsCancelSw.Elapsed < TimeSpan.FromSeconds(2.5));
+                Check("AgentClient.AccountsQuery: version always; after and limit only above 0, limit at most 500; q trimmed, only when not blank; every value escaped",
+                    AgentClient.AccountsQuery("2.8") == "server/accounts?version=2.8"
+                    && AgentClient.AccountsQuery("2.8", 0, 0, "   ") == "server/accounts?version=2.8"
+                    && AgentClient.AccountsQuery("2.8", -3, -1, null) == "server/accounts?version=2.8"
+                    && AgentClient.AccountsQuery("2.8", 0, 9999) == "server/accounts?version=2.8&limit=500"
+                    && AgentClient.AccountsQuery("2.8", 7, 1) == "server/accounts?version=2.8&after=7&limit=1"
+                    && AgentClient.AccountsQuery("a b&c", 0, 0, "x") == "server/accounts?version=a%20b%26c&q=x"
+                    && AgentClient.AccountsLimitMax == 500);
+                Check("AgentClient.AccountsTimeout: under the client's 60 s HTTP timeout and above the agent's own 5 s wait + 40 s budget",
+                    AgentClient.AccountsTimeout < TimeSpan.FromSeconds(60) && AgentClient.AccountsTimeout >= TimeSpan.FromSeconds(45) && L.Has("core.agent.accountsTimeout"));
+                var oddAccts = new[] { "[]", "5", """{"accounts":5}""", """{"accounts":[5,"x",{"sdkUid":1.5},{"sdkUid":"7"},{"name":"n"}]}""" }
+                    .Select(json => (json, got: Projected(() => AgentClient.AccountsForPage(ParseBody(json)!.Value)))).ToList();
+                Check("AgentClient.AccountsForPage: an answer of another shape, or rows without a whole-number sdkUid, give the twelve fields and no rows — never a throw ("
+                      + string.Join("; ", oddAccts.Select(o => $"{o.json} → {(o.got.Length > 60 ? o.got[..60] + "…" : o.got)}")) + ")",
+                    oddAccts.All(o => ParseBody(o.got) is { } og && HasExactly(og, acctTop) && og.GetProperty("accounts").GetArrayLength() == 0
+                        && og.GetProperty("running").ValueKind == JsonValueKind.False));
+
+                // POST /server/account/copy. The plain {version, from, to} goes straight to the route: every agent reads it the
+                // same way, so no probe. Any other request — a check, a game uid, a progress template — first asks GET
+                // /server/accounts?version=<v>&limit=0 (the route's 400 when it is there), then posts the counted body: a key not
+                // given left out, a name trimmed, a uid a JSON number, dryRun only when true. An agent without the list (its
+                // 404) is posted nothing: it would register and allocate the target of a "check".
+                before = seen.Count;
+                var (cpPlain, cpPlainErr) = Follow(ct => a.AccountCopyAsync(new AccountCopyRequest("2.8", From: " Alice ", To: "Bob "), null, ct));
+                var cpPlainReqs = Since(before);
+                Check("/server/account/copy, the plain copy: ONE POST of the counted body {\"version\":\"2.8\",\"from\":\"Alice\",\"to\":\"Bob\"} (names trimmed), no probe, the job followed"
+                      + (cpPlainErr is null ? "" : $" ({cpPlainErr})"),
+                    cpPlainReqs.Select(r => r.method + " " + r.path).SequenceEqual(new[] { "POST /server/account/copy", "GET /jobs/copy-plain?since=0" })
+                    && cpPlainReqs[0].body == "{\"version\":\"2.8\",\"from\":\"Alice\",\"to\":\"Bob\"}" && !cpPlainReqs[0].chunked
+                    && cpPlainReqs.All(r => r.auth == $"Bearer {Token}") && cpPlain is { } cpp && JobStr(cpp, "state") == "done");
+                before = seen.Count;
+                var cpDryLog = new List<string>();
+                var (cpDry, cpDryErr) = Follow(ct => a.AccountCopyAsync(new AccountCopyRequest("2.8", FromUid: 3, To: "newfriend", DryRun: true), cpDryLog.Add, ct));
+                var cpDryReqs = Since(before);
+                Check("/server/account/copy, a check: the probe GET /server/accounts?version=2.8&limit=0 first, then ONE counted POST {\"version\":\"2.8\",\"fromUid\":3,\"to\":\"newfriend\",\"dryRun\":true}, the job followed"
+                      + (cpDryErr is null ? "" : $" ({cpDryErr})"),
+                    cpDryReqs.Select(r => r.method + " " + r.path).SequenceEqual(new[] { "GET /server/accounts?version=2.8&limit=0", "POST /server/account/copy", "GET /jobs/copy-dry?since=0" })
+                    && cpDryReqs[1].body == "{\"version\":\"2.8\",\"fromUid\":3,\"to\":\"newfriend\",\"dryRun\":true}" && !cpDryReqs[1].chunked
+                    && cpDryReqs.All(r => r.auth == $"Bearer {Token}") && cpDryLog.SequenceEqual(new[] { "Would create the account newfriend and allocate it a game uid." })
+                    && cpDry is { } cpd && cpd.GetProperty("result").GetProperty("wouldCreate").ValueKind == JsonValueKind.True);
+                before = seen.Count;
+                var cpUidLog = new List<string>();
+                var (cpUid, cpUidErr) = Follow(ct => a.AccountCopyAsync(new AccountCopyRequest("2.8", FromUid: 3, ToUid: 7), cpUidLog.Add, ct));
+                var cpUidReqs = Since(before);
+                Check("/server/account/copy by game uid on both sides: the probe, then {\"version\":\"2.8\",\"fromUid\":3,\"toUid\":7} — no dryRun key" + (cpUidErr is null ? "" : $" ({cpUidErr})"),
+                    cpUidReqs.Select(r => r.method + " " + r.path).SequenceEqual(new[] { "GET /server/accounts?version=2.8&limit=0", "POST /server/account/copy", "GET /jobs/copy-uid?since=0" })
+                    && cpUidReqs[1].body == "{\"version\":\"2.8\",\"fromUid\":3,\"toUid\":7}");
+                // The agent's job line names the backup by its path on the box (its state folder: on Windows in the
+                // owner's profile), after the time it begins every line with: the line reaches the console — and the
+                // Logs — with its time and the file name alone.
+                Check($"/server/account/copy: the job's line about the backup reaches the console with its time and the file name alone, never the agent's path on the box ({string.Join(" | ", cpUidLog)})",
+                    cpUidLog.SequenceEqual(new[] { "12:00:00 Destination progress backup: acctcopy_28_uid7_20261017_120000.sql", "12:00:01 Verified: the save is identical on uid 7 and all 9 blocks are there." }));
+                before = seen.Count;
+                var (cpUidLogs, cpUidLogsErr) = Follow(ct => a.JobLogAsync("copy-uid", ct));
+                Check("/jobs/<id> of a copy (the Logs): the line about the backup with its time and the file name alone, no path of the box" + (cpUidLogsErr is null ? "" : $" ({cpUidLogsErr})"),
+                    cpUidLogs is { } cul && cul.GetProperty("lines") is { ValueKind: JsonValueKind.Array } cull
+                    && cull.EnumerateArray().Select(l => l.ValueKind == JsonValueKind.String ? l.GetString() : null)
+                        .SequenceEqual(new[] { "12:00:00 Destination progress backup: acctcopy_28_uid7_20261017_120000.sql", "12:00:01 Verified: the save is identical on uid 7 and all 9 blocks are there." })
+                    && !cul.GetRawText().Contains("/var/lib/", StringComparison.Ordinal) && !cul.GetRawText().Contains("backups/", StringComparison.Ordinal)
+                    && Since(before).Select(r => r.path).SequenceEqual(new[] { "/jobs/copy-uid?since=0" }));
+                // A copy that must create its target, whose register page did not answer: the agent's error — and the
+                // ERROR line it writes with it — names the address it asked the page at (the stack's OUTER_IP); both
+                // reach the page, the events and relic.log without it. An admin account creation ends in the same
+                // sentence when its registration fails.
+                var cpRegLog = new List<string>();
+                var (cpReg, cpRegErr) = Follow(ct => a.AccountCopyAsync(new AccountCopyRequest("2.8", FromUid: 3, To: "regdown"), cpRegLog.Add, ct));
+                Check($"/server/account/copy whose new target's register page did not answer: the job's error and its ERROR line without the address the agent asked it at ({cpRegErr} | {string.Join(" | ", cpRegLog)})",
+                    cpReg is null && cpRegErr == "Could not reach the register page: <urlopen error [Errno 111] Connection refused>"
+                    && cpRegLog.SequenceEqual(new[] { "12:00:00 Creating the account 'regdown'...", "12:00:15 ERROR: Could not reach the register page: <urlopen error [Errno 111] Connection refused>" }));
+                var (acReg, acRegErr) = Follow(ct => a.AccountCreateAsync("1.6", "regdown", null, ct: ct));
+                Check($"/server/account/create whose register page did not answer: the same error, without the address ({acRegErr})",
+                    acReg is null && acRegErr == "Could not reach the register page: <urlopen error timed out>");
+                Check("AgentClient.JobTextForPage: a backup by its file name (a Linux and a Windows path, an escaped one, after the line's time or alone), the register page without its address (an IPv4 address, a name; the error and its ERROR line); the agent's own lines that name neither (the file alone, the page without an address) and every other text as it is",
+                    AgentClient.JobTextForPage("12:00:15 ERROR: Could not reach the register page: <urlopen error [Errno 111] Connection refused>") == "12:00:15 ERROR: Could not reach the register page: <urlopen error [Errno 111] Connection refused>"
+                    && AgentClient.JobTextForPage("09:41:07 Destination progress backup: /var/lib/gio-agent/backups/acctcopy_28_uid7_20261017_120000.sql") == "09:41:07 Destination progress backup: acctcopy_28_uid7_20261017_120000.sql"
+                    && AgentClient.JobTextForPage(@"23:59:59 Destination progress backup: C:\Users\Owner\AppData\Local\Relic\agent\backups\acctcopy_32_uid1_20261017_235959.sql") == "23:59:59 Destination progress backup: acctcopy_32_uid1_20261017_235959.sql"
+                    && AgentClient.JobTextForPage("09:41:07 Destination progress backup: acctcopy_28_uid7_20261017_120000.sql") == "09:41:07 Destination progress backup: acctcopy_28_uid7_20261017_120000.sql"
+                    && AgentClient.JobTextForPage("09:41:20 ERROR: Could not reach the register page (192.0.2.10:21000): timed out") == "09:41:20 ERROR: Could not reach the register page: timed out"
+                    && AgentClient.JobTextForPage("Destination progress backup: /var/lib/gio-agent/backups/acctcopy_28_uid7_20261017_120000.sql") == "Destination progress backup: acctcopy_28_uid7_20261017_120000.sql"
+                    && AgentClient.JobTextForPage(@"Destination progress backup: C:\Users\Owner\AppData\Local\Relic\agent\backups\acctcopy_16_uid3_20261017_120000.sql") == "Destination progress backup: acctcopy_16_uid3_20261017_120000.sql"
+                    && AgentClient.JobTextForPage(@"Destination progress backup: C:\\Users\\Ow\udcf1er\\backups\\acctcopy_32_uid1_20261017_120000.sql") == "Destination progress backup: acctcopy_32_uid1_20261017_120000.sql"
+                    && AgentClient.JobTextForPage("Destination progress backup: acctcopy_28_uid7_20261017_120000.sql") == "Destination progress backup: acctcopy_28_uid7_20261017_120000.sql"
+                    && AgentClient.JobTextForPage("Could not reach the register page (192.0.2.10:21000): <urlopen error [Errno 113] No route to host>") == "Could not reach the register page: <urlopen error [Errno 113] No route to host>"
+                    && AgentClient.JobTextForPage("Could not reach the register page (game.example.com:21000): timed out") == "Could not reach the register page: timed out"
+                    && AgentClient.JobTextForPage(@"Events: skipped /home/1.6_live/server/data/caf\udce9.lua (not in the list)") == @"Events: skipped /home/1.6_live/server/data/caf\udce9.lua (not in the list)"
+                    && AgentClient.JobTextForPage("Installed into /home/1.6_live.") == "Installed into /home/1.6_live."
+                    && AgentClient.JobTextForPage("the register page (port 21000) answered nothing recognisable") == "the register page (port 21000) answered nothing recognisable"
+                    && AgentClient.JobTextForPage("") == "");
+                string regList = Projected(() => AgentClient.JobsForPage(ParseBody("""{"jobs":[{"id":"j1","kind":"accountcopy","version":"2.8","state":"error","error":"Could not reach the register page (192.0.2.10:21000): timed out","elapsed":1}]}""")!.Value));
+                Check($"AgentClient.JobsForPage (the Logs): a job's error without the register page's address ({regList})",
+                    ParseBody(regList) is { } rl && rl.GetProperty("jobs")[0].GetProperty("error").GetString() == "Could not reach the register page: timed out"
+                    && !regList.Contains("192.0.2.10", StringComparison.Ordinal));
+                before = seen.Count;
+                Follow(ct => a.AccountCopyAsync(new AccountCopyRequest("2.8", FromTemplate: " post-gaa ", ToUid: 3), null, ct));
+                var cpTplReqs = Since(before);
+                Check("/server/account/copy from a progress template: the probe, then {\"version\":\"2.8\",\"fromTemplate\":\"post-gaa\",\"toUid\":3}",
+                    cpTplReqs.Select(r => r.method + " " + r.path).SequenceEqual(new[] { "GET /server/accounts?version=2.8&limit=0", "POST /server/account/copy", "GET /jobs/copy-tpl?since=0" })
+                    && cpTplReqs[1].body == "{\"version\":\"2.8\",\"fromTemplate\":\"post-gaa\",\"toUid\":3}");
+                before = seen.Count;
+                int cpOld = JobsStatus(() => a.AccountCopyAsync(new AccountCopyRequest("0.0", From: "Alice", To: "Bob", DryRun: true)), out string cpOldMsg);
+                var cpOldReqs = Since(before);
+                Check("/server/account/copy, a check against an agent without the list: the probe's 404, nothing posted — AgentHttpException 404 with core.agent.accountCopyUnsupported",
+                    cpOld == 404 && cpOldMsg == L.T("core.agent.accountCopyUnsupported") && L.Has("core.agent.accountCopyUnsupported")
+                    && cpOldReqs.Select(r => r.method + " " + r.path).SequenceEqual(new[] { "GET /server/accounts?version=0.0&limit=0" }));
+                before = seen.Count;
+                Follow(ct => a.AccountCopyAsync(new AccountCopyRequest("0.0", From: "Alice", To: "Bob"), null, ct));
+                var cpOldPlainReqs = Since(before);
+                Check("/server/account/copy, the plain copy to that same agent: posted as it always was, no probe",
+                    cpOldPlainReqs.Count >= 1 && cpOldPlainReqs[0].method == "POST" && cpOldPlainReqs[0].path == "/server/account/copy"
+                    && cpOldPlainReqs[0].body == "{\"version\":\"0.0\",\"from\":\"Alice\",\"to\":\"Bob\"}" && !cpOldPlainReqs.Any(r => r.path.StartsWith("/server/accounts", StringComparison.Ordinal)));
+                before = seen.Count;
+                Follow(ct => a.AccountCopyAsync(new AccountCopyRequest("9.9", FromUid: 3, ToUid: 7, DryRun: true), null, ct));
+                var cpBusyReqs = Since(before);
+                Check("/server/account/copy: a probe the route refuses otherwise (its 409, a read under way) still shows the route — the check is posted",
+                    AccountsReply("/server/accounts?version=9.9&limit=0") is (409, _)
+                    && cpBusyReqs.Select(r => r.method + " " + r.path).Take(2).SequenceEqual(new[] { "GET /server/accounts?version=9.9&limit=0", "POST /server/account/copy" }));
+                // The copy's result as the page may see it: the documented fields, the backup a bool (the agent names it by its
+                // path on the box), never the job's lines nor a field the route does not document.
+                string cpPage = cpUid is { } cu ? AgentClient.AccountCopyForPage(cu).GetRawText() : "";
+                var cpLeaks = new[] { "/var/lib/", "backups", "acctcopy_", "Leak-Pw-123", "relic.local", "\"lines\"", "Destination" }.Where(s => cpPage.Contains(s, StringComparison.Ordinal)).ToList();
+                Check("AgentClient.AccountCopyForPage: {state, result} with the thirteen documented fields — backup true as a bool, the uids; no path, no line, nothing undocumented"
+                      + (cpLeaks.Count > 0 ? " — found: " + string.Join(", ", cpLeaks) : ""),
+                    ParseBody(cpPage) is { } cpe && HasExactly(cpe, "state", "result") && JobStr(cpe, "state") == "done"
+                    && HasExactly(cpe.GetProperty("result"), "srcUid", "dstUid", "guids", "blocks", "dryRun", "backup", "template", "passwordNeeded", "wouldCreate", "wouldAllocate", "wouldGetUid", "created", "allocated")
+                    && cpe.GetProperty("result").GetProperty("backup").ValueKind == JsonValueKind.True && JobNum(cpe.GetProperty("result"), "dstUid") == 7
+                    && JobNum(cpe.GetProperty("result"), "srcUid") == 3 && cpe.GetProperty("result").GetProperty("dryRun").ValueKind == JsonValueKind.False && cpLeaks.Count == 0);
+                string cpNoBackup = Projected(() => AgentClient.AccountCopyForPage(ParseBody("""{"state":"done","result":{"dryRun":true,"wouldCreate":false,"dstUid":null}}""")!.Value));
+                var oddCopies = new[] { "[]", "5", """{"result":7}""" }.Select(json => Projected(() => AgentClient.AccountCopyForPage(ParseBody(json)!.Value))).ToList();
+                Check("AgentClient.AccountCopyForPage: a check without a backup reads backup false and dstUid null; answers of another shape give the fields — never a throw",
+                    ParseBody(cpNoBackup) is { } nb && nb.GetProperty("result").GetProperty("backup").ValueKind == JsonValueKind.False
+                    && nb.GetProperty("result").GetProperty("dryRun").ValueKind == JsonValueKind.True && nb.GetProperty("result").GetProperty("dstUid").ValueKind == JsonValueKind.Null
+                    && oddCopies.All(o => ParseBody(o) is { } oc && HasExactly(oc, "state", "result")));
+                // AccountCopyRequest: the request's own shape, refused before anything is sent.
+                static string CopyBody(AccountCopyRequest r) => JsonSerializer.Serialize(r.Body(), new JsonSerializerOptions(JsonSerializerDefaults.Web));
+                static bool CopyRefused(AccountCopyRequest r)
+                {
+                    try { r.Body(); return false; }
+                    catch (ArgumentException) { return r.Problem is not null && !r.IsPlain; }
+                }
+                Check("AccountCopyRequest.IsPlain: two names and no dry run — a check, a game uid or a template is not plain",
+                    new AccountCopyRequest("2.8", From: "a", To: "b").IsPlain && !new AccountCopyRequest("2.8", From: "a", To: "b", DryRun: true).IsPlain
+                    && !new AccountCopyRequest("2.8", FromUid: 1, To: "b").IsPlain && !new AccountCopyRequest("2.8", From: "a", ToUid: 2).IsPlain
+                    && !new AccountCopyRequest("2.8", FromTemplate: "post-gaa", To: "b").IsPlain);
+                Check("AccountCopyRequest: refused before anything is sent — no version, two sources, none, two targets, none, a blank template, a game uid of 0 or above 4294967295; a blank name beside a uid is no second source",
+                    CopyRefused(new AccountCopyRequest("", From: "a", To: "b")) && CopyRefused(new AccountCopyRequest("2.8", From: "a", FromUid: 1, To: "b"))
+                    && CopyRefused(new AccountCopyRequest("2.8", To: "b")) && CopyRefused(new AccountCopyRequest("2.8", From: "a", To: "b", ToUid: 2))
+                    && CopyRefused(new AccountCopyRequest("2.8", From: "a")) && CopyRefused(new AccountCopyRequest("2.8", FromTemplate: "  ", To: "b"))
+                    && CopyRefused(new AccountCopyRequest("2.8", FromUid: 0, To: "b")) && CopyRefused(new AccountCopyRequest("2.8", From: "a", ToUid: 4294967296))
+                    && new AccountCopyRequest("2.8", From: "a", ToUid: 4294967295).Problem is null && new AccountCopyRequest("2.8", From: "  ", FromUid: 5, To: "b").Problem is null);
+                Check("AccountCopyRequest.Body: version, the source's key, the target's, dryRun only when true — the keys verbatim, a uid a number, a name trimmed",
+                    CopyBody(new AccountCopyRequest("2.8", FromUid: 3, ToUid: 7, DryRun: true)) == "{\"version\":\"2.8\",\"fromUid\":3,\"toUid\":7,\"dryRun\":true}"
+                    && CopyBody(new AccountCopyRequest("2.8", FromTemplate: "post-gaa", To: " newbie ")) == "{\"version\":\"2.8\",\"fromTemplate\":\"post-gaa\",\"to\":\"newbie\"}"
+                    && CopyBody(new AccountCopyRequest("2.8", From: "a", To: "b", DryRun: false)) == "{\"version\":\"2.8\",\"from\":\"a\",\"to\":\"b\"}");
+
+                // ── POST /server/migrate: accounts moved from a server of another version ──
+                // ONE counted POST, no probe (the route answers a malformed body with a 400, never a 404), then the job
+                // followed. A key not given is left out: a real run carries no dryRun key at all, and a check says dryRun: true.
+                before = seen.Count;
+                var migCheckLog = new List<string>();
+                var (migCheck, migCheckErr) = Follow(ct => a.MigrateAsync(new MigrateRequest("3.2", SourceVersion: "2.8", DryRun: true, KeepPassword: true), migCheckLog.Add, ct));
+                var migCheckReqs = Since(before);
+                Check("/server/migrate, a check: ONE counted POST {\"version\":\"3.2\",\"source\":{\"version\":\"2.8\"},\"dryRun\":true,\"keepPassword\":true} with the token, no probe, the job followed"
+                      + (migCheckErr is null ? "" : $" ({migCheckErr})"),
+                    migCheckReqs.Select(r => r.method + " " + r.path).SequenceEqual(new[] { "POST /server/migrate", "GET /jobs/migrate-check?since=0" })
+                    && migCheckReqs[0].body == "{\"version\":\"3.2\",\"source\":{\"version\":\"2.8\"},\"dryRun\":true,\"keepPassword\":true}" && !migCheckReqs[0].chunked
+                    && migCheckReqs.All(r => r.auth == $"Bearer {Token}") && migCheck is { } mgc && JobStr(mgc, "state") == "done"
+                    && migCheckLog.SequenceEqual(new[] { "12:00:00 CHECK: 'alex' would become the account 'alex'." }));
+                before = seen.Count;
+                var migRunLog = new List<string>();
+                var migAccounts = new[] { new MigrateAccount("alex"), new MigrateAccount("bea", "bea2"), new MigrateAccount("cy", "Cy", Overwrite: true) };
+                var (migRun, migRunErr) = Follow(ct => a.MigrateAsync(new MigrateRequest("3.2", SourceDir: " /srv/old_28 ", Accounts: migAccounts, KeepUid: true), migRunLog.Add, ct));
+                var migRunReqs = Since(before);
+                Check("/server/migrate, a real run: the counted body names the source, the accounts (from, to when given, overwrite only when true) and the option asked — no dryRun key"
+                      + (migRunErr is null ? "" : $" ({migRunErr})"),
+                    migRunReqs.Select(r => r.method + " " + r.path).SequenceEqual(new[] { "POST /server/migrate", "GET /jobs/migrate-run?since=0", "GET /jobs/migrate-run?since=2" })
+                    && migRunReqs[0].body == "{\"version\":\"3.2\",\"source\":{\"dir\":\"/srv/old_28\"},\"accounts\":[{\"from\":\"alex\"},{\"from\":\"bea\",\"to\":\"bea2\"},{\"from\":\"cy\",\"to\":\"Cy\",\"overwrite\":true}],\"keepUid\":true}"
+                    && !migRunReqs[0].chunked && !migRunReqs[0].body.Contains("dryRun", StringComparison.Ordinal) && migRun is { } mgr && JobStr(mgr, "state") == "done");
+                // Both backup lines reach the console with their time and the file name alone, whatever the agent named.
+                Check($"/server/migrate: the job's lines about the two backups reach the console with their time and the file name alone ({string.Join(" | ", migRunLog)})",
+                    migRunLog.SequenceEqual(new[] { "12:00:00 Account database backup: migrate_32_sdk_20261017_120000.db", "12:00:05 Destination progress backup: acctcopy_32_uid9_20261017_120005.sql", "12:00:09 Account 'alex' moved." }));
+                Check("AgentClient.JobTextForPage: the account database backup by its file name — after the line's time or alone, a Linux, a Windows and an escaped path, the file name as it is",
+                    AgentClient.JobTextForPage("12:00:00 Account database backup: /var/lib/gio-agent/backups/migrate_32_sdk_20261017_120000.db") == "12:00:00 Account database backup: migrate_32_sdk_20261017_120000.db"
+                    && AgentClient.JobTextForPage(@"Account database backup: C:\Users\Owner\AppData\Local\Relic\agent\backups\migrate_28_sdk_20261017_120000.db") == "Account database backup: migrate_28_sdk_20261017_120000.db"
+                    && AgentClient.JobTextForPage(@"09:41:07 Account database backup: C:\\Users\\Ow\udcf1er\\backups\\migrate_32_sdk_20261017_120000.db") == "09:41:07 Account database backup: migrate_32_sdk_20261017_120000.db"
+                    && AgentClient.JobTextForPage("09:41:07 Account database backup: migrate_32_sdk_20261017_120000.db") == "09:41:07 Account database backup: migrate_32_sdk_20261017_120000.db");
+                // An agent without the route: its 404 on the POST, nothing followed. Its 400 is the route's own sentence.
+                before = seen.Count;
+                int migOld = JobsStatus(() => a.MigrateAsync(new MigrateRequest("0.0", SourceVersion: "2.8", DryRun: true)), out string migOldMsg);
+                Check("/server/migrate on an agent without the route (its 404): AgentHttpException 404 carrying core.agent.migrateUnsupported, one request, nothing followed",
+                    migOld == 404 && migOldMsg == L.T("core.agent.migrateUnsupported") && L.Has("core.agent.migrateUnsupported") && Since(before).Count == 1);
+                int migBad = JobsStatus(() => a.MigrateAsync(new MigrateRequest("9.9", SourceVersion: "2.8", DryRun: true)), out string migBadMsg);
+                Check("/server/migrate: the route's own refusal keeps its status and the agent's sentence — never the update text",
+                    migBad == 400 && migBadMsg == L.T("core.agent.httpError", new { status = 400, detail = "Unknown version: 9.9." }));
+                // A follow the CALLER gives up stays a cancel.
+                Exception? migCancel = null;
+                using (var gaveUp = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
+                {
+                    try { a.MigrateAsync(new MigrateRequest("7.7", SourceVersion: "2.8", DryRun: true), ct: gaveUp.Token).GetAwaiter().GetResult(); }
+                    catch (Exception ex) { migCancel = ex; }
+                }
+                bool migCancelSeen = SpinWait.SpinUntil(() => { lock (seen) return seen.Any(r => r.path == "/server/migrate" && r.body.Contains("\"7.7\"", StringComparison.Ordinal)); }, TimeSpan.FromSeconds(2));
+                Check($"/server/migrate: a call its caller gives up is a cancel, never the update text ({migCancel?.GetType().Name ?? "no exception"})",
+                    migCancel is OperationCanceledException && migCancelSeen);
+                // The stop: a plain POST to the job's own path, never a job; an agent that cannot stop one says so in the answer.
+                before = seen.Count;
+                var (migStop, migStopErr) = Follow(ct => a.MigrateCancelAsync("3.2", ct));
+                var migStopReqs = Since(before);
+                Check("/server/migrate cancel posts the counted body {\"version\":\"3.2\",\"cancel\":true}, once, with the token, and returns {ok, stopping}" + (migStopErr is null ? "" : $" ({migStopErr})"),
+                    migStopReqs.Count == 1 && migStopReqs[0].method == "POST" && migStopReqs[0].path == "/server/migrate"
+                    && migStopReqs[0].body == "{\"version\":\"3.2\",\"cancel\":true}" && !migStopReqs[0].chunked && migStopReqs[0].auth == $"Bearer {Token}"
+                    && migStop is { ValueKind: JsonValueKind.Object } mgs && mgs.TryGetProperty("stopping", out var mgss) && mgss.ValueKind == JsonValueKind.True);
+                var (migStopOld, migStopOldErr) = Follow(ct => a.MigrateCancelAsync("0.0", ct));
+                var (migStopBad, migStopBadErr) = Follow(ct => a.MigrateCancelAsync("9.9", ct));
+                Check("/server/migrate cancel: a 404 or a 400 comes back as {unsupported: true, stopping: false}, never as a failed call" + ((migStopOldErr ?? migStopBadErr) is { } migStopWhy ? $" ({migStopWhy})" : ""),
+                    new[] { migStopOld, migStopBad }.All(m => m is { ValueKind: JsonValueKind.Object } s && s.TryGetProperty("unsupported", out var u) && u.ValueKind == JsonValueKind.True
+                        && s.TryGetProperty("stopping", out var st) && st.ValueKind == JsonValueKind.False));
+                // The result as the page may see it: every documented field, and nothing planted beside them — a path, a
+                // password hash and an e-mail at each level. A folder source is its kind and its version.
+                string[] migTop = { "dryRun", "target", "source", "passwordVerify", "keepPassword", "keepUid", "listed", "checked", "notChecked", "totals", "stopped", "failed", "leftRegistered", "accounts" };
+                string[] migEntry = { "from", "srcUid", "nickname", "level", "to", "verdict", "why", "reason", "existing", "existingUid", "existingNickname", "existingLevel", "caseOnly",
+                    "dstUid", "wouldGetUid", "keepsUid", "relocated", "dropped", "others", "cut", "settled", "dungeons", "serverRemoves", "expiring", "expiryOther", "gachaUnknown",
+                    "kept", "unknownIds", "password", "passwordWhy", "passwordNeeded", "backup", "online" };
+                string migPage = migCheck is { } mcp ? AgentClient.MigrateForPage(mcp).GetRawText() : "";
+                var migLeaks = new[] { "/var/lib/", "/home/", "$2b$", "relic.local", "192.0.2.44", "\"lines\"", "SPIKETOKEN" }.Where(s => migPage.Contains(s, StringComparison.Ordinal)).ToList();
+                Check("AgentClient.MigrateForPage: {state, result} with the documented fields, each account with its own — no path, no hash, no e-mail, no address, no line, nothing undocumented"
+                      + (migLeaks.Count > 0 ? " — found: " + string.Join(", ", migLeaks) : ""),
+                    ParseBody(migPage) is { } mpe && HasExactly(mpe, "state", "result") && JobStr(mpe, "state") == "done" && HasExactly(mpe.GetProperty("result"), migTop)
+                    && mpe.GetProperty("result").GetProperty("accounts") is { ValueKind: JsonValueKind.Array } mpa && mpa.GetArrayLength() == 2 && mpa.EnumerateArray().All(r => HasExactly(r, migEntry))
+                    && HasExactly(mpe.GetProperty("result").GetProperty("source"), "kind", "version") && migLeaks.Count == 0);
+                Check("AgentClient.MigrateForPage: the values as the agent wrote them — the check's facts, an account's verdict, its reports, ids as numbers, the password's fate; a skip with its code and the account it met",
+                    ParseBody(migPage) is { } mpv && mpv.GetProperty("result") is var mpr && mpr.GetProperty("dryRun").ValueKind == JsonValueKind.True && JobStr(mpr, "target") == "3.2"
+                    && JobStr(mpr.GetProperty("source"), "kind") == "version" && JobStr(mpr.GetProperty("source"), "version") == "2.8"
+                    && mpr.GetProperty("passwordVerify").GetProperty("source").ValueKind == JsonValueKind.True && mpr.GetProperty("passwordVerify").GetProperty("target").ValueKind == JsonValueKind.Null
+                    && mpr.GetProperty("keepPassword").ValueKind == JsonValueKind.True && mpr.GetProperty("keepUid").ValueKind == JsonValueKind.False
+                    && JobNum(mpr, "listed") == 2 && JobNum(mpr, "checked") == 2 && JobNum(mpr, "notChecked") == 0 && JobNum(mpr.GetProperty("totals"), "create") == 1 && JobNum(mpr.GetProperty("totals"), "skip") == 1
+                    && mpr.GetProperty("stopped").ValueKind == JsonValueKind.False && mpr.GetProperty("failed").ValueKind == JsonValueKind.Null && mpr.GetProperty("leftRegistered").GetArrayLength() == 0
+                    && mpr.GetProperty("accounts") is var mpl
+                    && JobStr(mpl[0], "from") == "alex" && JobNum(mpl[0], "srcUid") == 5 && JobStr(mpl[0], "nickname") == "Alex" && JobNum(mpl[0], "level") == 45 && JobStr(mpl[0], "verdict") == "create"
+                    && JobNum(mpl[0], "wouldGetUid") == 10 && JobNum(mpl[0].GetProperty("relocated"), "from") == 9 && JobNum(mpl[0].GetProperty("relocated"), "to") == 3 && JobNum(mpl[0], "dropped") == 101 && JobNum(mpl[0], "others") == 2
+                    && JobNum(mpl[0].GetProperty("cut")[0], "activity") == 2014 && mpl[0].GetProperty("cut")[0].GetProperty("conds").GetProperty("ids").GetArrayLength() == 4
+                    && JobNum(mpl[0].GetProperty("settled"), "n") == 1 && JobNum(mpl[0].GetProperty("serverRemoves"), "blocks") == 16 && JobNum(mpl[0].GetProperty("expiring"), "n") == 13
+                    && mpl[0].GetProperty("gachaUnknown").GetProperty("ids")[2].GetInt32() == 88 && JobNum(mpl[0].GetProperty("kept"), "ugc") == 1 && JobStr(mpl[0], "password") == "copied"
+                    && mpl[0].GetProperty("backup").ValueKind == JsonValueKind.False && mpl[0].GetProperty("online").ValueKind == JsonValueKind.Null
+                    && JobStr(mpl[1], "verdict") == "skip" && JobStr(mpl[1], "why") == "nameTaken" && JobStr(mpl[1], "existing") == "Bea" && JobNum(mpl[1], "existingUid") == 7
+                    && JobStr(mpl[1], "existingNickname") == "Bea" && JobNum(mpl[1], "existingLevel") == 12 && mpl[1].GetProperty("caseOnly").ValueKind == JsonValueKind.True
+                    && JobNum(mpl[1].GetProperty("unknownIds").GetProperty("avatar"), "n") == 1 && mpl[1].GetProperty("password").ValueKind == JsonValueKind.Null);
+                // A real run: its failure and what stayed registered, a reason and a password's reason through JobTextForPage,
+                // backup and online as bools whatever the agent wrote for backup; a list longer than it should be, an id list
+                // longer than 32 and a folder source keep to their bounds.
+                string migLong = string.Join(",", Enumerable.Range(1, 40));
+                string migRows = string.Join(",", Enumerable.Range(1, 2005).Select(i => $$"""{"from":"a{{i}}"}"""));
+                string migDone = Projected(() => AgentClient.MigrateForPage(ParseBody("""
+                    {"state":"done","result":{"dryRun":false,"source":{"kind":"folder","version":"2.8","dir":"/home/old_28"},"stopped":true,"totals":{"moved":1,"failed":1,"notDone":2},
+                     "failed":{"from":"bea","reason":"Destination progress backup: /var/lib/gio-agent/backups/acctcopy_32_uid9_1.sql is gone","extra":"/home/old_28"},
+                     "leftRegistered":[{"name":"bea","inGame":true,"hash":"$2b$12$x"},{"name":"cy"},5],
+                     "accounts":[{"from":"alex","verdict":"moved","dstUid":12,"backup":"/var/lib/gio-agent/backups/acctcopy_32_uid12_1.sql","online":true,"password":"notCopied","passwordWhy":"Account database backup: /var/lib/gio-agent/backups/migrate_32_sdk_1.db was refused","reason":"Destination progress backup: C:\\x\\acctcopy.sql","expiring":{"n":40,"ids":[MIGLONG]}},
+                                 {"from":"bea","verdict":"failed","backup":true,"online":false,"password":"secret","kept":{"time":2,"bad key":3,"ugc":"x"},"unknownIds":{"avatar":{"n":1,"ids":[10000099,"x"]},"no such key":{"n":1,"ids":[1]}}}]}}
+                    """.Replace("MIGLONG", migLong))!.Value));
+                Check("AgentClient.MigrateForPage: a real run's failure, the names left registered, the reasons by their file names, backup and online as bools, a list of 40 ids kept to 32 with its total, a password word it does not know and a key that is no word dropped",
+                    ParseBody(migDone) is { } mdn && mdn.GetProperty("result") is var mdr && mdr.GetProperty("dryRun").ValueKind == JsonValueKind.False && mdr.GetProperty("stopped").ValueKind == JsonValueKind.True
+                    && HasExactly(mdr.GetProperty("source"), "kind", "version") && JobStr(mdr.GetProperty("source"), "kind") == "folder"
+                    && HasExactly(mdr.GetProperty("failed"), "from", "reason") && JobStr(mdr.GetProperty("failed"), "reason") == "Destination progress backup: acctcopy_32_uid9_1.sql is gone"
+                    && mdr.GetProperty("leftRegistered").GetArrayLength() == 2 && HasExactly(mdr.GetProperty("leftRegistered")[0], "name", "inGame")
+                    && mdr.GetProperty("leftRegistered")[0].GetProperty("inGame").ValueKind == JsonValueKind.True && mdr.GetProperty("leftRegistered")[1].GetProperty("inGame").ValueKind == JsonValueKind.False
+                    && mdr.GetProperty("accounts")[0].GetProperty("backup").ValueKind == JsonValueKind.True && mdr.GetProperty("accounts")[0].GetProperty("online").ValueKind == JsonValueKind.True
+                    && JobStr(mdr.GetProperty("accounts")[0], "reason") == "Destination progress backup: acctcopy.sql" && JobStr(mdr.GetProperty("accounts")[0], "passwordWhy") == "Account database backup: migrate_32_sdk_1.db was refused"
+                    && JobNum(mdr.GetProperty("accounts")[0].GetProperty("expiring"), "n") == 40 && mdr.GetProperty("accounts")[0].GetProperty("expiring").GetProperty("ids").GetArrayLength() == 32
+                    && mdr.GetProperty("accounts")[1].GetProperty("password").ValueKind == JsonValueKind.Null && mdr.GetProperty("accounts")[1].GetProperty("backup").ValueKind == JsonValueKind.True
+                    && HasExactly(mdr.GetProperty("accounts")[1].GetProperty("kept"), "time") && HasExactly(mdr.GetProperty("accounts")[1].GetProperty("unknownIds"), "avatar")
+                    && mdr.GetProperty("accounts")[1].GetProperty("unknownIds").GetProperty("avatar").GetProperty("ids").GetArrayLength() == 1
+                    && !migDone.Contains("/var/lib/", StringComparison.Ordinal) && !migDone.Contains("/home/", StringComparison.Ordinal) && !migDone.Contains("$2b$", StringComparison.Ordinal));
+                // The fields that hold the agent's own words and version ids keep to those shapes: a path, a hash, a host or an
+                // address planted in one reaches the page as nothing at all, a word or an id as the agent wrote it.
+                string migPlants = Projected(() => AgentClient.MigrateForPage(ParseBody("""
+                    {"state":"done","result":{"dryRun":true,"target":"/home/3.2_live","source":{"kind":"version","version":"game.example.com"},
+                     "accounts":[{"from":"alex","verdict":"/var/lib/gio-agent/state.json","why":"$2b$12$abcdefghijklmnopqrstuv"},{"from":"bea","verdict":"skip","why":"nameTaken"},{"from":"cy","verdict":"skip","why":"192.0.2.44"}]}}
+                    """)!.Value));
+                string migAddress = Projected(() => AgentClient.MigrateForPage(ParseBody("""{"result":{"target":"192.0.2.44","source":{"kind":"version","version":"2.8"}}}""")!.Value));
+                Check("AgentClient.MigrateForPage: a verdict or a skip's code that is no word, and a target or a source version that is no version id, reach the page as null — a word and an id as the agent wrote them",
+                    ParseBody(migPlants) is { } mpt && mpt.GetProperty("result") is var mptr && mptr.GetProperty("target").ValueKind == JsonValueKind.Null && mptr.GetProperty("source").GetProperty("version").ValueKind == JsonValueKind.Null
+                    && mptr.GetProperty("accounts") is var mpta && mpta[0].GetProperty("verdict").ValueKind == JsonValueKind.Null && mpta[0].GetProperty("why").ValueKind == JsonValueKind.Null
+                    && JobStr(mpta[1], "verdict") == "skip" && JobStr(mpta[1], "why") == "nameTaken" && mpta[2].GetProperty("why").ValueKind == JsonValueKind.Null
+                    && new[] { "/home/", "/var/lib/", "$2b$", "192.0.2.44", "game.example.com" }.All(s => !migPlants.Contains(s, StringComparison.Ordinal))
+                    && ParseBody(migAddress) is { } mpad && mpad.GetProperty("result") is var mpar && mpar.GetProperty("target").ValueKind == JsonValueKind.Null && JobStr(mpar.GetProperty("source"), "version") == "2.8");
+                string migMany = Projected(() => AgentClient.MigrateForPage(ParseBody("{\"result\":{\"accounts\":[" + migRows + "]}}")!.Value));
+                var oddMoves = new[] { "[]", "5", """{"result":7}""", """{"result":{"accounts":[5,"x",{"from":3,"cut":7,"kept":[1],"unknownIds":3,"serverRemoves":"x","relocated":[],"expiring":{"ids":["a",1.5,2]},"settled":[1,2]}],"totals":9,"source":"x","failed":"y","leftRegistered":{}}}""" }
+                    .Select(json => Projected(() => AgentClient.MigrateForPage(ParseBody(json)!.Value))).ToList();
+                Check("AgentClient.MigrateForPage: at most the 2000 accounts a result names; answers of another shape give the fields, an item that is no object left out — never a throw",
+                    ParseBody(migMany) is { } mmn && mmn.GetProperty("result").GetProperty("accounts").GetArrayLength() == 2000
+                    && oddMoves.All(o => ParseBody(o) is { } om && HasExactly(om, "state", "result") && HasExactly(om.GetProperty("result"), migTop))
+                    && ParseBody(oddMoves[^1]) is { } omx && omx.GetProperty("result").GetProperty("accounts").GetArrayLength() == 1
+                    && omx.GetProperty("result").GetProperty("accounts")[0] is var oma && oma.GetProperty("from").ValueKind == JsonValueKind.Null
+                    && oma.GetProperty("cut").GetArrayLength() == 0 && oma.GetProperty("relocated").ValueKind == JsonValueKind.Null && oma.GetProperty("settled").ValueKind == JsonValueKind.Null
+                    && oma.GetProperty("expiring").GetProperty("ids").GetArrayLength() == 1);
+                // MigrateRequest: the request's own shape, refused before anything is sent.
+                static string MoveBody(MigrateRequest r) => JsonSerializer.Serialize(r.Body(), new JsonSerializerOptions(JsonSerializerDefaults.Web));
+                static bool MoveRefused(MigrateRequest r)
+                {
+                    try { r.Body(); return false; }
+                    catch (ArgumentException) { return r.Problem is not null; }
+                }
+                var hundred = Enumerable.Range(1, 100).Select(i => new MigrateAccount($"a{i}")).ToList();
+                var oneMore = hundred.Append(new MigrateAccount("a101")).ToList();
+                var alex = new[] { new MigrateAccount("alex") };
+                Check("MigrateRequest: refused before anything is sent — no version, no source, two sources, a real run without accounts, an empty list, 101 accounts, a blank or two-line or 129-character name, a blank new name, one login twice, two accounts going to one name in another case; a check without accounts and a move of 100 go out",
+                    MoveRefused(new MigrateRequest("", SourceVersion: "2.8", DryRun: true)) && MoveRefused(new MigrateRequest("3.2", DryRun: true))
+                    && MoveRefused(new MigrateRequest("3.2", SourceVersion: "2.8", SourceDir: "/srv/x", DryRun: true)) && MoveRefused(new MigrateRequest("3.2", SourceVersion: " ", SourceDir: " ", DryRun: true))
+                    && MoveRefused(new MigrateRequest("3.2", SourceVersion: "2.8")) && MoveRefused(new MigrateRequest("3.2", SourceVersion: "2.8", Accounts: Array.Empty<MigrateAccount>(), DryRun: true))
+                    && MoveRefused(new MigrateRequest("3.2", SourceVersion: "2.8", Accounts: oneMore)) && MoveRefused(new MigrateRequest("3.2", SourceVersion: "2.8", Accounts: new[] { new MigrateAccount("  ") }))
+                    && MoveRefused(new MigrateRequest("3.2", SourceVersion: "2.8", Accounts: new[] { new MigrateAccount("a\nb") })) && MoveRefused(new MigrateRequest("3.2", SourceVersion: "2.8", Accounts: new[] { new MigrateAccount(new string('a', 129)) }))
+                    && MoveRefused(new MigrateRequest("3.2", SourceVersion: "2.8", Accounts: new[] { new MigrateAccount("alex", " ") }))
+                    && MoveRefused(new MigrateRequest("3.2", SourceVersion: "2.8", Accounts: new[] { new MigrateAccount("alex"), new MigrateAccount("alex", "alex2") }))
+                    && MoveRefused(new MigrateRequest("3.2", SourceVersion: "2.8", Accounts: new[] { new MigrateAccount("Alex"), new MigrateAccount("bea", "alex") }))
+                    && new MigrateRequest("3.2", SourceVersion: "2.8", DryRun: true).Problem is null && new MigrateRequest("3.2", SourceDir: "/srv/x", DryRun: true).Problem is null
+                    && new MigrateRequest("3.2", SourceVersion: "2.8", Accounts: hundred).Problem is null && new MigrateRequest("3.2", SourceVersion: "2.8", Accounts: alex).Problem is null);
+                Check("MigrateRequest.Body: version, source, accounts as given, dryRun / keepPassword / keepUid only when true — a login goes out exactly as it is written",
+                    MoveBody(new MigrateRequest("2.8", SourceVersion: "1.6", DryRun: true)) == "{\"version\":\"2.8\",\"source\":{\"version\":\"1.6\"},\"dryRun\":true}"
+                    && MoveBody(new MigrateRequest("3.2", SourceVersion: "1.6", Accounts: new[] { new MigrateAccount(" Alex ", Overwrite: false) })) == "{\"version\":\"3.2\",\"source\":{\"version\":\"1.6\"},\"accounts\":[{\"from\":\" Alex \"}]}"
+                    && MoveBody(new MigrateRequest("3.2", SourceDir: "/srv/x", Accounts: alex, DryRun: true, KeepPassword: true, KeepUid: true))
+                        == "{\"version\":\"3.2\",\"source\":{\"dir\":\"/srv/x\"},\"accounts\":[{\"from\":\"alex\"}],\"dryRun\":true,\"keepPassword\":true,\"keepUid\":true}");
             });
 
             WithClient(good with { AgentToken = "wrong-token" }, a =>
@@ -4655,6 +10092,23 @@ static class AgentSpike
                 Check("wrong token -> error surfaced (no fake OK)", err is not null);
                 Check("error names HTTP 401 + agent's message",
                     err is not null && err.Contains("401") && err.Contains("unauthorized"));
+                // A refused bearer stays the 401 it is on the account list and on the probe of a copy (the revocation path of
+                // an open key) — never the update text, and nothing posted after the probe.
+                int at401; lock (seen) at401 = seen.Count;
+                Exception? list401 = null, probe401 = null;
+                try { a.AccountsAsync("2.8").GetAwaiter().GetResult(); } catch (Exception ex) { list401 = ex; }
+                try { a.AccountCopyAsync(new AccountCopyRequest("2.8", FromUid: 3, ToUid: 7, DryRun: true)).GetAwaiter().GetResult(); } catch (Exception ex) { probe401 = ex; }
+                List<string> after401; lock (seen) after401 = seen.Skip(at401).Select(r => r.method + " " + r.path).ToList();
+                Check("a refused bearer: the account list and the probe of a copy are the 401 they are — nothing posted after the probe",
+                    list401 is AgentHttpException { Status: 401 } && probe401 is AgentHttpException { Status: 401 }
+                    && list401.Message != L.T("core.agent.accountsUnsupported") && probe401.Message != L.T("core.agent.accountCopyUnsupported")
+                    && after401.SequenceEqual(new[] { "GET /server/accounts?version=2.8", "GET /server/accounts?version=2.8&limit=0" }));
+                // ...and on a move and on its stop: the revocation path of an open key, never "the agent must be updated".
+                Exception? move401 = null, moveStop401 = null;
+                try { a.MigrateAsync(new MigrateRequest("3.2", SourceVersion: "2.8", DryRun: true)).GetAwaiter().GetResult(); } catch (Exception ex) { move401 = ex; }
+                try { a.MigrateCancelAsync("3.2").GetAwaiter().GetResult(); } catch (Exception ex) { moveStop401 = ex; }
+                Check("a refused bearer: a move and its stop are the 401 they are, never the update text",
+                    move401 is AgentHttpException { Status: 401 } && moveStop401 is AgentHttpException { Status: 401 } && move401.Message != L.T("core.agent.migrateUnsupported"));
             });
 
             var ssh = good with { Mode = "ssh" };
@@ -4764,8 +10218,8 @@ static class AgentSpike
         check("probe: up with dead services is up-but-degraded",
             degraded is { Up: true, AllGood: false } && degraded.Degraded == "gameserver, multiserver");
         using var missing = System.Text.Json.JsonDocument.Parse("""{"versions":{"2.8":{"up":true}}}""");
-        check("probe: a version the agent does not list reads as down",
-            ServerProbe.Parse(missing.RootElement, "1.6").Up is false);
+        check("probe: a version the agent does not list is unlisted — unknown, never 'stopped'",
+            ServerProbe.Parse(missing.RootElement, "1.6") is { Up: null, Unlisted: true, AllGood: false });
     }
 
     /// <summary>Connect, run, dispose — AgentClient is IAsyncDisposable, so no sync `using`.</summary>
@@ -4885,12 +10339,15 @@ static class AgentSpike
     }
 
     /// <summary>The stub's job endpoints (voice packs; setup/provision/pathfinding/
-    /// fetch; admin account creation), answered the way the real agent answers every job: 202 + a job id, then GET
+    /// fetch; admin account creation; events, the public address and the txt fixes' refusal, with texts the agent
+    /// could not decode),
+    /// answered the way the real agent answers every job: 202 + a job id, then GET
     /// /jobs/&lt;id&gt;?since=N until the state leaves "running". Stateless on purpose — "since" alone
     /// picks the snapshot, so the final one is only ever served to a client that carried the first one's
     /// "next" forward. The id names the scenario: an empty selection is done at once, version "0.0" ends
     /// in an error. The voice and fetch paths with "cancel":true are the real agent's NON-job answers
-    /// there: a plain 200 {ok, stopping}.</summary>
+    /// there: a plain 200 {ok, stopping}. GET /jobs is the agent's list of its last jobs, each snapshot
+    /// whole.</summary>
     static (int code, string json)? JobReply(string method, string path, string body)
     {
         if (method == "POST" && path == "/server/hotpatch/voice" && body.Contains("\"cancel\":true"))
@@ -4906,17 +10363,38 @@ static class AgentSpike
             return (202, """{"ok":true,"async":true,"job":"fetch-16","kind":"fetch","version":"1.6"}""");
         if (method == "POST" && path == "/server/pathfinding")
             return (202, """{"ok":true,"async":true,"job":"pf-off","kind":"pathfinding","version":"1.6"}""");
+        // The navmesh archive and the pathfinding data downloads: a job each, their cancel the non-job
+        // answer of the fetch's. Version "0.0" plays an agent that has no such route (its plain 404).
+        if (method == "POST" && (path == "/server/navmesh" || path == "/server/navdata") && body.Contains("\"cancel\":true"))
+            return (200, """{"ok":true,"stopping":true}""");
+        if (method == "POST" && path == "/server/navmesh")
+            return body.Contains("\"0.0\"") ? (404, """{"error":"not found"}""")
+                : (202, """{"ok":true,"async":true,"job":"navmesh-28","kind":"navmesh","version":"2.8"}""");
+        if (method == "POST" && path == "/server/navdata")
+            return body.Contains("\"0.0\"") ? (404, """{"error":"not found"}""")
+                : (202, """{"ok":true,"async":true,"job":"navdata-28","kind":"navdata","version":"2.8"}""");
         if (method == "POST" && path == "/server/setup")
             return (202, """{"ok":true,"async":true,"job":"setup-ok","kind":"setup","version":"1.6"}""");
         if (method == "POST" && path == "/server/provision")
             return (202, """{"ok":true,"async":true,"job":"prov-ok","kind":"provision","version":"1.6"}""");
         // Admin account creation. Version "0.0" plays an agent that has no such route (its plain 404); the
         // name "gone1" gets a job id this stub never answers for — the agent that restarted and forgot the
-        // job, a 404 while FOLLOWING, which must keep its own text.
+        // job, a 404 while FOLLOWING, which must keep its own text; the name "regdown" a registration whose
+        // register page did not answer.
         if (method == "POST" && path == "/server/account/create")
             return body.Contains("\"0.0\"") ? (404, """{"error":"not found"}""")
                 : body.Contains("\"gone1\"") ? (202, """{"ok":true,"async":true,"job":"acct-gone","kind":"accountcreate","version":"1.6"}""")
+                : body.Contains("\"regdown\"") ? (202, """{"ok":true,"async":true,"job":"acct-regdown","kind":"accountcreate","version":"1.6"}""")
                 : (202, """{"ok":true,"async":true,"job":"acct-ok","kind":"accountcreate","version":"1.6"}""");
+        // The events and the public address re-applied: jobs whose texts the agent could not decode — a line and an
+        // error that name a file with an undecodable byte, which Python's json writes as an escaped lone surrogate.
+        if (method == "POST" && path == "/server/events")
+            return (202, """{"ok":true,"async":true,"job":"events-odd","kind":"events","version":"1.6"}""");
+        if (method == "POST" && path == "/server/netfix")
+            return (202, """{"ok":true,"async":true,"job":"netfix-odd","kind":"netfix","version":"1.6"}""");
+        // ...and a refusal whose sentence names such a file: the agent's 409, before any job exists.
+        if (method == "POST" && path == "/server/txtfixes")
+            return (409, """{"error":"/home/1.6_live/server/data/caf\udce9.txt is not a file the txt fixes know -- nothing was changed."}""");
         // The agent's settings, its restart, and the stack relocation (check / job / cancel).
         if (path == "/agent/config" && (method == "GET" || method == "POST"))
             return AgentConfigReply(method, body);
@@ -4934,9 +10412,71 @@ static class AgentSpike
         // Gameplay settings: the state (GET) and the job (POST).
         if ((method == "GET" || method == "POST") && (path == "/server/tweaks" || path.StartsWith("/server/tweaks?", StringComparison.Ordinal)))
             return TweaksReply(method, path, body);
+        // The account list (AccountsReply) and the account copy: a job whose id names what was asked — a copy to the new
+        // account "regdown" whose register page does not answer, a check (dryRun), a starting progress (fromTemplate), a
+        // copy by game uid, or the plain copy by name.
+        if (method == "GET" && path.StartsWith("/server/accounts?", StringComparison.Ordinal))
+            return AccountsReply(path);
+        if (method == "POST" && path == "/server/account/copy")
+        {
+            string id = body.Contains("\"to\":\"regdown\"") ? "copy-regdown" : body.Contains("\"dryRun\":true") ? "copy-dry"
+                : body.Contains("\"fromTemplate\"") ? "copy-tpl"
+                : body.Contains("\"fromUid\"") || body.Contains("\"toUid\"") ? "copy-uid" : "copy-plain";
+            return (202, $$"""{"ok":true,"async":true,"job":"{{id}}","kind":"accountcopy"}""");
+        }
+        // A move of accounts: a job whose id names what was asked (a check, a real run), its stop the non-job answer of the
+        // fetch's. Version "0.0" plays an agent that has no such route (its plain 404), version "9.9" the route's own
+        // refusal (never a 404), version "7.7" a call that takes three seconds (the caller gives up first).
+        if (method == "POST" && path == "/server/migrate" && body.Contains("\"0.0\""))
+            return (404, """{"error":"not found"}""");
+        if (method == "POST" && path == "/server/migrate" && body.Contains("\"9.9\""))
+            return (400, """{"error":"Unknown version: 9.9."}""");
+        if (method == "POST" && path == "/server/migrate" && body.Contains("\"cancel\":true"))
+            return (200, """{"ok":true,"stopping":true}""");
+        if (method == "POST" && path == "/server/migrate" && body.Contains("\"7.7\""))
+        {
+            Thread.Sleep(3000);
+            return (409, """{"error":"Version 7.7 is not installed on this server."}""");
+        }
+        if (method == "POST" && path == "/server/migrate")
+            return (202, $$"""{"ok":true,"async":true,"job":"{{(body.Contains("\"dryRun\":true") ? "migrate-check" : "migrate-run")}}","kind":"migrate","version":"3.2"}""");
         if (method != "GET") return null;
         return path switch
         {
+            // A move's jobs as the agent writes them. The check: its result as the route documents it, with a path, a
+            // password hash, an e-mail and an address planted beside the documented fields, at each level. The real run:
+            // lines that begin with the time the agent wrote them, the two backups named by their paths on the box.
+            "/jobs/migrate-check?since=0" => (200, """
+                {"id":"migrate-check","kind":"migrate","version":"3.2","state":"done","error":null,"lines":["12:00:00 CHECK: 'alex' would become the account 'alex'."],"next":1,"elapsed":1,
+                 "result":{"dryRun":true,"target":"3.2","source":{"kind":"version","version":"2.8","dir":"/home/2.8_live"},"passwordVerify":{"source":true,"target":null,"hash":"$2b$12$abcdefghijklmnopqrstuv"},
+                  "keepPassword":true,"keepUid":false,"listed":2,"checked":2,"notChecked":0,"totals":{"create":1,"overwrite":0,"skip":1,"moved":0,"failed":0,"notDone":0,"dir":"/home/2.8_live"},
+                  "stopped":false,"failed":null,"leftRegistered":[],"dir":"/home/2.8_live","token":"SPIKETOKEN-0123456789abcdef","email":"admin@relic.local",
+                  "accounts":[
+                   {"from":"alex","srcUid":5,"nickname":"Alex","level":45,"to":"alex","verdict":"create","why":null,"reason":null,"existing":null,"existingUid":null,"existingNickname":null,"existingLevel":null,"caseOnly":null,
+                    "dstUid":null,"wouldGetUid":10,"keepsUid":null,"relocated":{"from":9,"to":3,"path":"/home/2.8_live"},"dropped":101,"others":2,
+                    "cut":[{"activity":2014,"conds":{"n":4,"ids":[2014028,2014029,2014030,2014031]},"path":"/home/2.8_live"}],"settled":{"n":1,"ids":[5084]},"dungeons":{"n":0,"ids":[]},
+                    "serverRemoves":{"blocks":16,"scenes":12,"marks":3,"path":"/home/2.8_live"},"expiring":{"n":13,"ids":[101801,101802]},"expiryOther":{"n":0,"ids":[]},"gachaUnknown":{"n":3,"ids":[86,87,88]},
+                    "kept":{"time":2,"ugc":1},"unknownIds":null,"password":"copied","passwordWhy":null,"passwordNeeded":false,"backup":false,"online":null,
+                    "passwordHash":"$2b$12$abcdefghijklmnopqrstuv","email":"alex@relic.local","ip":"192.0.2.44","path":"/home/2.8_live/mysql"},
+                   {"from":"bea","srcUid":6,"nickname":"Bea","level":20,"to":"bea","verdict":"skip","why":"nameTaken","reason":null,"existing":"Bea","existingUid":7,"existingNickname":"Bea","existingLevel":12,"caseOnly":true,
+                    "dstUid":null,"wouldGetUid":null,"keepsUid":null,"relocated":null,"dropped":0,"others":0,"cut":[],"settled":{"n":0,"ids":[]},"dungeons":{"n":0,"ids":[]},
+                    "serverRemoves":{"blocks":0,"scenes":0,"marks":0},"expiring":{"n":0,"ids":[]},"expiryOther":{"n":0,"ids":[]},"gachaUnknown":{"n":0,"ids":[]},"kept":{},
+                    "unknownIds":{"avatar":{"n":1,"ids":[10000099]}},"password":null,"passwordWhy":null,"passwordNeeded":false,"backup":false,"online":null,"password_hash":"$2b$12$abcdefghijklmnopqrstuv"}]}}
+                """),
+            "/jobs/migrate-run?since=0" => (200, """{"id":"migrate-run","kind":"migrate","version":"3.2","state":"running","error":null,"result":null,"lines":["12:00:00 Account database backup: /var/lib/gio-agent/backups/migrate_32_sdk_20261017_120000.db","12:00:05 Destination progress backup: /var/lib/gio-agent/backups/acctcopy_32_uid9_20261017_120005.sql"],"next":2,"elapsed":1}"""),
+            "/jobs/migrate-run?since=2" => (200, """{"id":"migrate-run","kind":"migrate","version":"3.2","state":"done","error":null,"result":{"dryRun":false,"target":"3.2","source":{"kind":"folder","version":"2.8"},"totals":{"moved":1,"failed":0,"notDone":0},"stopped":false,"failed":null,"leftRegistered":[],"accounts":[]},"lines":["12:00:09 Account 'alex' moved."],"next":3,"elapsed":2}"""),
+            // The copy's jobs as the agent writes them: the check (nothing created — what it would create / allocate), the
+            // copy by game uid (its backup named by its path on the box — in the agent's state folder —, in its result and
+            // in a line, beside fields the route does not document), a starting progress, the plain copy, and a copy whose
+            // new target could not be registered (the agent's error, and the ERROR line it writes with it, name the
+            // address it asked the register page at). The lines of the copy by game uid and of that failed copy begin
+            // with the time the agent wrote them, as every line a real agent keeps does.
+            "/jobs/copy-dry?since=0" => (200, """{"id":"copy-dry","kind":"accountcopy","version":"2.8","state":"done","error":null,"result":{"srcUid":3,"dstUid":null,"guids":12,"blocks":9,"dryRun":true,"template":null,"passwordNeeded":true,"wouldCreate":true,"wouldAllocate":true,"wouldGetUid":10},"lines":["Would create the account newfriend and allocate it a game uid."],"next":1,"elapsed":1}"""),
+            "/jobs/copy-uid?since=0" => (200, """{"id":"copy-uid","kind":"accountcopy","version":"2.8","state":"done","error":null,"result":{"srcUid":3,"dstUid":7,"guids":12,"blocks":9,"dryRun":false,"backup":"/var/lib/gio-agent/backups/acctcopy_28_uid7_20261017_120000.sql","template":null,"passwordNeeded":false,"created":false,"allocated":false,"password":"Leak-Pw-123","email":"x@relic.local"},"lines":["12:00:00 Destination progress backup: /var/lib/gio-agent/backups/acctcopy_28_uid7_20261017_120000.sql","12:00:01 Verified: the save is identical on uid 7 and all 9 blocks are there."],"next":2,"elapsed":2}"""),
+            "/jobs/copy-tpl?since=0" => (200, """{"id":"copy-tpl","kind":"accountcopy","version":"2.8","state":"done","error":null,"result":{"srcUid":1,"dstUid":3,"guids":0,"blocks":9,"dryRun":false,"backup":"/var/lib/gio-agent/backups/acctcopy_28_uid3_20261017_120500.sql","template":"post-gaa","passwordNeeded":false,"created":false,"allocated":false},"lines":[],"next":0,"elapsed":1}"""),
+            "/jobs/copy-regdown?since=0" => (200, """{"id":"copy-regdown","kind":"accountcopy","version":"2.8","state":"error","error":"Could not reach the register page (192.0.2.10:21000): <urlopen error [Errno 111] Connection refused>","result":null,"lines":["12:00:00 Creating the account 'regdown'...","12:00:15 ERROR: Could not reach the register page (192.0.2.10:21000): <urlopen error [Errno 111] Connection refused>"],"next":2,"elapsed":15}"""),
+            "/jobs/acct-regdown?since=0" => (200, """{"id":"acct-regdown","kind":"accountcreate","version":"1.6","state":"error","error":"Could not reach the register page (192.0.2.10:21000): <urlopen error timed out>","result":null,"lines":["Admin account creation: name=regdown version=1.6 template=fresh"],"next":1,"elapsed":1}"""),
+            "/jobs/copy-plain?since=0" => (200, """{"id":"copy-plain","kind":"accountcopy","version":"2.8","state":"done","error":null,"result":{"srcUid":3,"dstUid":8,"guids":12,"blocks":9},"lines":[],"next":0,"elapsed":1}"""),
             "/jobs/voice-packs?since=0" => (200, """{"id":"voice-packs","kind":"hotpatch-voice","version":"1.6","state":"running","error":null,"result":null,"lines":["voice packs: 186 files to fetch"],"next":1,"elapsed":0}"""),
             "/jobs/voice-packs?since=1" => (200, """{"id":"voice-packs","kind":"hotpatch-voice","version":"1.6","state":"done","error":null,"result":{"voice":["English(US)","Japanese"],"fetched":186,"bytes":7614579868,"purged":["Korean"]},"lines":["voice packs: done"],"next":2,"elapsed":1}"""),
             "/jobs/voice-none?since=0" => (200, """{"id":"voice-none","kind":"hotpatch-voice","version":"2.8","state":"done","error":null,"result":{"voice":[],"fetched":0,"bytes":0,"purged":[]},"lines":[],"next":0,"elapsed":0}"""),
@@ -4946,6 +10486,9 @@ static class AgentSpike
             "/jobs/prov-ok?since=0" => (200, """{"id":"prov-ok","kind":"provision","version":"1.6","state":"done","error":null,"result":{"provisioned":true,"progress":"fixes","defaultAccount":false,"txtFixes":"applied"},"lines":[],"next":0,"elapsed":0}"""),
             "/jobs/fetch-16?since=0" => (200, """{"id":"fetch-16","kind":"fetch","version":"1.6","state":"running","error":null,"result":null,"lines":["Downloading the 1.6 server package (1.87 GB) from archive.org"],"next":1,"elapsed":0}"""),
             "/jobs/fetch-16?since=1" => (200, """{"id":"fetch-16","kind":"fetch","version":"1.6","state":"done","error":null,"result":{"fetched":true,"downloaded":true,"bytes":1870180624,"healed":0,"execBits":12,"dir":"/home/1.6_live"},"lines":["Installed into /home/1.6_live."],"next":2,"elapsed":1}"""),
+            "/jobs/navmesh-28?since=0" => (200, """{"id":"navmesh-28","kind":"navmesh","version":"2.8","state":"done","error":null,"result":{"adopted":true,"archive":"navmesh.zip","files":55,"installed":55,"restarted":false,"note":"","downloaded":true},"lines":["Navmesh archive adopted: 55 files."],"next":1,"elapsed":1}"""),
+            "/jobs/navdata-28?since=0" => (200, """{"id":"navdata-28","kind":"navdata","version":"2.8","state":"running","error":null,"result":null,"lines":["Downloading the pathfinding data of 2.8 (643.0 MB)"],"next":1,"elapsed":0}"""),
+            "/jobs/navdata-28?since=1" => (200, """{"id":"navdata-28","kind":"navdata","version":"2.8","state":"done","error":null,"result":{"installed":828,"kept":0,"differs":0,"listUpdated":true,"restarted":false,"note":"The next Start loads the files.","downloaded":true},"lines":["828 files put in place."],"next":2,"elapsed":1}"""),
             "/jobs/acct-ok?since=0" => (200, """{"id":"acct-ok","kind":"accountcreate","version":"1.6","state":"done","error":null,"result":{"name":"friend1","uid":10042,"template":"post-gaa","nickname":"friend1","passwordVerify":true,"passwordGenerated":true,"password":"Gen3rated-Pw"},"lines":["Admin account creation: name=friend1 version=1.6 template=post-gaa"],"next":1,"elapsed":1}"""),
             "/jobs/reloc-28?since=0" => (200, """{"id":"reloc-28","kind":"relocate","version":"2.8","state":"running","error":null,"result":null,"lines":["Copying the 2.8 server to C:\\relic_servers\\2.8_live (another drive)"],"next":1,"elapsed":0}"""),
             "/jobs/reloc-28?since=1" => (200, """{"id":"reloc-28","kind":"relocate","version":"2.8","state":"done","error":null,"result":{"version":"2.8","from":"D:\\servers\\2.8_live","to":"C:\\relic_servers\\2.8_live","mode":"move","moved":true,"crossVolume":true,"bytes":17000000000,"restarted":false},"lines":["GIO_DIR_28 saved; the old folder is deleted."],"next":2,"elapsed":1}"""),
@@ -4953,6 +10496,14 @@ static class AgentSpike
             "/jobs/tweaks-16?since=1" => (200, """{"id":"tweaks-16","kind":"tweaks","version":"1.6","state":"done","error":null,"result":{"version":"1.6","changed":3,"effect":"live","clamped":0},"lines":["The game server loaded the new settings."],"next":2,"elapsed":1}"""),
             "/jobs/tweaks-reset?since=0" => (200, """{"id":"tweaks-reset","kind":"tweaks","version":"1.6","state":"done","error":null,"result":{"version":"1.6","changed":3,"effect":"next-start","clamped":0},"lines":[],"next":0,"elapsed":0}"""),
             "/jobs/tweaks-refused?since=0" => (200, """{"id":"tweaks-refused","kind":"tweaks","version":"2.8","state":"error","error":"The server refused the new settings: RewardData.txt was not loaded. The previous settings are back in place.","result":null,"lines":[],"next":0,"elapsed":0}"""),
+            "/jobs/tweaks-files?since=0" => (200, """{"id":"tweaks-files","kind":"tweaks","version":"1.6","state":"done","error":null,"result":{"version":"1.6","changed":2,"effect":"live","clamped":0,"blocked":[]},"lines":["Gameplay settings: Revert of the Resin and Quest rewards cards -- 2 files are the originals again."],"next":1,"elapsed":1}"""),
+            // The agent's last jobs, each snapshot whole as the agent hands it out — the account creation's result
+            // carries the password the server generated, which the launcher must never pass on.
+            "/jobs" when !_jobsMissing => (200, """{"jobs":[{"id":"acct-ok","kind":"accountcreate","version":"1.6","state":"done","error":null,"result":{"name":"friend1","password":"Gen3rated-Pw"},"lines":[],"next":1,"elapsed":1},{"id":"fetch-16","kind":"fetch","version":"1.6","state":"running","error":null,"result":null,"lines":[],"next":7,"elapsed":12.5}]}"""),
+            // \udce9 is the agent's own escape of an undecodable byte (0xE9) of a file name: a lone surrogate.
+            "/jobs/events-odd?since=0" => (200, """{"id":"events-odd","kind":"events","version":"1.6","state":"running","error":null,"result":null,"lines":["Events: skipped /home/1.6_live/server/data/caf\udce9.lua (not in the list)"],"next":1,"elapsed":0}"""),
+            "/jobs/events-odd?since=1" => (200, """{"id":"events-odd","kind":"events","version":"1.6","state":"done","error":null,"result":{"version":"1.6"},"lines":["Events re-applied."],"next":2,"elapsed":1}"""),
+            "/jobs/netfix-odd?since=0" => (200, """{"id":"netfix-odd","kind":"netfix","version":"1.6","state":"error","error":"Cannot rewrite /home/1.6_live/server/caf\udce9.xml: Permission denied","result":null,"lines":[],"next":0,"elapsed":0}"""),
             _ => null,
         };
     }
@@ -4984,15 +10535,34 @@ static class AgentSpike
     /// <summary>True = the stub plays an agent without the gameplay settings routes: GET and POST /server/tweaks
     /// fall through to its plain 404.</summary>
     static volatile bool _tweaksMissing;
+    /// <summary>True = the stub plays an agent without the job list: GET /jobs falls through to its plain 404.</summary>
+    static volatile bool _jobsMissing;
+    /// <summary>True = the stub plays an agent whose POST /server/tweaks only applies documents: a stop request,
+    /// a Revert and a Reset (no document in them) get its 400.</summary>
+    static volatile bool _tweaksStopMissing;
 
     /// <summary>GET/POST /server/tweaks the way the agent answers. GET: the state of version "1.6", a 400 for
     /// any other version (the route never answers 404 itself). POST: a 400 naming the path for a document
     /// the agent refuses (here: a resin cap sent as text), else 202 + a job id that names the scenario — the
     /// empty document is done at once, version "2.8" ends in an error (the game server refused the files),
-    /// version "0.0" gets a job id the stub never answers for (the agent that restarted and forgot the job).</summary>
+    /// version "0.0" gets a job id the stub never answers for (the agent that restarted and forgot the job); a
+    /// Revert / a Reset of cards is a job of its own ("tweaks-files"), version "2.8" again the refused one.</summary>
     static (int code, string json)? TweaksReply(string method, string path, string body)
     {
         if (_tweaksMissing) return null;
+        const string onlyDocuments = """{"error":"tweaks is required: the whole settings document ({} puts every original value back)"}""";
+        // A stop request (a body with "cancel") is never a job: {ok, stopping} at once — false for version
+        // "2.8" (no such job of that version runs). _tweaksStopMissing plays an agent whose route only applies
+        // documents: its 400 for a body without one.
+        if (method == "POST" && body.Contains("\"cancel\":"))
+            return _tweaksStopMissing ? (400, onlyDocuments)
+                : body.Contains("\"2.8\"") ? (200, """{"ok":true,"stopping":false}""") : (200, """{"ok":true,"stopping":true}""");
+        if (method == "POST" && !body.Contains("\"tweaks\":"))
+        {
+            if (_tweaksStopMissing) return (400, onlyDocuments);
+            string files = body.Contains("\"2.8\"") ? "tweaks-refused" : "tweaks-files";
+            return (202, $$"""{"ok":true,"async":true,"job":"{{files}}","kind":"tweaks"}""");
+        }
         if (method == "GET")
             return path == "/server/tweaks?version=1.6"
                 ? (200, """{"version":"1.6","available":true,"present":true,"running":true,"tweaks":{"resin":{"cap":300}},"active":{"resin":{"cap":300}},"pending":false,"refused":null,"unconfirmed":false,"sections":{"resin":{"ok":true},"abyss":{"ok":true,"files":[]},"domains":{"ok":true},"quests":{"ok":false,"why":"changed","files":["server/data/txt/RewardData.txt"]}},"limits":{"multiplierMax":10,"extraMax":8,"customMax":200,"resinCap":[1,2000],"minutes":[1,1440],"level":[1,199],"cost":[1,200]},"resin":{"cap":160,"minutes":8,"hardMax":2000}}""")
@@ -5002,6 +10572,40 @@ static class AgentSpike
         string id = body.Contains("\"0.0\"") ? "tweaks-gone" : body.Contains("\"2.8\"") ? "tweaks-refused"
             : body.Contains("\"tweaks\":{}") ? "tweaks-reset" : "tweaks-16";
         return (202, $$"""{"ok":true,"async":true,"job":"{{id}}","kind":"tweaks"}""");
+    }
+
+    /// <summary>GET /server/accounts the way the agent answers it. Version "2.8": one page whose answer and rows carry
+    /// fields the route never documents (an e-mail, a password hash, an address, a device, a token, a stack path), a row
+    /// whose sdkUid is no whole number, a guest and an account without a game uid. limit=0 is a malformed query, refused
+    /// with the route's 400 before it reads anything — what AgentClient's probe gets before any copy but the plain one.
+    /// Version "9.9": another read under way (409), the probe included — an answer the probe must read as the route
+    /// being there as well; version "0.0": an agent without the route (null: the stub's plain 404); version "7.7": a read
+    /// that takes three seconds (the caller gives up first); any other version: no stack of it here (409). The route
+    /// itself never answers 404.</summary>
+    static (int code, string json)? AccountsReply(string path)
+    {
+        if (path.Contains("version=0.0", StringComparison.Ordinal)) return null;
+        if (path.Contains("version=7.7", StringComparison.Ordinal))
+        {
+            Thread.Sleep(3000);
+            return (409, """{"error":"Version 7.7 is not installed on this server."}""");
+        }
+        if (path.Contains("version=9.9", StringComparison.Ordinal))
+            return (409, """{"error":"The account list is being read for another request -- try again in a moment."}""");
+        if (System.Text.RegularExpressions.Regex.IsMatch(path, @"[?&]limit=0(?:&|$)"))
+            return (400, """{"error":"limit must be a whole number from 1 to 500."}""");
+        if (!path.Contains("version=2.8", StringComparison.Ordinal))
+            return (409, """{"error":"Version 1.6 is not installed on this server."}""");
+        return (200, """
+            {"version":"2.8","running":true,"asOf":"2026-10-17T12:00:00Z","total":4,"matched":4,"withCharacter":2,"online":1,"characters":"ok","presence":"ok","next":1004,
+             "dir":"/home/2.8_live","token":"SPIKETOKEN-0123456789abcdef","email":"admin@example.com",
+             "accounts":[
+              {"name":"Alice","sdkUid":1001,"guest":false,"created":"2026-09-01T10:00:00Z","lastLogin":"2026-10-17T11:50:00Z","uid":3,"uidCreated":"2026-09-01T10:00:00Z","nickname":"Lumine","level":22,"lastSave":"2026-10-17T11:55:00Z","online":true,"presenceStale":false,"origin":"signup","email":"alice@relic.local","passwordHash":"$2b$12$abcdefghijklmnopqrstuv","ip":"192.0.2.44","deviceId":"dev-0123"},
+              {"name":null,"sdkUid":1002,"guest":true,"created":"2026-10-01T10:00:00Z","lastLogin":"2026-10-10T07:00:00Z","uid":7,"uidCreated":"2026-10-01T10:00:00Z","nickname":"Guesty","level":5,"lastSave":"2026-10-10T08:00:00Z","online":false,"presenceStale":false,"origin":"other"},
+              {"name":"Mallory","sdkUid":"1003","guest":false,"origin":"other"},
+              {"name":"Carol","sdkUid":1004,"guest":false,"created":"2026-10-16T10:00:00Z","lastLogin":null,"uid":null,"uidCreated":null,"nickname":null,"level":null,"lastSave":null,"online":null,"presenceStale":null,"origin":"relic","path":"/home/2.8_live/sdk/data/sdk.db"}
+             ]}
+            """);
     }
 
     // ── stub state: the process start epoch /agent/config reports, and a restart in progress ──
@@ -5174,27 +10778,160 @@ static class CommandsSpike
         var gd = Relic.Core.Server.GameData.Load(gdPath);
         Check($"gamedata: the shipped catalogue loads from {gdPath ?? "(not found)"} ({gd.Avatars.Count} avatars, {gd.Weapons.Count} weapons, {gd.ArtifactSets.Count} sets)",
             gd.Avatars.Count > 0 && gd.Weapons.Count > 0 && gd.ArtifactSets.Count > 0);
-        Check("gamedata: versionOrder names both shipped versions", gd.VersionOrder.Contains("1.6") && gd.VersionOrder.Contains("2.8"));
-        foreach (string ver in new[] { "1.6", "2.8" })
+        // One list of pins builds both display catalogues (build/make_catalog.py VERSIONS): the commands
+        // catalogue's version order is the Gameplay catalogue's. Not the launcher's version list: a version may
+        // be added without a commands catalogue (the numeric-id fallback, GameData.Covers).
+        string? tdPath = FindUp("config/tweakdata.json");
+        var tdOrder = new List<string>();
+        try
+        {
+            if (tdPath is not null)
+            {
+                using var tdDoc = JsonDocument.Parse(File.ReadAllText(tdPath));
+                if (tdDoc.RootElement.TryGetProperty("versionOrder", out var tdv) && tdv.ValueKind == JsonValueKind.Array)
+                    tdOrder = tdv.EnumerateArray().Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() ?? "" : "").ToList();
+            }
+        }
+        catch (JsonException) { /* the tweakdata checks below say why */ }
+        Check($"gamedata: versionOrder is the display catalogue's (config/tweakdata.json) — one list of pins builds both ({string.Join(", ", gd.VersionOrder)})",
+            gd.VersionOrder.Count > 0 && gd.VersionOrder.SequenceEqual(tdOrder));
+        // What the screen draws for a row has to ship with the build: a character's splash tile, the icon of a
+        // weapon and of every piece of a set — a name without its file is a broken tile.
+        string? repoRoot = gdPath is null ? null : Path.GetDirectoryName(Path.GetDirectoryName(gdPath));
+        string splashDir = Path.Combine(repoRoot ?? "", "app", "Relic.App", "ui", "assets", "splash");
+        string cmdIconsDir = Path.Combine(repoRoot ?? "", "app", "Relic.App", "ui", "assets", "icons");
+        static bool FileName(string s) => s.Length > 0 && s.IndexOfAny(Path.GetInvalidFileNameChars()) < 0;
+        var noSplash = gd.Avatars.Where(a => !FileName(a.Splash) || !File.Exists(Path.Combine(splashDir, a.Splash)))
+            .Select(a => $"{a.Id} {a.Name}").ToList();
+        Check($"gamedata: every character names a splash tile the build ships ({gd.Avatars.Count})"
+              + (noSplash.Count > 0 ? $" — {noSplash.Count} without, e.g. {string.Join(", ", noSplash.Take(5))}" : ""),
+            gd.Avatars.Count > 0 && noSplash.Count == 0);
+        var noIcon = gd.Weapons.Where(w => !FileName(w.Icon) || !File.Exists(Path.Combine(cmdIconsDir, w.Icon + ".webp"))).Select(w => $"weapon {w.Id}")
+            .Concat(gd.ArtifactSets.SelectMany(s => s.Pieces.Where(p => !FileName(p.Icon) || !File.Exists(Path.Combine(cmdIconsDir, p.Icon + ".webp")))
+                .Select(p => $"set {s.SetId} piece {p.Id}"))).ToList();
+        Check($"gamedata: every weapon and every set piece names an icon the build ships ({gd.Weapons.Count} weapons, {gd.ArtifactSets.Sum(s => s.Pieces.Count)} pieces)"
+              + (noIcon.Count > 0 ? $" — {noIcon.Count} without, e.g. {string.Join(", ", noIcon.Take(5))}" : ""),
+            gd.Weapons.Count > 0 && noIcon.Count == 0);
+        // One section of an answer of ForVersion (it answers an anonymous object, as the bridge sends it).
+        static System.Collections.IList Part(object answer, string section) =>
+            (System.Collections.IList)answer.GetType().GetProperty(section)!.GetValue(answer)!;
+        int avatarsBefore = 0;
+        foreach (string ver in gd.VersionOrder)
         {
             var forV = gd.ForVersion(ver);
-            var t = forV.GetType();
-            int na = ((System.Collections.ICollection)t.GetProperty("avatars")!.GetValue(forV)!).Count;
-            int nw = ((System.Collections.ICollection)t.GetProperty("weapons")!.GetValue(forV)!).Count;
-            int ns = ((System.Collections.ICollection)t.GetProperty("artifactSets")!.GetValue(forV)!).Count;
+            int na = Part(forV, "avatars").Count, nw = Part(forV, "weapons").Count, ns = Part(forV, "artifactSets").Count;
             Check($"gamedata: version {ver} gets a non-empty catalogue ({na}/{nw}/{ns})", na > 0 && nw > 0 && ns > 0);
+            // A later version of the order sees everything an earlier one sees, and more.
+            Check($"gamedata: version {ver} sees at least what the version before it sees ({na} >= {avatarsBefore})", na >= avatarsBefore);
+            avatarsBefore = na;
         }
-        // 2.8 is the later version: it must see everything 1.6 sees and more.
-        var g16 = gd.ForVersion("1.6"); var g28 = gd.ForVersion("2.8");
-        int a16 = ((System.Collections.ICollection)g16.GetType().GetProperty("avatars")!.GetValue(g16)!).Count;
-        int a28 = ((System.Collections.ICollection)g28.GetType().GetProperty("avatars")!.GetValue(g28)!).Count;
-        Check($"gamedata: 2.8 is a superset of 1.6 ({a28} >= {a16})", a28 >= a16);
+        // Whether the catalogue describes a version at all (covered): the versions of its order do, one that
+        // neither its order nor the skins table names does not — its lists stay the permissive whole, which
+        // the screen does not take (it says the catalogue is not available for that version). A request
+        // that names no version is answered in full.
+        static bool CoveredOf(object answer) => (bool)answer.GetType().GetProperty("covered")!.GetValue(answer)!;
+        Check("gamedata: covered — every version of the catalogue's order yes, a version neither the order nor the skins table names no, no version asked yes; the answer says what Covers says",
+            gd.VersionOrder.All(v => gd.Covers(v) && CoveredOf(gd.ForVersion(v)))
+            && !gd.Covers("9.9") && !CoveredOf(gd.ForVersion("9.9")) && Part(gd.ForVersion("9.9"), "avatars").Count == gd.Avatars.Count
+            && gd.Covers("") && CoveredOf(gd.ForVersion("")));
+        var uncovered = ServerVersions.All.Where(v => !gd.Covers(v)).ToList();
+        Check($"gamedata: of the launcher's versions the shipped catalogue covers the ones its order names (not covered: {(uncovered.Count > 0 ? string.Join(", ", uncovered) : "none")})",
+            ServerVersions.All.All(v => gd.Covers(v) == gd.VersionOrder.Contains(v)));
 
-        // The display catalogue BEHIND the Gameplay page: names and sprite names for the ids the agent
-        // answers with. The page draws "#id" and a placeholder tile for whatever the file lacks, so an empty
-        // section, or a sprite name without its file, ships as a page of bare numbers with no other clue.
-        // The repo copy again, found upwards; the app reads the copy the csproj puts next to the exe.
-        string? tdPath = FindUp("config/tweakdata.json");
+        // The skins of the command screen: the backend's list, filtered by the rule that filters the
+        // pickers (the page holds no table of its own and compares no version). Every row carries the
+        // item id the server turns into a costume, the character and the version it first exists in.
+        static int[] CostumeIds(object answer) =>
+            Part(answer, "costumes").Cast<Relic.Core.Server.GameData.CostumeEntry>().Select(c => c.Id).ToArray();
+        var allCostumes = Relic.Core.Server.GameData.Costumes;
+        Check($"costumes: {allCostumes.Count} rows with distinct item ids, a character, a name and a `since` the catalogue's version order knows",
+            allCostumes.Count == 10 && allCostumes.Select(c => c.Id).Distinct().Count() == allCostumes.Count
+            && allCostumes.All(c => c.Id > 0 && c.Character.Length > 0 && c.Name.Length > 0 && gd.VersionOrder.Contains(c.Since)));
+        Check("costumes: the first version of the order has the skins that came with it, a later one has every skin so far",
+            CostumeIds(gd.ForVersion("1.6")).SequenceEqual(new[] { 340000, 340001 })
+            && CostumeIds(gd.ForVersion("2.8")).SequenceEqual(Enumerable.Range(340000, 10)));
+        int costumesBefore = 0;
+        bool costumesGrow = true;
+        foreach (string ver in gd.VersionOrder)
+        {
+            int n = CostumeIds(gd.ForVersion(ver)).Length;
+            costumesGrow &= n >= costumesBefore && n > 0;
+            costumesBefore = n;
+        }
+        Check("costumes: every version of the order has skins, and never fewer than the version before it", costumesGrow);
+        Check("costumes: a version the catalogue does not know, and no version at all, get the whole list (the rule is permissive)",
+            CostumeIds(gd.ForVersion("9.9")).Length == allCostumes.Count && CostumeIds(gd.ForVersion("")).Length == allCostumes.Count);
+        // The table knows the order of the versions its rows name, so what such a version gets does not
+        // hang on the catalogue FILE: one without a version order (none at all, or the first schema's flat
+        // name maps), one whose order leaves the asked version out and one whose order knows only the
+        // asked version all answer what the shipped catalogue answers. A version the table does not name
+        // still gets the whole list from every one of them.
+        var skinVersions = allCostumes.Select(c => c.Since).Distinct().ToList();
+        Check($"costumes: the versions the rows name ({string.Join(", ", skinVersions)}) come in the catalogue's order",
+            skinVersions.Count > 0 && skinVersions.SequenceEqual(gd.VersionOrder.Where(skinVersions.Contains)));
+        string gdTmp = Path.Combine(Path.GetTempPath(), "relic-spike-gamedata-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(gdTmp);
+        try
+        {
+            Relic.Core.Server.GameData FromFile(string name, string json)
+            {
+                string path = Path.Combine(gdTmp, name);
+                File.WriteAllText(path, json);
+                return Relic.Core.Server.GameData.Load(path);
+            }
+            var orderless = new (string What, Relic.Core.Server.GameData Data)[]
+            {
+                ("no file", new Relic.Core.Server.GameData()),
+                ("flat name maps", FromFile("legacy.json", """{ "avatars": { "Amber": 10000021, "amber": 10000021 }, "weapons": { "Skyward Blade": 11502 } }""")),
+                ("an unparsable file", FromFile("broken.json", "{ not json")),
+            };
+            Check("costumes: a catalogue without a version order — no file, the flat name maps, an unparsable file — gives every version the rows name the skins the shipped catalogue gives it",
+                orderless[1].Data.Avatars.Count == 1 && orderless[1].Data.VersionOrder.Count == 0
+                && orderless.All(o => skinVersions.All(v => CostumeIds(o.Data.ForVersion(v)).SequenceEqual(CostumeIds(gd.ForVersion(v))))));
+            Check("costumes: so does a version order that names one version alone, whichever version is asked",
+                skinVersions.All(only =>
+                {
+                    var one = FromFile("one.json", System.Text.Json.JsonSerializer.Serialize(new { versionOrder = new[] { only } }));
+                    return one.VersionOrder.SequenceEqual(new[] { only })
+                        && skinVersions.All(v => CostumeIds(one.ForVersion(v)).SequenceEqual(CostumeIds(gd.ForVersion(v))));
+                }));
+            Check("costumes: a version the rows do not name gets the whole list from each of them (nothing can empty the card)",
+                orderless.All(o => CostumeIds(o.Data.ForVersion("9.9")).Length == allCostumes.Count && CostumeIds(o.Data.ForVersion("")).Length == allCostumes.Count));
+            // A catalogue without a version order ties nothing to a version: it covers every one. One whose
+            // order leaves out a version the skins table names still covers that version (it has its skins).
+            var coverOne = FromFile("cover-one.json", System.Text.Json.JsonSerializer.Serialize(new { versionOrder = new[] { skinVersions[0] } }));
+            Check("gamedata: covered — a catalogue without a version order covers every version; one whose order names a single version covers the versions the skins table names and no other",
+                orderless.All(o => o.Data.Covers("9.9") && CoveredOf(o.Data.ForVersion("9.9")) && skinVersions.All(o.Data.Covers))
+                && skinVersions.All(coverOne.Covers) && !coverOne.Covers("9.9"));
+            // ...and where the catalogue's order does place such a version, that order decides: right
+            // after the first version of the rows it has that version's skins and no later one's.
+            var between = FromFile("between.json", System.Text.Json.JsonSerializer.Serialize(
+                new { versionOrder = new[] { skinVersions[0], "9.9" }.Concat(skinVersions.Skip(1)).ToArray() }));
+            Check("costumes: a version the rows do not name is placed by the catalogue's order — after the first of theirs it has that one's skins only",
+                skinVersions.Count >= 2 && CostumeIds(between.ForVersion("9.9")).SequenceEqual(CostumeIds(gd.ForVersion(skinVersions[0])))
+                && CostumeIds(between.ForVersion(skinVersions[^1])).Length == allCostumes.Count);
+        }
+        finally
+        {
+            try { Directory.Delete(gdTmp, true); } catch { /* best effort */ }
+        }
+        Check("costumes: each row goes out as the one item command", allCostumes.All(c => GmCommands.GiveCostume(c.Id) == $"item add {c.Id} 1"));
+        string? uiJsPath = FindUp("app/Relic.App/ui/app.js");
+        string cmdUiJs = uiJsPath is null ? "" : File.ReadAllText(uiJsPath);
+        Check("costumes: the page draws the backend's list (gamedata.forVersion `costumes`) and keeps no table or version test of its own",
+            cmdUiJs.Contains("const costumes = normList(d && d.costumes, normCostume);", StringComparison.Ordinal)
+            && cmdUiJs.Contains("const list = S.gd.costumes || [];", StringComparison.Ordinal)
+            && !cmdUiJs.Contains("const COSTUMES", StringComparison.Ordinal) && !cmdUiJs.Contains("c.since ===", StringComparison.Ordinal)
+            && !cmdUiJs.Contains("versionOrder", StringComparison.Ordinal));
+        Check("gamedata: the page takes no list of an answer that says covered: false — it reads as an empty catalogue (\"not available\", the numeric-id inputs)",
+            cmdUiJs.Contains("const reply = await rpc('gamedata.forVersion', { version });", StringComparison.Ordinal)
+            && cmdUiJs.Contains("const d = reply && reply.covered === false ? null : reply;", StringComparison.Ordinal)
+            && L.Has("cmd.catalog.unavailable"));
+
+        // The display catalogue BEHIND the gameplay settings (Game rules tab): names and sprite names for the ids
+        // the agent answers with. The page draws "#id" and a placeholder tile for whatever the file lacks, so an
+        // empty section, or a sprite name without its file, ships as a page of bare numbers with no other clue.
+        // The repo copy again, found upwards (tdPath, above); the app reads the copy the csproj puts next to the exe.
         var td = TweakData.Load(tdPath);
         Check($"tweakdata: the shipped catalogue loads from {tdPath ?? "(not found)"} (status {td.Status}{(td.Error is null ? "" : ": " + td.Error)})",
             td.Status == TweakData.StatusOk);
@@ -5243,6 +10980,119 @@ static class CommandsSpike
         Check($"tweakdata: every item 1100..1199 ({constellations.Count}) is group \"constellation\""
               + (constellationsOff.Count > 0 ? $" — {constellationsOff.Count} off, e.g. {string.Join(", ", constellationsOff.Take(5))}" : ""),
             constellations.Count > 0 && constellationsOff.Count == 0);
+        // The ids the agent's own catalogues (agent/payloads/<v>/tweaks.json) hand the gameplay settings (Game rules
+        // tab): every domain and every monster — offered, or held by a spawn slot of an Abyss chamber or a domain's
+        // line-up — has a row with its name; one without is drawn as a bare "#id". Items and quests of the
+        // vendor's test data may lack one (the build's own report names them); domains and monsters may not.
+        HashSet<long> RowIds(string section) => Entries(section)
+            .Where(e => e.ValueKind == JsonValueKind.Object && e.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number)
+            .Select(e => e.GetProperty("id").GetInt64()).ToHashSet();
+        var domainRows = RowIds("domains");
+        var monsterRows = RowIds("monsters");
+        static IEnumerable<long> Ids(IEnumerable<string> keys) => keys.Select(k => long.TryParse(k, out var n) ? n : -1);
+        static IEnumerable<string> Keys(JsonElement o) =>
+            o.ValueKind == JsonValueKind.Object ? o.EnumerateObject().Select(p => p.Name) : Enumerable.Empty<string>();
+        static IEnumerable<JsonElement> Values(JsonElement o) =>
+            o.ValueKind == JsonValueKind.Object ? o.EnumerateObject().Select(p => p.Value) : Enumerable.Empty<JsonElement>();
+        static IEnumerable<JsonElement> Items(JsonElement a) =>
+            a.ValueKind == JsonValueKind.Array ? a.EnumerateArray() : Enumerable.Empty<JsonElement>();
+        static IEnumerable<long> SlotMonsters(JsonElement slots) =>
+            Values(slots).Where(v => v.ValueKind == JsonValueKind.Number).Select(v => v.GetInt64());
+        static JsonElement Prop(JsonElement o, string name) =>
+            o.ValueKind == JsonValueKind.Object && o.TryGetProperty(name, out var v) ? v : default;
+        string payloadsDir = Path.Combine(repoDir ?? "", "agent", "payloads");
+        var agentCatalogues = Directory.Exists(payloadsDir)
+            ? Directory.GetDirectories(payloadsDir).Select(d => Path.Combine(d, "tweaks.json")).Where(File.Exists).OrderBy(p => p, StringComparer.Ordinal).ToList()
+            : new List<string>();
+        var catalogueGaps = new List<string>();
+        int domainsSeen = 0, monstersSeen = 0;
+        // A domain's tile on the page is the sprite of the first item its preview names that is no virtual
+        // reward (TW_REWARD_VIRTUAL of the page: Mora, adventure EXP, ...) — an item filed outside the reward
+        // palette has none, and the domain is drawn with its initial instead.
+        var virtualRewards = System.Text.RegularExpressions.Regex.Match(cmdUiJs, @"const TW_REWARD_VIRTUAL = \[([^\]]*)\];");
+        var virtualIds = virtualRewards.Success
+            ? virtualRewards.Groups[1].Value.Split(',').Select(s => long.TryParse(s.Trim(), out var n) ? n : -1).Where(n => n >= 0).ToHashSet()
+            : new HashSet<long>();
+        var itemIcon = tdItems.GroupBy(e => e.GetProperty("id").GetInt64()).ToDictionary(g => g.Key, g => IconOf(g.First()));
+        var tileGaps = new List<string>();
+        int tilesSeen = 0;
+        foreach (string catPath in agentCatalogues)
+        {
+            string ver = Path.GetFileName(Path.GetDirectoryName(catPath)) ?? "?";
+            try
+            {
+                using var cat = JsonDocument.Parse(File.ReadAllText(catPath));
+                var root = cat.RootElement;
+                var noTile = new List<string>();
+                foreach (var dom in Prop(Prop(root, "domains"), "list") is { ValueKind: JsonValueKind.Object } domList ? domList.EnumerateObject() : Enumerable.Empty<JsonProperty>())
+                {
+                    long gives = Items(Prop(dom.Value, "preview"))
+                        .Select(p => p.ValueKind == JsonValueKind.Array && p.GetArrayLength() > 0 && p[0].TryGetInt64(out var id) ? id : -1)
+                        .FirstOrDefault(id => id >= 0 && !virtualIds.Contains(id), -1);
+                    tilesSeen++;
+                    if (gives < 0 || !itemIcon.TryGetValue(gives, out var tileIcon) || tileIcon.Length == 0 || !File.Exists(Path.Combine(iconsDir, tileIcon + ".webp")))
+                        noTile.Add($"{dom.Name}:{gives}");
+                }
+                if (noTile.Count > 0) tileGaps.Add($"{ver}: {noTile.Count}, e.g. {string.Join(", ", noTile.Take(5))}");
+                var domains = Ids(Keys(Prop(Prop(root, "domains"), "list"))).ToHashSet();
+                var monsters = Ids(Keys(Prop(root, "monsters"))).ToHashSet();
+                foreach (var ch in Values(Prop(Prop(root, "abyss"), "chambers")))
+                    foreach (var half in Items(Prop(ch, "halves")))
+                        monsters.UnionWith(SlotMonsters(Prop(half, "slots")));
+                foreach (var lu in Values(Prop(Prop(root, "domains"), "lineups")))
+                    monsters.UnionWith(SlotMonsters(Prop(lu, "slots")));
+                domainsSeen += domains.Count; monstersSeen += monsters.Count;
+                var noDomain = domains.Where(i => !domainRows.Contains(i)).OrderBy(i => i).ToList();
+                var noMonster = monsters.Where(i => !monsterRows.Contains(i)).OrderBy(i => i).ToList();
+                if (domains.Count == 0 || monsters.Count == 0) catalogueGaps.Add($"{ver}: no domain or no monster listed");
+                if (noDomain.Count > 0) catalogueGaps.Add($"{ver}: {noDomain.Count} domains, e.g. {string.Join(", ", noDomain.Take(5))}");
+                if (noMonster.Count > 0) catalogueGaps.Add($"{ver}: {noMonster.Count} monsters, e.g. {string.Join(", ", noMonster.Take(5))}");
+            }
+            catch (JsonException ex) { catalogueGaps.Add($"{ver}: unreadable ({ex.Message})"); }
+        }
+        Check($"tweakdata: every domain and every monster of each shipped agent catalogue has a display row "
+              + $"({string.Join(", ", agentCatalogues.Select(p => Path.GetFileName(Path.GetDirectoryName(p))))}: {domainsSeen} domains, {monstersSeen} monsters)"
+              + (catalogueGaps.Count > 0 ? " — without: " + string.Join("; ", catalogueGaps) : ""),
+            agentCatalogues.Count > 0 && catalogueGaps.Count == 0);
+        Check($"tweakdata: every domain of each shipped agent catalogue draws the sprite of its reward on its tile ({tilesSeen} domains; virtual rewards {string.Join(", ", virtualIds.Order())})"
+              + (tileGaps.Count > 0 ? " — without: " + string.Join("; ", tileGaps) : ""),
+            virtualIds.Count > 0 && tilesSeen > 0 && tileGaps.Count == 0);
+        // The rewards of the hangout events: a reward row of the kind "hangout" names its event's CHAPTER (the id
+        // the page lists the event's rewards under), and the display catalogue names that chapter as a quest of the
+        // type "hangout" — the event's own name ("Hangout Event: Barbara - Act I: …"); without the row the page
+        // draws the event as a bare "#id".
+        var questRows = Entries("quests")
+            .Where(e => e.ValueKind == JsonValueKind.Object && e.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number)
+            .GroupBy(e => e.GetProperty("id").GetInt64()).ToDictionary(g => g.Key, g => g.First());
+        var hangoutGaps = new List<string>();
+        int hangoutRewards = 0;
+        foreach (string catPath in agentCatalogues)
+        {
+            string ver = Path.GetFileName(Path.GetDirectoryName(catPath)) ?? "?";
+            try
+            {
+                using var cat = JsonDocument.Parse(File.ReadAllText(catPath));
+                var off = new SortedSet<string>();
+                foreach (var reward in Values(Prop(Prop(cat.RootElement, "quests"), "rewards")))
+                {
+                    var rewardKind = Prop(reward, "kind");
+                    if (rewardKind.ValueKind != JsonValueKind.String || rewardKind.GetString() != "hangout") continue;
+                    hangoutRewards++;
+                    foreach (var q in Items(Prop(reward, "quests")))
+                    {
+                        long id = q.TryGetInt64(out var n) ? n : -1;
+                        bool named = questRows.TryGetValue(id, out var row) && Prop(row, "type") is { ValueKind: JsonValueKind.String } type && type.GetString() == "hangout"
+                            && Prop(row, "name") is { ValueKind: JsonValueKind.String } name && (name.GetString() ?? "").Length > 0;
+                        if (!named) off.Add(id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    }
+                }
+                if (off.Count > 0) hangoutGaps.Add($"{ver}: {off.Count}, e.g. {string.Join(", ", off.Take(5))}");
+            }
+            catch (JsonException ex) { hangoutGaps.Add($"{ver}: unreadable ({ex.Message})"); }
+        }
+        Check($"tweakdata: every hangout reward of each shipped agent catalogue names a chapter the display catalogue lists as a named quest of the type \"hangout\" ({hangoutRewards} rewards)"
+              + (hangoutGaps.Count > 0 ? " — without: " + string.Join("; ", hangoutGaps) : ""),
+            hangoutRewards > 0 && hangoutGaps.Count == 0);
         // The loader itself: a build without the file, or with one that cannot be used, answers with a status
         // for the page to show its note — never a throw — and the rpc reply carries exactly the keys that apply.
         string tdTmp = Path.Combine(Path.GetTempPath(), $"relic_spike_tweakdata_{Environment.ProcessId}.json");
@@ -5716,8 +11566,15 @@ static class StateSpike
 /// sha256, a manifest that is present but unparsable, a dst escaping the game dir on a non-required
 /// entry, and a game dir that is a bare drive root.
 ///
+/// Kind "bytepatch" — bytes written into a file the game folder already holds — is proven on a 64 KiB
+/// stand-in: only the unmodified file is written into, through a verified copy; everything else is
+/// refused under its own text with the bytes left as they were. The client identity
+/// (<see cref="ClientIdentity"/>) is proven on synthetic pkg_version files, with the guard that keeps
+/// one version's files out of a folder that holds another.
+///
 /// Everything runs against a SYNTHETIC payload root + manifest in a temp dir — kilobytes, not the
-/// real 48 MB metadata — so the spike is fast and touches no install.
+/// real 48 MB metadata — so the spike is fast and touches no install. The last checks only READ the
+/// shipped payload/manifest.json.
 /// </summary>
 static class PatchSpike
 {
@@ -5960,6 +11817,12 @@ static class PatchSpike
             Check("Enhancements.Resolve on the patched dir: 1 dll, 0 missing (unshipped never counts as missing)",
                 ee55.Enabled && ee55.Shipped && ee55.Dlls.Count == 1 && ee55.Missing.Count == 0
                 && string.Equals(ee55.Dlls[0], eeDst55, StringComparison.OrdinalIgnoreCase));
+
+            BytePatchChecks(tmp, payload, Check);
+            IdentityChecks(tmp, payload, empty, broken, Check);
+            ReplaceEntryChecks(tmp, payload, empty, broken, Check);
+            RealManifestChecks(Check);
+            LaunchSupportChecks(tmp, Check);
         }
         finally
         {
@@ -5970,6 +11833,913 @@ static class PatchSpike
         Console.WriteLine();
         Console.WriteLine($"patch spike: {results.Count - fail}/{results.Count} checks passed");
         return fail == 0 ? 0 : 1;
+    }
+
+    const string BpVersion = "7.7";
+    const string BpDst = "GenshinImpact_Data/Native/UserAssembly.dll";
+    const string BpSrc = "7.7/UserAssembly.span.bin";
+
+    /// <summary>
+    /// Kind "bytepatch": a run of bytes written into a file the game folder already holds. The stand-in
+    /// for the game's file is 64 KiB with a span that straddles a 512-byte sector — the case an in-place
+    /// write could tear. Every refusal is pinned to its own text AND to the bytes staying as they were.
+    /// </summary>
+    static void BytePatchChecks(string tmp, string copyPayload, Action<string, bool> Check)
+    {
+        const int size = 64 * 1024, offset = 3900, length = 300;
+        byte[] original = new byte[size];
+        for (int i = 0; i < size; i++) original[i] = (byte)(i * 31 + 7);
+        byte[] span = new byte[length];
+        for (int i = 0; i < length; i++) span[i] = (byte)(original[offset + i] ^ 0x5A);
+        byte[] patched = (byte[])original.Clone();
+        span.CopyTo(patched, offset);
+        string shaBefore = ShaOf(original), shaAfter = ShaOf(patched);
+        string spanBefore = ShaOf(original.AsSpan(offset, length).ToArray()), spanAfter = ShaOf(span);
+
+        string Entry(string kind = GamePatcher.BytePatchKind, long atOffset = offset, string? sha = null,
+            string? spanSha = null, bool required = true) => $$"""
+            { "kind": "{{kind}}", "src": "{{BpSrc}}", "dst": "{{BpDst}}",
+              "size": {{size}}, "offset": {{atOffset}}, "length": {{length}},
+              "sha256Before": "{{shaBefore}}", "sha256": "{{sha ?? shaAfter}}",
+              "spanSha256Before": "{{spanBefore}}", "spanSha256": "{{spanSha ?? spanAfter}}",
+              "required": {{(required ? "true" : "false")}} }
+            """;
+        // A payload root whose manifest is "versions": { "7.7": [ entry ], <more> }; spanFile null = not shipped.
+        string Payload(string name, string entry, byte[]? spanFile, string more = "")
+        {
+            string root = Path.Combine(tmp, name);
+            Directory.CreateDirectory(Path.Combine(root, BpVersion));
+            if (spanFile is not null) File.WriteAllBytes(Path.Combine(root, BpSrc.Replace('/', Path.DirectorySeparatorChar)), spanFile);
+            File.WriteAllText(Path.Combine(root, "manifest.json"),
+                "{ \"versions\": { \"" + BpVersion + "\": [ " + entry + " ]" + more + " } }");
+            return root;
+        }
+        string FileOf(string dir) => Path.Combine(dir, BpDst.Replace('/', Path.DirectorySeparatorChar));
+        string Game(string name, byte[]? content)
+        {
+            string dir = Path.Combine(tmp, name);
+            Write(dir, "GenshinImpact.exe", "not really an exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(FileOf(dir))!);
+            if (content is not null) File.WriteAllBytes(FileOf(dir), content);
+            return dir;
+        }
+        bool Holds(string dir, byte[] bytes) =>
+            File.Exists(FileOf(dir)) && File.ReadAllBytes(FileOf(dir)).AsSpan().SequenceEqual(bytes);
+        bool NoLeftovers(string dir) =>
+            !File.Exists(FileOf(dir) + GamePatcher.BackupSuffix) && !File.Exists(FileOf(dir) + GamePatcher.TempSuffix);
+        bool Refused(string dir, string root, string message) =>
+            Catch(() => GamePatcher.Apply(BpVersion, dir, null, root)) is GamePatchException ex && ex.Message == message;
+
+        string notOriginal = L.T("core.patch.notOriginal", new { file = BpDst });
+        string targetMissing = L.T("core.patch.targetMissing", new { file = BpDst });
+        string payloadDamaged = L.T("core.patch.payloadDamaged", new { file = BpDst, src = BpSrc });
+        string patchMismatch = L.T("core.patch.patchMismatch", new { file = BpDst });
+        string unusable = L.T("core.patch.manifestUnreadable");
+        Check("bytepatch: every refusal has a text of its own that names the file",
+            new[] { "notOriginal", "targetMissing", "payloadDamaged", "patchMismatch" }.All(k => L.Has("core.patch." + k))
+            && new[] { notOriginal, targetMissing, payloadDamaged, patchMismatch, unusable }.Distinct().Count() == 5
+            && new[] { notOriginal, targetMissing, payloadDamaged, patchMismatch }.All(m => m.Contains(BpDst) && !m.Contains('{')));
+
+        string good = Payload("bp-payload", Entry(), span);
+        string game = Game("bp-game", original);
+        var plan = GamePatcher.PlanFor(BpVersion, good);
+        var copyPlan = GamePatcher.PlanFor("2.8", copyPayload);
+        Check("bytepatch: the plan carries the entry as the version's own; a common entry is not one",
+            plan.Count == 1 && plan[0].Kind == GamePatcher.BytePatchKind && plan[0].PerVersion
+            && plan[0].Size == size && plan[0].Offset == offset && plan[0].Length == length
+            && copyPlan.Count == 4 && !copyPlan[0].PerVersion && !copyPlan[1].PerVersion
+            && copyPlan[2].PerVersion && copyPlan[3].PerVersion && copyPlan.All(e => e.Kind.Length == 0));
+        Check("bytepatch: the original is not up to date", !GamePatcher.IsUpToDate(BpVersion, game, good));
+        var first = TryApply(BpVersion, game, good);
+        Check("bytepatch: original -> patched (the span written, every other byte as it was)",
+            first is not null && first.Applied.SequenceEqual(new[] { BpDst }) && Holds(game, patched));
+        Check("bytepatch: no .relic-orig and no .relic-tmp is left beside the file", NoLeftovers(game));
+        Check("bytepatch: up to date afterwards", GamePatcher.IsUpToDate(BpVersion, game, good));
+
+        DateTime written = File.GetLastWriteTimeUtc(FileOf(game));
+        var second = TryApply(BpVersion, game, good);
+        Check("bytepatch: a second run changes nothing (already current, the file not rewritten)",
+            second is not null && !second.Changed && second.AlreadyCurrent.SequenceEqual(new[] { BpDst })
+            && Holds(game, patched) && File.GetLastWriteTimeUtc(FileOf(game)) == written && NoLeftovers(game)
+            && GamePatcher.IsUpToDate(BpVersion, game, good));
+
+        File.WriteAllBytes(FileOf(game), original);
+        Check("bytepatch: the file put back to the original is not up to date",
+            !GamePatcher.IsUpToDate(BpVersion, game, good));
+        var again = TryApply(BpVersion, game, good);
+        Check("bytepatch: ...and is patched again",
+            again is not null && again.Applied.SequenceEqual(new[] { BpDst }) && Holds(game, patched) && NoLeftovers(game));
+
+        byte[] elsewhere = (byte[])patched.Clone();
+        elsewhere[offset + length + 50] ^= 0xFF;
+        File.WriteAllBytes(FileOf(game), elsewhere);
+        Check("bytepatch: the patched span with a byte changed elsewhere -> Apply refuses and the bytes stay"
+              + " (only the full hash of an install or an import sees this: the launch check reads the span alone)",
+            GamePatcher.IsUpToDate(BpVersion, game, good) && Refused(game, good, notOriginal)
+            && Holds(game, elsewhere) && NoLeftovers(game));
+        byte[] tampered = (byte[])original.Clone();
+        tampered[10] ^= 0xFF;
+        File.WriteAllBytes(FileOf(game), tampered);
+        Check("bytepatch: the original span with a byte changed elsewhere -> not up to date, refused, never written into",
+            !GamePatcher.IsUpToDate(BpVersion, game, good) && Refused(game, good, notOriginal)
+            && Holds(game, tampered) && NoLeftovers(game));
+
+        byte[] longer = original.Concat(new byte[] { 0 }).ToArray();
+        File.WriteAllBytes(FileOf(game), longer);
+        bool longerRefused = !GamePatcher.IsUpToDate(BpVersion, game, good) && Refused(game, good, notOriginal) && Holds(game, longer);
+        byte[] cut = original.AsSpan(0, offset + 10).ToArray();
+        File.WriteAllBytes(FileOf(game), cut);
+        Check("bytepatch: a file of another length (longer, or ending inside the span) -> \"not the original\"",
+            longerRefused && !GamePatcher.IsUpToDate(BpVersion, game, good) && Refused(game, good, notOriginal)
+            && Holds(game, cut) && NoLeftovers(game));
+
+        byte[] neither = (byte[])original.Clone();
+        neither[offset + 5] ^= 0x01;
+        File.WriteAllBytes(FileOf(game), neither);
+        Check("bytepatch: a span that is neither the original's nor the patched one -> \"not the original\"",
+            !GamePatcher.IsUpToDate(BpVersion, game, good) && Refused(game, good, notOriginal)
+            && Holds(game, neither) && NoLeftovers(game));
+
+        string noFile = Game("bp-game-nofile", null);
+        Check("bytepatch: a missing destination -> its own text, and no file is created",
+            !GamePatcher.IsUpToDate(BpVersion, noFile, good) && Refused(noFile, good, targetMissing)
+            && !File.Exists(FileOf(noFile)) && NoLeftovers(noFile));
+
+        // A file system without a journal may remove the old file before it renames the copy: a replace
+        // cut between the two leaves no destination and the verified copy under the temp name.
+        string halfway = Game("bp-game-halfway", null);
+        File.WriteAllBytes(FileOf(halfway) + GamePatcher.TempSuffix, patched);
+        bool pending = !GamePatcher.IsUpToDate(BpVersion, halfway, good);
+        var finished = TryApply(BpVersion, halfway, good);
+        string unproven = Game("bp-game-halfway-other", null);
+        File.WriteAllBytes(FileOf(unproven) + GamePatcher.TempSuffix, original);
+        Check("bytepatch: a missing destination with the verified copy beside it -> the copy takes its place; "
+              + "a copy that is not the result is never used",
+            pending && finished is not null && finished.Applied.SequenceEqual(new[] { BpDst })
+            && Holds(halfway, patched) && NoLeftovers(halfway) && GamePatcher.IsUpToDate(BpVersion, halfway, good)
+            && Refused(unproven, good, targetMissing) && !File.Exists(FileOf(unproven))
+            && File.ReadAllBytes(FileOf(unproven) + GamePatcher.TempSuffix).AsSpan().SequenceEqual(original));
+
+        File.WriteAllBytes(FileOf(game), original);
+        byte[] flipped = (byte[])span.Clone();
+        flipped[7] ^= 0x01;
+        string damaged = Payload("bp-payload-damaged", Entry(), flipped);
+        string shorter = Payload("bp-payload-short", Entry(), span.AsSpan(0, length - 1).ToArray());
+        Check("bytepatch: a damaged span file (a changed byte, another length) -> \"the Relic package is damaged\", nothing written",
+            Refused(game, damaged, payloadDamaged) && Refused(game, shorter, payloadDamaged)
+            && Holds(game, original) && NoLeftovers(game));
+
+        // An entry applied as a plain copy would put the 300 bytes of the span file in the place of the
+        // whole file — the one mistake an unknown kind must never fall into.
+        string oddKind = Payload("bp-payload-kind", Entry(kind: "bytepatches"), span);
+        string oddElsewhere = Payload("bp-payload-kind-elsewhere", Entry(), span,
+            ", \"6.6\": [ { \"kind\": \"hexpatch\", \"src\": \"6.6/x.bin\", \"dst\": \"extra/x.bin\" } ]");
+        Check("bytepatch: an unknown kind makes the manifest unusable (never the copy path), for every version it lists",
+            Refused(game, oddKind, unusable) && Refused(game, oddElsewhere, unusable)
+            && !GamePatcher.IsUpToDate(BpVersion, game, oddKind) && GamePatcher.PlanFor(BpVersion, oddKind).Count == 0
+            && GamePatcher.PlanFor(BpVersion, oddElsewhere).Count == 0
+            && Holds(game, original) && NoLeftovers(game));
+
+        string pastEnd = Payload("bp-payload-bounds", Entry(atOffset: size - 10), span);
+        string sameHash = Payload("bp-payload-same", Entry(sha: shaBefore), span);
+        string notHex = Payload("bp-payload-hex", Entry(spanSha: "00"), span);
+        Check("bytepatch: an entry that describes no patch (span past the end, before = after, a hash that is none) is refused before the file is looked at",
+            new[] { pastEnd, sameHash, notHex }.All(root =>
+                Refused(game, root, unusable) && !GamePatcher.IsUpToDate(BpVersion, game, root))
+            && Holds(game, original) && NoLeftovers(game));
+
+        string wrongResult = Payload("bp-payload-result", Entry(sha: new string('a', 64)), span);
+        Check("bytepatch: a copy that does not hash to the entry's sha256 never takes the file's place",
+            Refused(game, wrongResult, patchMismatch) && Holds(game, original) && NoLeftovers(game));
+
+        string unshipped = Payload("bp-payload-unshipped", Entry(), null);
+        string optional = Payload("bp-payload-optional", Entry(required: false), null);
+        string optionalShipped = Payload("bp-payload-optional-shipped", Entry(required: false), span);
+        var skipped = TryApply(BpVersion, game, optional);
+        File.WriteAllBytes(FileOf(game), tampered);
+        var softened = TryApply(BpVersion, game, optionalShipped);
+        Check("bytepatch: the span file this build does not ship -> the required rule (thrown), an optional entry is reported; "
+              + "an optional entry over a file that is not the original is reported too, never written",
+            Catch(() => GamePatcher.Apply(BpVersion, game, null, unshipped)) is GamePatchException
+            && skipped is not null && skipped.Missing.SequenceEqual(new[] { BpDst }) && !skipped.Changed
+            && softened is not null && softened.Missing.SequenceEqual(new[] { BpDst }) && !softened.Changed
+            && Holds(game, tampered) && NoLeftovers(game));
+
+        // A run cut short leaves "<dst>.relic-tmp" behind, carrying the destination's attributes.
+        string locked = Game("bp-game-readonly", original);
+        string stale = FileOf(locked) + GamePatcher.TempSuffix;
+        File.WriteAllText(stale, "what a run that was cut short left");
+        File.SetAttributes(stale, FileAttributes.ReadOnly);
+        File.SetAttributes(FileOf(locked), FileAttributes.ReadOnly);
+        try
+        {
+            var overStale = TryApply(BpVersion, locked, good);
+            Check("bytepatch: a stale read-only temp file and a read-only destination are dealt with (patched, the attribute kept)",
+                overStale is not null && overStale.Applied.SequenceEqual(new[] { BpDst }) && Holds(locked, patched)
+                && NoLeftovers(locked) && (File.GetAttributes(FileOf(locked)) & FileAttributes.ReadOnly) != 0
+                && GamePatcher.IsUpToDate(BpVersion, locked, good));
+        }
+        finally
+        {
+            foreach (string f in new[] { stale, FileOf(locked) })
+                if (File.Exists(f)) File.SetAttributes(f, FileAttributes.Normal);
+        }
+    }
+
+    /// <summary>
+    /// The folder's own pkg_version against the manifest's "clients" table, and the guard built on it:
+    /// when the plan holds a file of the asked version's own, a folder that holds another version
+    /// receives nothing at all.
+    /// </summary>
+    static void IdentityChecks(string tmp, string noTable, string noManifest, string brokenManifest,
+        Action<string, bool> Check)
+    {
+        const string md5A = "0123456789abcdef0123456789abcdef", md5B = "fedcba9876543210fedcba9876543210";
+        const string md5C = "00112233445566778899aabbccddeeff", md5X = "ffffffffffffffffffffffffffffffff";
+        string root = Path.Combine(tmp, "id-payload");
+        string shared = Write(root, "common/shared.bin", "SHARED");
+        string own77 = Write(root, "7.7/own.bin", "OWN-7.7");
+        string own88 = Write(root, "8.8/own.bin", "OWN-8.8");
+        // 7.7 has two builds and tolerates others; 8.8 works with its one build only. The row without
+        // an md5 identifies nothing. 8.8's own entry is NOT required: the guard is fatal all the same.
+        File.WriteAllText(Path.Combine(root, "manifest.json"), $$"""
+        {
+          "clients": [
+            { "version": "7.7", "build": "7.7.0", "file": "{{BpDst}}", "md5": "{{md5A}}", "size": 1000 },
+            { "version": "7.7", "build": "7.7.1", "file": "{{BpDst}}", "md5": "{{md5B}}", "size": 1016 },
+            { "version": "8.8", "build": "8.8.0", "file": "{{BpDst}}", "md5": "{{md5C}}", "size": 2000, "exact": true },
+            { "version": "9.9", "build": "9.9.0", "file": "{{BpDst}}", "size": 3000 }
+          ],
+          "common": [ { "src": "common/shared.bin", "dst": "extra/shared.bin", "sha256": "{{Sha(shared)}}" } ],
+          "versions": {
+            "7.7": [ { "src": "7.7/own.bin", "dst": "extra/own.bin", "sha256": "{{Sha(own77)}}", "required": true } ],
+            "8.8": [ { "src": "8.8/own.bin", "dst": "extra/own.bin", "sha256": "{{Sha(own88)}}" } ]
+          }
+        }
+        """);
+
+        string Folder(string name, params string[]? list)
+        {
+            string dir = Path.Combine(tmp, name);
+            Write(dir, "GenshinImpact.exe", "not really an exe");
+            if (list is not null)
+                File.WriteAllText(Path.Combine(dir, ClientIdentity.ListFile), string.Join("\r\n", list) + "\r\n");
+            return dir;
+        }
+        string Line(string name, string md5, long size) =>
+            $"{{\"remoteName\": \"{name}\", \"md5\": \"{md5}\", \"fileSize\": {size}}}";
+        string before = Line("GenshinImpact_Data/Managed/Metadata/global-metadata.dat", md5X, 5);
+        string after = Line("GenshinImpact.exe", md5X, 6);
+
+        string holdsA = Folder("id-7.7.0", before, Line(BpDst, md5A, 1000), after);
+        string holdsB = Folder("id-7.7.1", before, Line(BpDst, md5B, 1016), after);
+        string holdsX = Folder("id-unknown-build", before, Line(BpDst, md5X, 1000), after);
+        string otherSize = Folder("id-other-size", Line(BpDst, md5A, 1001));
+        string noList = Folder("id-no-list", null);
+        string noLine = Folder("id-no-line", before, after);
+        string notJson = Folder("id-not-json", before, "{\"remoteName\": \"" + BpDst + "\", \"md5\": ", after);
+        string noisy = Folder("id-noisy", "not a list line", "UserAssembly.dll is named here, in a line that is not JSON",
+            "[1, 2]", Line(BpDst, md5A, 1000));
+
+        var match = ClientIdentity.Check("7.7", holdsA, root);
+        var matchB = ClientIdentity.Check("7.7", holdsB, root);
+        Check("identity: pkg_version names a build of the asked version -> Match (either of its builds)",
+            match.Kind == ClientIdentityKind.Match && match.Build == "7.7.0" && !match.Exact
+            && matchB.Kind == ClientIdentityKind.Match && matchB.Build == "7.7.1");
+        var other = ClientIdentity.Check("8.8", holdsA, root);
+        Check("identity: pkg_version names a build of another version -> OtherVersion(found)",
+            other.Kind == ClientIdentityKind.OtherVersion && other.Found == "7.7" && other.Build == "7.7.0");
+        var loose = ClientIdentity.Check("7.7", holdsX, root);
+        var strict = ClientIdentity.Check("8.8", holdsX, root);
+        Check("identity: a build no row names -> UnknownBuild; Exact only where every row of the version says so",
+            loose.Kind == ClientIdentityKind.UnknownBuild && !loose.Exact && loose.Known == "7.7.0, 7.7.1"
+            && strict.Kind == ClientIdentityKind.UnknownBuild && strict.Exact && strict.Known == "8.8.0");
+        Check("identity: the md5 of a row with another size is not that build",
+            ClientIdentity.Check("7.7", otherSize, root).Kind == ClientIdentityKind.UnknownBuild);
+        Check("identity: no pkg_version, no line for the file, a line that is not JSON -> Unknown",
+            ClientIdentity.Check("7.7", noList, root).Kind == ClientIdentityKind.Unknown
+            && ClientIdentity.Check("7.7", noLine, root).Kind == ClientIdentityKind.Unknown
+            && ClientIdentity.Check("7.7", notJson, root).Kind == ClientIdentityKind.Unknown);
+        Check("identity: lines that are not list lines are passed over on the way to the file's line",
+            ClientIdentity.Check("7.7", noisy, root).Kind == ClientIdentityKind.Match);
+        Check("identity: a version without usable rows is still told when the folder holds another one; else Unknown",
+            ClientIdentity.Check("9.9", holdsA, root) is { Kind: ClientIdentityKind.OtherVersion, Found: "7.7" }
+            && ClientIdentity.Check("9.9", holdsX, root).Kind == ClientIdentityKind.Unknown
+            && ClientIdentity.Check("5.5", holdsX, root).Kind == ClientIdentityKind.Unknown);
+        Check("identity: no table, no manifest, an unreadable manifest -> Unknown with nothing named, never a throw",
+            Catch(() =>
+            {
+                foreach (string r in new[] { noTable, noManifest, brokenManifest })
+                    if (ClientIdentity.Check("7.7", holdsA, r)
+                        is not { Kind: ClientIdentityKind.Unknown, Found: "", Build: "", Known: "", Exact: false })
+                        throw new InvalidOperationException(r);
+            }) is null);
+
+        string snapshot = Snapshot(holdsA);
+        var refusal = Catch(() => GamePatcher.Apply("8.8", holdsA, null, root));
+        Check("guard: a folder that holds another version is refused under its own text, whatever \"required\" says",
+            refusal is GamePatchException
+            && refusal.Message == L.T("core.patch.otherVersion", new { found = "7.7", version = "8.8" })
+            && L.Has("core.patch.otherVersion") && !refusal.Message.Contains('{'));
+        Check("guard: ...before any write — the folder is as it was, the common entry included",
+            Snapshot(holdsA) == snapshot && !Directory.Exists(Path.Combine(holdsA, "extra"))
+            && !GamePatcher.IsUpToDate("8.8", holdsA, root));
+        var mine = TryApply("7.7", holdsA, root);
+        Check("guard: the folder's own version goes in (common + own)",
+            mine is not null && mine.Applied.Count == 2 && Read(Path.Combine(holdsA, "extra", "own.bin")) == "OWN-7.7");
+        var unknownBuild = TryApply("8.8", holdsX, root);
+        var unlisted = TryApply("8.8", noList, root);
+        Check("guard: an unknown build and a folder without pkg_version go on",
+            unknownBuild is not null && unknownBuild.Applied.Count == 2
+            && unlisted is not null && unlisted.Applied.Count == 2
+            && Read(Path.Combine(noList, "extra", "own.bin")) == "OWN-8.8");
+        var commonOnly = TryApply("6.6", holdsB, root);
+        Check("guard: a plan without an entry of the version's own is not the guard's to refuse",
+            commonOnly is not null && commonOnly.Applied.SequenceEqual(new[] { "extra/shared.bin" }));
+        Check("import: the folder of another version is refused with the version text",
+            ClientIdentity.ImportRefusal("8.8", other)
+                == L.T("core.install.import.versionMismatch", new { found = "7.7", version = "8.8" }));
+        string? wrongBuild = ClientIdentity.ImportRefusal("8.8", strict);
+        Check("import: an unknown build is refused where only the listed builds work, under a text that names them",
+            L.Has("core.install.import.wrongBuild")
+            && wrongBuild == L.T("core.install.import.wrongBuild", new { version = "8.8", build = "8.8.0" })
+            && wrongBuild.Contains("8.8.0") && !wrongBuild.Contains('{'));
+        Check("import: a match, an unknown build of a version that tolerates one and a folder nobody can judge are accepted",
+            ClientIdentity.ImportRefusal("7.7", match) is null && ClientIdentity.ImportRefusal("7.7", loose) is null
+            && ClientIdentity.ImportRefusal("8.8", ClientIdentity.Check("8.8", noList, root)) is null
+            && ClientIdentity.ImportRefusal("7.7", ClientIdentity.Check("7.7", holdsA, noManifest)) is null);
+    }
+
+    const string RpVersion = "4.4";
+    const string RpDst = "mhypbase.dll";
+    const string RpSrc = "4.4/mhypbase.dll.bin";
+
+    /// <summary>
+    /// A replacement — a plain entry that names the original file of the game it takes the place of
+    /// ("sha256Before"): written over that original, which is kept as .relic-orig, or over an earlier payload
+    /// file of its own ("sha256Earlier"), from which no .relic-orig is taken — always through a verified copy and
+    /// one rename, so the destination never holds a damaged copy of Relic's file. Any other content is the
+    /// player's own file: left exactly as it is, no exception, counted by the launch check as nothing to do, and
+    /// named by OwnFiles while this build ships Relic's file — until the player chooses Relic's file
+    /// (replaceOwn, ReplaceOwnFiles): theirs is then kept as .relic-own, written last and only once Relic's file
+    /// is in place, and the .relic-orig stays the original. ReplaceOwnFiles looks at nothing else of the plan.
+    /// The player's answer per version is RelicSettings.OwnFiles, normalised whenever it is set, the read of a
+    /// state file included.
+    /// </summary>
+    static void ReplaceEntryChecks(string tmp, string copyPayload, string noManifest, string brokenManifest,
+        Action<string, bool> Check)
+    {
+        const string original = "ORIGINAL-MHYPBASE", earlier = "EARLIER-RELIC-MHYPBASE", relic = "RELIC-MHYPBASE";
+        const string mine = "MY-OWN-MHYPBASE", reason = "Replaces the original so that the client starts.";
+        const string md5This = "0123456789abcdef0123456789abcdef", md5Other = "fedcba9876543210fedcba9876543210";
+        // The copy of the player's file on its way to .relic-own.
+        const string Side = GamePatcher.OwnSuffix + GamePatcher.TempSuffix;
+        string HashOfText(string text) => ShaOf(Encoding.UTF8.GetBytes(text));
+        // A payload root whose manifest holds the replacement of version 4.4 (sha = the hash the entry claims
+        // for Relic's file) and a "clients" table naming one build of 4.4 and one of 3.3.
+        string Payload(string name, string? sha = null)
+        {
+            string root = Path.Combine(tmp, name);
+            string src = Write(root, RpSrc, relic);
+            File.WriteAllText(Path.Combine(root, "manifest.json"), $$"""
+            {
+              "clients": [
+                { "version": "{{RpVersion}}", "build": "4.4.0", "file": "{{BpDst}}", "md5": "{{md5This}}", "size": 1000 },
+                { "version": "3.3", "build": "3.3.0", "file": "{{BpDst}}", "md5": "{{md5Other}}", "size": 2000 }
+              ],
+              "common": [],
+              "versions": {
+                "{{RpVersion}}": [
+                  { "src": "{{RpSrc}}", "dst": "{{RpDst}}", "sha256": "{{sha ?? Sha(src)}}",
+                    "sha256Before": "{{HashOfText(original)}}", "sha256Earlier": [ "{{HashOfText(earlier)}}" ],
+                    "backup": true, "required": true, "reason": "{{reason}}" }
+                ]
+              }
+            }
+            """);
+            return root;
+        }
+        string Game(string name, string? content, string? orig = null)
+        {
+            string dir = Path.Combine(tmp, name);
+            Write(dir, "GenshinImpact.exe", "not really an exe");
+            if (content is not null) Write(dir, RpDst, content);
+            if (orig is not null) Write(dir, RpDst + GamePatcher.BackupSuffix, orig);
+            return dir;
+        }
+        string At(string dir, string suffix = "") => Path.Combine(dir, RpDst + suffix);
+        bool Absent(string dir, params string[] suffixes) => suffixes.All(s => !File.Exists(At(dir, s)));
+        bool IsReadOnly(string path) => (File.GetAttributes(path) & FileAttributes.ReadOnly) != 0;
+        void Writable(params string[] paths) { foreach (string f in paths) if (File.Exists(f)) File.SetAttributes(f, FileAttributes.Normal); }
+        IReadOnlyList<GamePatcher.Replacement> Own(string dir, string root) => GamePatcher.OwnFiles(RpVersion, dir, root);
+
+        string root = Payload("rp-payload");
+        // The same entry, its payload file missing from the build (an antivirus took it).
+        string noSrcRoot = Payload("rp-payload-nosrc");
+        File.Delete(Path.Combine(noSrcRoot, RpSrc.Replace('/', Path.DirectorySeparatorChar)));
+        var listed = GamePatcher.Replacements(RpVersion, root);
+        Check("replace: Replacements names the version's replacement (dst, reason, the name the player's file is kept under) "
+              + "and nothing for a version without one, a build that lacks its payload file, a build without a manifest or with a broken one",
+            listed.Count == 1 && listed[0].Dst == RpDst && listed[0].Reason == reason && listed[0].Kept == RpDst + GamePatcher.OwnSuffix
+            && GamePatcher.Replacements("2.8", copyPayload).Count == 0 && GamePatcher.Replacements(RpVersion, noSrcRoot).Count == 0
+            && GamePatcher.Replacements(RpVersion, noManifest).Count == 0 && GamePatcher.Replacements(RpVersion, brokenManifest).Count == 0);
+
+        // --- the original of the game build ---
+        string fresh = Game("rp-original", original);
+        bool freshPending = !GamePatcher.IsUpToDate(RpVersion, fresh, root) && Own(fresh, root).Count == 0;
+        var first = TryApply(RpVersion, fresh, root);
+        Check("replace: the original -> Relic's file in its place and the original kept as .relic-orig; up to date afterwards, nothing of the player's",
+            freshPending && first is not null && first.Applied.SequenceEqual(new[] { RpDst }) && first.Kept.Count == 0
+            && first.ReplacedOwn.Count == 0 && Read(At(fresh)) == relic && Read(At(fresh, GamePatcher.BackupSuffix)) == original
+            && Absent(fresh, GamePatcher.OwnSuffix, GamePatcher.TempSuffix, Side)
+            && GamePatcher.IsUpToDate(RpVersion, fresh, root) && Own(fresh, root).Count == 0);
+
+        // --- already current: a read-only destination proves nothing is even attempted ---
+        File.SetAttributes(At(fresh), FileAttributes.ReadOnly);
+        PatchReport? current, currentOwnRun, currentOwnOnly;
+        try
+        {
+            current = TryApply(RpVersion, fresh, root);
+            currentOwnRun = TryApply(RpVersion, fresh, root, replaceOwn: true);
+            try { currentOwnOnly = GamePatcher.ReplaceOwnFiles(RpVersion, fresh, null, root); } catch { currentOwnOnly = null; }
+        }
+        finally { Writable(At(fresh)); }
+        Check("replace: already current -> nothing written, with and without replaceOwn, nor by ReplaceOwnFiles (the read-only file survives every run)",
+            current is not null && !current.Changed && current.AlreadyCurrent.SequenceEqual(new[] { RpDst })
+            && currentOwnRun is not null && !currentOwnRun.Changed && currentOwnRun.AlreadyCurrent.SequenceEqual(new[] { RpDst })
+            && currentOwnOnly is not null && !currentOwnOnly.Changed && currentOwnOnly.Kept.Count == 0
+            && Read(At(fresh)) == relic && Read(At(fresh, GamePatcher.BackupSuffix)) == original && Absent(fresh, GamePatcher.OwnSuffix));
+
+        // --- an earlier payload file of its own ---
+        string older = Game("rp-earlier", earlier);
+        bool olderPending = !GamePatcher.IsUpToDate(RpVersion, older, root) && Own(older, root).Count == 0;
+        var upgraded = TryApply(RpVersion, older, root);
+        Check("replace: an earlier payload file of its own (sha256Earlier) -> replaced, and NO .relic-orig is taken from it",
+            olderPending && upgraded is not null && upgraded.Applied.SequenceEqual(new[] { RpDst }) && upgraded.ReplacedOwn.Count == 0
+            && Read(At(older)) == relic && Absent(older, GamePatcher.BackupSuffix, GamePatcher.OwnSuffix, GamePatcher.TempSuffix, Side));
+
+        // --- the copy of Relic's file is verified BEFORE it reaches the destination ---
+        // A payload file that does not hash to the entry's sha256 (a damaged build) never takes the original's
+        // place: the next run would take the damaged copy for the player's own file and start the game with it.
+        string wrongRoot = Payload("rp-payload-wrong", sha: new string('a', 64));
+        string damagedOver = Game("rp-original-damaged-payload", original);
+        var damagedRun = Catch(() => GamePatcher.Apply(RpVersion, damagedOver, null, wrongRoot));
+        Check("replace: a copy of Relic's file that does not hash to sha256 never reaches the destination — refused (core.patch.hashMismatch), "
+              + "the original still in place and still asked for at the next run, never taken for the player's own, no copy left",
+            damagedRun is GamePatchException && damagedRun.Message == L.T("core.patch.hashMismatch", new { file = RpDst })
+            && Read(At(damagedOver)) == original && Absent(damagedOver, GamePatcher.TempSuffix, GamePatcher.OwnSuffix)
+            && !GamePatcher.IsUpToDate(RpVersion, damagedOver, wrongRoot) && Own(damagedOver, wrongRoot).Count == 0);
+
+        // A read-only original takes Relic's file through the rename and keeps its attribute.
+        string readOnlyOriginal = Game("rp-original-readonly", original);
+        File.SetAttributes(At(readOnlyOriginal), FileAttributes.ReadOnly);
+        PatchReport? overReadOnly;
+        bool keptReadOnly;
+        try
+        {
+            overReadOnly = TryApply(RpVersion, readOnlyOriginal, root);
+            keptReadOnly = IsReadOnly(At(readOnlyOriginal));
+        }
+        finally { Writable(At(readOnlyOriginal), At(readOnlyOriginal, GamePatcher.BackupSuffix)); }
+        Check("replace: a read-only original -> Relic's file in its place, read-only like the original was, the original kept as .relic-orig",
+            overReadOnly is not null && overReadOnly.Applied.SequenceEqual(new[] { RpDst }) && keptReadOnly
+            && Read(At(readOnlyOriginal)) == relic && Read(At(readOnlyOriginal, GamePatcher.BackupSuffix)) == original
+            && Absent(readOnlyOriginal, GamePatcher.TempSuffix));
+
+        // --- the player's own file ---
+        string ownBare = Game("rp-own", mine);
+        DateTime ownWritten = File.GetLastWriteTimeUtc(At(ownBare));
+        var named = Own(ownBare, root);
+        bool ownCurrent = GamePatcher.IsUpToDate(RpVersion, ownBare, root);
+        var leftAlone = TryApply(RpVersion, ownBare, root);
+        Check("replace: the player's own file, no .relic-orig beside it -> Kept, untouched, no exception; the launch check counts it as nothing to do",
+            ownCurrent && leftAlone is not null && leftAlone.Kept.SequenceEqual(new[] { RpDst }) && !leftAlone.Changed
+            && Read(At(ownBare)) == mine && File.GetLastWriteTimeUtc(At(ownBare)) == ownWritten
+            && Absent(ownBare, GamePatcher.BackupSuffix, GamePatcher.OwnSuffix, GamePatcher.TempSuffix));
+        Check("replace: OwnFiles names that file — its dst, the entry's reason, the name it is kept under",
+            named.Count == 1 && named[0].Dst == RpDst && named[0].Reason == reason && named[0].Kept == RpDst + GamePatcher.OwnSuffix);
+
+        string ownBesideOriginal = Game("rp-own-orig", mine, orig: original);
+        var leftAloneToo = TryApply(RpVersion, ownBesideOriginal, root);
+        Check("replace: the player's own file with the original kept beside it -> Kept as well, both files as they were",
+            GamePatcher.IsUpToDate(RpVersion, ownBesideOriginal, root) && leftAloneToo is not null
+            && leftAloneToo.Kept.SequenceEqual(new[] { RpDst }) && !leftAloneToo.Changed
+            && Read(At(ownBesideOriginal)) == mine && Read(At(ownBesideOriginal, GamePatcher.BackupSuffix)) == original
+            && Own(ownBesideOriginal, root).Count == 1);
+
+        // --- the player chose Relic's file ---
+        var replaced = TryApply(RpVersion, ownBesideOriginal, root, replaceOwn: true);
+        Check("replace: replaceOwn -> the player's file kept as .relic-own, Relic's in its place, the .relic-orig unchanged, no copy left behind",
+            replaced is not null && replaced.Applied.SequenceEqual(new[] { RpDst }) && replaced.ReplacedOwn.SequenceEqual(new[] { RpDst })
+            && replaced.Kept.Count == 0 && Read(At(ownBesideOriginal)) == relic
+            && Read(At(ownBesideOriginal, GamePatcher.OwnSuffix)) == mine
+            && Read(At(ownBesideOriginal, GamePatcher.BackupSuffix)) == original && Absent(ownBesideOriginal, GamePatcher.TempSuffix, Side)
+            && GamePatcher.IsUpToDate(RpVersion, ownBesideOriginal, root) && Own(ownBesideOriginal, root).Count == 0);
+        var mineAgain = TryApply(RpVersion, ownBare, root, replaceOwn: true);
+        Check("replace: replaceOwn without a .relic-orig beside the player's file takes none from it; the copy keeps the time the player's file was written",
+            mineAgain is not null && mineAgain.ReplacedOwn.SequenceEqual(new[] { RpDst }) && Read(At(ownBare)) == relic
+            && Read(At(ownBare, GamePatcher.OwnSuffix)) == mine && File.GetLastWriteTimeUtc(At(ownBare, GamePatcher.OwnSuffix)) == ownWritten
+            && Absent(ownBare, GamePatcher.BackupSuffix, GamePatcher.TempSuffix, Side));
+
+        // A later file of the player's own replaces the older copy — read-only files and the copies a cut run left included.
+        const string later = "MY-LATER-OWN-MHYPBASE";
+        File.WriteAllText(At(ownBesideOriginal), later);
+        File.WriteAllText(At(ownBesideOriginal, GamePatcher.TempSuffix), "what a run that was cut short left");
+        File.WriteAllText(At(ownBesideOriginal, Side), "what a run that was cut short left of the player's file");
+        string[] locked = { At(ownBesideOriginal), At(ownBesideOriginal, GamePatcher.OwnSuffix), At(ownBesideOriginal, GamePatcher.TempSuffix), At(ownBesideOriginal, Side) };
+        foreach (string f in locked) File.SetAttributes(f, FileAttributes.ReadOnly);
+        PatchReport? again;
+        bool againReadOnly;
+        try
+        {
+            again = TryApply(RpVersion, ownBesideOriginal, root, replaceOwn: true);
+            againReadOnly = IsReadOnly(At(ownBesideOriginal));
+        }
+        finally { Writable(locked); }
+        Check("replace: a later file of the player's own takes the place of the older copy in .relic-own (read-only files and the copies a cut run left dealt with), "
+              + "Relic's file read-only like the player's was, the .relic-orig still the original",
+            again is not null && again.ReplacedOwn.SequenceEqual(new[] { RpDst }) && Read(At(ownBesideOriginal)) == relic && againReadOnly
+            && Read(At(ownBesideOriginal, GamePatcher.OwnSuffix)) == later
+            && Read(At(ownBesideOriginal, GamePatcher.BackupSuffix)) == original && Absent(ownBesideOriginal, GamePatcher.TempSuffix, Side));
+
+        // A copy of Relic's file that does not hash to the entry's sha256 never takes the player's file's place.
+        string wrongDir = Game("rp-own-wrong", mine);
+        var mismatch = Catch(() => GamePatcher.Apply(RpVersion, wrongDir, null, wrongRoot, replaceOwn: true));
+        Check("replace: a copy of Relic's file that does not hash to sha256 is refused (core.patch.hashMismatch) and the player's file stays in place, no copy of it taken",
+            mismatch is GamePatchException && mismatch.Message == L.T("core.patch.hashMismatch", new { file = RpDst })
+            && Read(At(wrongDir)) == mine && Absent(wrongDir, GamePatcher.TempSuffix, GamePatcher.BackupSuffix, GamePatcher.OwnSuffix, Side));
+
+        // --- a replacement over the player's file that cannot be finished changes nothing ---
+        // The rename over the destination fails (another program holds the player's file without delete sharing):
+        // an older copy in .relic-own is still there, the player's file as it was.
+        const string olderOwn = "AN-OLDER-OWN-MHYPBASE";
+        string heldDst = Game("rp-own-held", mine);
+        File.WriteAllText(At(heldDst, GamePatcher.OwnSuffix), olderOwn);
+        Exception? heldFailure;
+        using (new FileStream(At(heldDst), FileMode.Open, FileAccess.Read, FileShare.Read))
+            heldFailure = Catch(() => GamePatcher.Apply(RpVersion, heldDst, null, root, replaceOwn: true));
+        Check("replace: the rename over the player's file fails (the file held open) -> refused; the player's file and the older .relic-own as they were, no copy left",
+            heldFailure is GamePatchException && Read(At(heldDst)) == mine && Read(At(heldDst, GamePatcher.OwnSuffix)) == olderOwn
+            && Absent(heldDst, GamePatcher.TempSuffix, Side, GamePatcher.BackupSuffix));
+        // The copy of the player's file cannot take the name .relic-own (the older copy held open): the player's
+        // file goes back over Relic's, with the attribute it had.
+        string heldOwn = Game("rp-own-held-copy", mine);
+        File.WriteAllText(At(heldOwn, GamePatcher.OwnSuffix), olderOwn);
+        File.SetAttributes(At(heldOwn), FileAttributes.ReadOnly);
+        Exception? heldOwnFailure;
+        bool heldOwnReadOnly;
+        try
+        {
+            using (new FileStream(At(heldOwn, GamePatcher.OwnSuffix), FileMode.Open, FileAccess.Read, FileShare.Read))
+                heldOwnFailure = Catch(() => GamePatcher.Apply(RpVersion, heldOwn, null, root, replaceOwn: true));
+            heldOwnReadOnly = IsReadOnly(At(heldOwn));
+        }
+        finally { Writable(At(heldOwn)); }
+        Check("replace: the copy of the player's file cannot become .relic-own (the older copy held open) -> refused, the player's file back in place "
+              + "(read-only as it was), the older copy as it was, no copy left",
+            heldOwnFailure is GamePatchException && Read(At(heldOwn)) == mine && heldOwnReadOnly
+            && Read(At(heldOwn, GamePatcher.OwnSuffix)) == olderOwn && Absent(heldOwn, GamePatcher.TempSuffix, Side, GamePatcher.BackupSuffix));
+
+        // --- a build that lacks Relic's file has nothing to offer in the place of the player's ---
+        string noSrcOwn = Game("rp-own-nosrc", mine);
+        PatchReport? noSrcRun = null, noSrcOwnOnly = null;
+        var noSrcThrown = Catch(() =>
+        {
+            noSrcRun = GamePatcher.Apply(RpVersion, noSrcOwn, null, noSrcRoot, replaceOwn: true);
+            noSrcOwnOnly = GamePatcher.ReplaceOwnFiles(RpVersion, noSrcOwn, null, noSrcRoot);
+        });
+        var noSrcOriginal = Catch(() => GamePatcher.Apply(RpVersion, Game("rp-original-nosrc", original), null, noSrcRoot));
+        Check("replace: the payload file missing from the build -> the player's own file is not asked about, and Use Relic's file leaves it as it is "
+              + "(Kept, no exception) — while the original, which needs it, is refused as before (core.patch.requiredMissing)",
+            Own(noSrcOwn, noSrcRoot).Count == 0 && GamePatcher.IsUpToDate(RpVersion, noSrcOwn, noSrcRoot)
+            && noSrcThrown is null && noSrcRun is not null && noSrcRun.Kept.SequenceEqual(new[] { RpDst }) && !noSrcRun.Changed
+            && noSrcOwnOnly is not null && noSrcOwnOnly.Kept.SequenceEqual(new[] { RpDst }) && !noSrcOwnOnly.Changed
+            && Read(At(noSrcOwn)) == mine && Absent(noSrcOwn, GamePatcher.OwnSuffix, GamePatcher.TempSuffix, Side)
+            && noSrcOriginal is GamePatchException && noSrcOriginal.Message.Contains(RpDst, StringComparison.Ordinal)
+            && noSrcOriginal.Message == L.T("core.patch.requiredMissing", new { file = RpDst, src = Path.Combine(noSrcRoot, RpSrc.Replace('/', Path.DirectorySeparatorChar)) }));
+
+        // --- ReplaceOwnFiles: the answer "Use Relic's file" on its own ---
+        // A version with a byte patch AND a replacement: its UserAssembly.dll carries the patched span with another
+        // byte changed — the launch check (the span) lets it start, a full run (the whole hash) refuses it. The
+        // player's own mhypbase.dll goes under Relic's all the same, and that file is not even read.
+        byte[] ua = Enumerable.Range(0, 4096).Select(i => (byte)(i * 13 + 5)).ToArray();
+        const int uaOffset = 1000, uaLength = 32;
+        byte[] uaSpan = ua.AsSpan(uaOffset, uaLength).ToArray().Select(b => (byte)(b ^ 0x3C)).ToArray();
+        byte[] uaPatched = (byte[])ua.Clone();
+        uaSpan.CopyTo(uaPatched, uaOffset);
+        string bothRoot = Path.Combine(tmp, "rp-payload-both");
+        string bothSrc = Write(bothRoot, RpSrc, relic);
+        File.WriteAllBytes(Path.Combine(bothRoot, RpVersion, "UA.span.bin"), uaSpan);
+        File.WriteAllText(Path.Combine(bothRoot, "manifest.json"), $$"""
+            { "common": [], "versions": { "{{RpVersion}}": [
+              { "kind": "bytepatch", "src": "{{RpVersion}}/UA.span.bin", "dst": "{{BpDst}}", "size": {{ua.Length}}, "offset": {{uaOffset}}, "length": {{uaLength}},
+                "sha256Before": "{{ShaOf(ua)}}", "sha256": "{{ShaOf(uaPatched)}}",
+                "spanSha256Before": "{{ShaOf(ua.AsSpan(uaOffset, uaLength).ToArray())}}", "spanSha256": "{{ShaOf(uaSpan)}}", "required": true },
+              { "src": "{{RpSrc}}", "dst": "{{RpDst}}", "sha256": "{{Sha(bothSrc)}}", "sha256Before": "{{HashOfText(original)}}",
+                "backup": true, "required": true, "reason": "{{reason}}" }
+            ] } }
+            """);
+        string bothDir = Game("rp-both", mine);
+        string uaPath = Path.Combine(bothDir, BpDst.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(uaPath)!);
+        byte[] uaElsewhere = (byte[])uaPatched.Clone();
+        uaElsewhere[3000] ^= 0xFF;
+        File.WriteAllBytes(uaPath, uaElsewhere);
+        bool launchable = GamePatcher.IsUpToDate(RpVersion, bothDir, bothRoot);
+        var fullRun = Catch(() => GamePatcher.Apply(RpVersion, bothDir, null, bothRoot, replaceOwn: true));
+        bool fullRunWroteNothing = Read(At(bothDir)) == mine && Absent(bothDir, GamePatcher.OwnSuffix, Side);
+        PatchReport? ownOnly = null;
+        var ownOnlyThrown = Catch(() => ownOnly = GamePatcher.ReplaceOwnFiles(RpVersion, bothDir, null, bothRoot));
+        Check("replace: ReplaceOwnFiles writes Relic's file over the player's own and looks at nothing else of the plan — a byte patch a full run "
+              + "refuses (another byte of its file changed) stops it neither, nor is that file touched",
+            launchable && fullRun is GamePatchException && fullRunWroteNothing
+            && ownOnlyThrown is null && ownOnly is not null && ownOnly.ReplacedOwn.SequenceEqual(new[] { RpDst })
+            && ownOnly.Applied.SequenceEqual(new[] { RpDst }) && ownOnly.AlreadyCurrent.Count == 0
+            && Read(At(bothDir)) == relic && Read(At(bothDir, GamePatcher.OwnSuffix)) == mine
+            && File.ReadAllBytes(uaPath).AsSpan().SequenceEqual(uaElsewhere)
+            && Absent(bothDir, GamePatcher.BackupSuffix, GamePatcher.TempSuffix, Side));
+        // Nothing of the player's: the original, Relic's file, no file — ReplaceOwnFiles writes nothing (the original
+        // is Apply's to replace, under its own rules).
+        string ownPassOriginal = Game("rp-ownpass-original", original);
+        string ownPassNone = Game("rp-ownpass-none", null);
+        PatchReport? onOriginal = null, onNone = null, noManifestRun = null;
+        var ownPassThrown = Catch(() =>
+        {
+            onOriginal = GamePatcher.ReplaceOwnFiles(RpVersion, ownPassOriginal, null, root);
+            onNone = GamePatcher.ReplaceOwnFiles(RpVersion, ownPassNone, null, root);
+            noManifestRun = GamePatcher.ReplaceOwnFiles(RpVersion, ownBare, null, noManifest);
+        });
+        Check("replace: ReplaceOwnFiles over the original, over no file, and in a build without a manifest -> nothing written, nothing reported",
+            ownPassThrown is null && onOriginal is { Changed: false } && onOriginal.Kept.Count == 0 && onNone is { Changed: false }
+            && noManifestRun is { Changed: false } && Read(At(ownPassOriginal)) == original && !File.Exists(At(ownPassNone))
+            && Absent(ownPassOriginal, GamePatcher.BackupSuffix, GamePatcher.OwnSuffix, GamePatcher.TempSuffix, Side));
+
+        // --- what OwnFiles leaves out ---
+        string plainOther = Path.Combine(tmp, "rp-plain-other");
+        Write(plainOther, "GenshinImpact.exe", "not really an exe");
+        Write(plainOther, MetaDst, "SOMETHING-ELSE");
+        string otherVersion = Game("rp-other-version", mine);
+        File.WriteAllText(Path.Combine(otherVersion, ClientIdentity.ListFile),
+            $"{{\"remoteName\": \"{BpDst}\", \"md5\": \"{md5Other}\", \"fileSize\": 2000}}\r\n");
+        IReadOnlyList<GamePatcher.Replacement>? broken = null, absent = null, noReplacement = null, noFolder = null, notThisVersion = null;
+        var thrown = Catch(() =>
+        {
+            noReplacement = GamePatcher.OwnFiles("2.8", plainOther, copyPayload);
+            absent = GamePatcher.OwnFiles(RpVersion, ownBare, noManifest);
+            broken = GamePatcher.OwnFiles(RpVersion, ownBare, brokenManifest);
+            noFolder = GamePatcher.OwnFiles(RpVersion, Path.Combine(tmp, "rp-nowhere"), root);
+            notThisVersion = GamePatcher.OwnFiles(RpVersion, otherVersion, root);
+        });
+        Check("replace: OwnFiles is empty for a plain entry over other content, for a build without a manifest or with a broken one, "
+              + "for a folder that is not there and for one that holds another version (it receives nothing) — never a throw",
+            thrown is null && noReplacement is { Count: 0 } && absent is { Count: 0 } && broken is { Count: 0 }
+            && noFolder is { Count: 0 } && notThisVersion is { Count: 0 }
+            && Catch(() => GamePatcher.Apply(RpVersion, otherVersion, null, root, replaceOwn: true)) is GamePatchException
+            && Read(At(otherVersion)) == mine);
+        Check("replace: ReplaceOwnFiles refuses what Apply refuses — a folder that holds another version (its own file untouched), a manifest that is there but broken",
+            Catch(() => GamePatcher.ReplaceOwnFiles(RpVersion, otherVersion, null, root)) is GamePatchException other
+            && other.Message.Contains("3.3", StringComparison.Ordinal) && Read(At(otherVersion)) == mine
+            && Catch(() => GamePatcher.ReplaceOwnFiles(RpVersion, ownBesideOriginal, null, brokenManifest)) is GamePatchException unusable
+            && unusable.Message == L.T("core.patch.manifestUnreadable"));
+
+        // --- the player's answer per version ---
+        var settings = new RelicSettings
+        {
+            OwnFiles = new Dictionary<string, string> { ["4.4"] = " Replace ", ["5.5"] = "bogus", ["6.6"] = "KEEP", [" "] = "keep", ["7.7"] = "ask", ["Dev"] = "keep" },
+        };
+        Check("settings: OwnFiles keeps keep and replace alone (trimmed, any letter case), every other value reads as ask, version ids without letter case",
+            settings.OwnFiles.Count == 3 && settings.OwnFilesChoiceFor("4.4") == OwnFileChoices.Replace
+            && settings.OwnFilesChoiceFor("6.6") == OwnFileChoices.Keep && settings.OwnFilesChoiceFor("dev") == OwnFileChoices.Keep
+            && settings.OwnFilesChoiceFor("5.5") == OwnFileChoices.Ask && settings.OwnFilesChoiceFor("7.7") == OwnFileChoices.Ask
+            && settings.OwnFilesChoiceFor("9.9") == OwnFileChoices.Ask && new RelicSettings().OwnFilesChoiceFor("4.4") == OwnFileChoices.Ask);
+        bool set = settings.SetOwnFilesChoice("5.5", "replace"), same = settings.SetOwnFilesChoice("5.5", "REPLACE");
+        bool cleared = settings.SetOwnFilesChoice("4.4", "ask"), clearedAgain = settings.SetOwnFilesChoice("4.4", "whatever");
+        Check("settings: SetOwnFilesChoice stores keep / replace, says when nothing changed, and removes the entry for ask or any other word",
+            set && !same && cleared && !clearedAgain && settings.OwnFilesChoiceFor("5.5") == OwnFileChoices.Replace
+            && settings.OwnFilesChoiceFor("4.4") == OwnFileChoices.Ask && !settings.OwnFiles.ContainsKey("4.4"));
+        var heldMap = settings.OwnFiles;
+        bool addedLater = settings.SetOwnFilesChoice("8.8", "keep");
+        Check("settings: a change replaces the map instead of changing it in place — a reader holding the earlier one (a play session's thread) never sees it change",
+            addedLater && !heldMap.ContainsKey("8.8") && settings.OwnFiles.ContainsKey("8.8") && !ReferenceEquals(heldMap, settings.OwnFiles)
+            && settings.OwnFilesChoiceFor("8.8") == OwnFileChoices.Keep && settings.OwnFilesChoiceFor("DEV") == OwnFileChoices.Keep);
+        Check("settings: an answer handed to one launch is keep or replace, anything else none (the stored choice applies)",
+            OwnFileChoices.Answer(" keep") == OwnFileChoices.Keep && OwnFileChoices.Answer("Replace") == OwnFileChoices.Replace
+            && OwnFileChoices.Answer("ask") is null && OwnFileChoices.Answer("") is null && OwnFileChoices.Answer(null) is null);
+
+        string statePath = Path.Combine(tmp, "rp-state.json");
+        File.WriteAllText(statePath, """{ "Settings": { "OwnFiles": { "4.4": "Replace", "5.5": "maybe", "6.6": "keep" } }, "Installed": [] }""");
+        string plainState = Path.Combine(tmp, "rp-state-plain.json");
+        File.WriteAllText(plainState, """{ "Settings": { "ServerHost": "game.example.com" }, "Installed": [] }""");
+        var loaded = RelicState.Load(statePath);
+        var plain = RelicState.Load(plainState);
+        Check("settings: a state file is normalised as it is read, and one without OwnFiles reads as ask for every version",
+            loaded.Settings.OwnFiles.Count == 2 && loaded.Settings.OwnFilesChoiceFor("4.4") == OwnFileChoices.Replace
+            && loaded.Settings.OwnFilesChoiceFor("5.5") == OwnFileChoices.Ask && loaded.Settings.OwnFilesChoiceFor("6.6") == OwnFileChoices.Keep
+            && plain.Settings.OwnFiles.Count == 0 && plain.Settings.OwnFilesChoiceFor("4.4") == OwnFileChoices.Ask);
+        loaded.Settings.SetOwnFilesChoice("6.6", "replace");
+        loaded.Save(statePath);
+        Check("settings: the answers survive save / load", RelicState.Load(statePath).Settings.OwnFilesChoiceFor("6.6") == OwnFileChoices.Replace);
+        string brokenState = Path.Combine(tmp, "rp-state-broken.json");
+        File.WriteAllText(brokenState, "{ not json");
+        bool stored = RelicState.RememberOwnFilesChoice("5.5", "keep", statePath);
+        var reread = RelicState.TryRead(statePath);
+        Check("settings: RememberOwnFilesChoice sets the one entry in the state FILE and keeps the rest; a file that cannot be read is not written over",
+            stored && reread is not null && reread.Settings.OwnFilesChoiceFor("5.5") == OwnFileChoices.Keep
+            && reread.Settings.OwnFilesChoiceFor("4.4") == OwnFileChoices.Replace && reread.Settings.OwnFilesChoiceFor("6.6") == OwnFileChoices.Replace
+            && !RelicState.RememberOwnFilesChoice("5.5", "keep", brokenState) && File.ReadAllText(brokenState) == "{ not json"
+            && RelicState.TryRead(brokenState) is null && RelicState.TryRead(Path.Combine(tmp, "rp-no-state.json")) is null);
+        // Another process's save puts its file in place by a rename after the old one was set aside: a reader
+        // that finds no file is not told "none" at once.
+        string lateState = Path.Combine(tmp, "rp-state-late.json");
+        var writer = Task.Run(async () =>
+        {
+            await Task.Delay(50);
+            File.WriteAllText(lateState + ".tmp", """{ "Settings": { "OwnFiles": { "4.4": "keep" } }, "Installed": [] }""");
+            File.Move(lateState + ".tmp", lateState);
+        });
+        var late = RelicState.TryRead(lateState);
+        writer.Wait();
+        Check("settings: TryRead waits a moment for a state file that is not there yet (another process's save between its two renames)",
+            late is not null && late.Settings.OwnFilesChoiceFor("4.4") == OwnFileChoices.Keep);
+    }
+
+    /// <summary>
+    /// The SHIPPED payload/manifest.json: usable by this build, every "clients" row well formed, and every
+    /// bytepatch entry's span file as its entry says, with the entry's size the size of an identity row of
+    /// its version for the same file (when the table has such rows — build/publish.ps1's rule). Passes
+    /// with no such entry shipped and says how many it looked at. Every replacement entry (a plain one with
+    /// "sha256Before") is held to publish.ps1's shape — and its payload file to its sha256.
+    /// </summary>
+    static void RealManifestChecks(Action<string, bool> Check)
+    {
+        string? manifestPath = FindUp("payload/manifest.json");
+        if (manifestPath is null)
+        {
+            Console.WriteLine("  [SKIP] real manifest — payload/manifest.json not found from here");
+            return;
+        }
+        string payloadRoot = Path.GetDirectoryName(manifestPath)!;
+        using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        string Str(JsonElement o, string name) =>
+            o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString()! : "";
+        long Num(JsonElement o, string name) =>
+            o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out long n) ? n : -1;
+
+        var rows = doc.RootElement.TryGetProperty("clients", out var clients) && clients.ValueKind == JsonValueKind.Array
+            ? clients.EnumerateArray().ToList() : new List<JsonElement>();
+        bool rowsOk = rows.All(r => r.ValueKind == JsonValueKind.Object
+            && Str(r, "version").Length > 0 && Str(r, "build").Trim().Length > 0
+            && Str(r, "file").Length > 0 && !Str(r, "file").Contains("..")
+            && Regex.IsMatch(Str(r, "md5"), "^[0-9a-f]{32}$") && Num(r, "size") > 0
+            && (!r.TryGetProperty("exact", out var x) || x.ValueKind is JsonValueKind.True or JsonValueKind.False));
+        Check($"real manifest: every \"clients\" row is well formed ({rows.Count} looked at)", rowsOk);
+
+        var versions = doc.RootElement.GetProperty("versions").EnumerateObject().ToList();
+        Check($"real manifest: this build can use it — no entry of an unknown kind ({versions.Count} versions looked at)",
+            GamePatcher.PlanFor("", payloadRoot).Count > 0
+            && versions.All(v => GamePatcher.PlanFor(v.Name, payloadRoot).Count(e => e.PerVersion) == v.Value.GetArrayLength()));
+
+        int looked = 0;
+        var problems = new List<string>();
+        foreach (var v in versions)
+        {
+            foreach (var e in v.Value.EnumerateArray())
+            {
+                if (Str(e, "kind") != GamePatcher.BytePatchKind) continue;
+                looked++;
+                string src = Path.Combine(payloadRoot, Str(e, "src").Replace('/', Path.DirectorySeparatorChar));
+                if (!File.Exists(src)) problems.Add($"{Str(e, "src")}: missing");
+                else if (new FileInfo(src).Length != Num(e, "length")) problems.Add($"{Str(e, "src")}: not {Num(e, "length")} bytes");
+                else if (!Sha(src).Equals(Str(e, "spanSha256"), StringComparison.OrdinalIgnoreCase)) problems.Add($"{Str(e, "src")}: not spanSha256");
+                var own = rows.Where(r => string.Equals(Str(r, "version"), v.Name, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(Str(r, "file"), Str(e, "dst"), StringComparison.OrdinalIgnoreCase)).ToList();
+                if (own.Count > 0 && own.All(r => Num(r, "size") != Num(e, "size")))
+                    problems.Add($"{Str(e, "src")}: size {Num(e, "size")} is no identity row's of {v.Name} for that file");
+            }
+        }
+        foreach (string p in problems) Console.WriteLine($"         {p}");
+        Check($"real manifest: every bytepatch entry's span file hashes to spanSha256 and its size is an identity row's ({looked} looked at)",
+            problems.Count == 0);
+
+        // Replacements: two different sha256 values, the original kept ("backup": true), "sha256Earlier"
+        // absent or a list of other sha256 values, the payload file hashing to sha256 — and the launcher's own
+        // reader (GamePatcher.Replacements) names exactly these entries, the common ones in every version's plan.
+        static bool Hex64(string? s) => s is not null && Regex.IsMatch(s, "^[0-9a-fA-F]{64}$");
+        var common = doc.RootElement.TryGetProperty("common", out var commonList) && commonList.ValueKind == JsonValueKind.Array
+            ? commonList.EnumerateArray().ToList() : new List<JsonElement>();
+        bool IsReplacement(JsonElement e) => Str(e, "kind").Length == 0 && Str(e, "sha256Before").Length > 0;
+        int replacements = 0;
+        var replacementProblems = new List<string>();
+        foreach (var e in common.Concat(versions.SelectMany(v => v.Value.EnumerateArray())).Where(IsReplacement))
+        {
+            replacements++;
+            string sha = Str(e, "sha256"), before = Str(e, "sha256Before"), name = Str(e, "src");
+            if (!Hex64(sha) || !Hex64(before)) replacementProblems.Add($"{name}: sha256 / sha256Before is not a sha256");
+            else if (sha.Equals(before, StringComparison.OrdinalIgnoreCase)) replacementProblems.Add($"{name}: sha256Before = sha256");
+            if (!(e.TryGetProperty("backup", out var backup) && backup.ValueKind == JsonValueKind.True))
+                replacementProblems.Add($"{name}: backup is not true");
+            if (e.TryGetProperty("sha256Earlier", out var earlierList)
+                && (earlierList.ValueKind != JsonValueKind.Array || earlierList.EnumerateArray().Any(h => h.ValueKind != JsonValueKind.String
+                    || !Hex64(h.GetString()) || h.GetString()!.Equals(sha, StringComparison.OrdinalIgnoreCase)
+                    || h.GetString()!.Equals(before, StringComparison.OrdinalIgnoreCase))))
+                replacementProblems.Add($"{name}: sha256Earlier is not a list of other sha256 values");
+            string src = Path.Combine(payloadRoot, name.Replace('/', Path.DirectorySeparatorChar));
+            if (!File.Exists(src)) replacementProblems.Add($"{name}: missing");
+            else if (!Sha(src).Equals(sha, StringComparison.OrdinalIgnoreCase)) replacementProblems.Add($"{name}: not sha256");
+        }
+        int commonReplacements = common.Count(IsReplacement);
+        foreach (var v in versions)
+        {
+            int expected = commonReplacements + v.Value.EnumerateArray().Count(IsReplacement);
+            if (GamePatcher.Replacements(v.Name, payloadRoot).Count != expected)
+                replacementProblems.Add($"{v.Name}: GamePatcher.Replacements names {GamePatcher.Replacements(v.Name, payloadRoot).Count}, the manifest {expected}");
+        }
+        foreach (string p in replacementProblems) Console.WriteLine($"         {p}");
+        Check($"real manifest: every replacement entry is well formed — two different sha256 values, backup true, sha256Earlier other sha256 values, "
+              + $"the payload file hashing to sha256 — and the launcher reads them as such ({replacements} looked at)",
+            replacementProblems.Count == 0);
+    }
+
+    /// <summary>
+    /// The manifest's "launch" table (<see cref="LaunchSupport"/>): a version whose entry says
+    /// <c>"windows11": "unsupported"</c> asks before PLAY on a Windows 11 PC, and nothing else asks — not a
+    /// version the table does not name, an entry or a value of another shape, another word, a table that is
+    /// not an object, a manifest without one, one that is no JSON, a build without a manifest. The decision
+    /// is a pure function of that flag and the OS. The shipped manifest asks it for none of the launcher's
+    /// versions.
+    /// </summary>
+    static void LaunchSupportChecks(string tmp, Action<string, bool> Check)
+    {
+        string root = Path.Combine(tmp, "launch");
+        string Manifest(string name, string? json)
+        {
+            string dir = Path.Combine(root, name);
+            Directory.CreateDirectory(dir);
+            if (json is not null) File.WriteAllText(Path.Combine(dir, "manifest.json"), json);
+            return dir;
+        }
+        string flagged = Manifest("flagged", """
+            { "common": [], "versions": {}, "launch": {
+                "7.7": { "windows11": "unsupported" }, "8.8": { "windows11": "supported" }, "9.9": { "windows11": true },
+                "6.6": "unsupported", "5.5": { "windows10": "unsupported" }, "4.4": { "windows11": "Unsupported" } } }
+            """);
+        Check("launch: a version whose entry says windows11 \"unsupported\" is flagged — its id matched as the manifest's versions are (letter case, spaces around)",
+            LaunchSupport.Windows11Unsupported("7.7", flagged) && LaunchSupport.Windows11Unsupported(" 7.7 ", flagged));
+        Check("launch: another value, a value that is no text, an entry that is no object, another OS, another spelling, a version not named — no question",
+            new[] { "8.8", "9.9", "6.6", "5.5", "4.4", "3.3", "", " " }.All(v => !LaunchSupport.Windows11Unsupported(v, flagged)));
+        string notObject = Manifest("array", """{ "common": [], "versions": {}, "launch": [ { "7.7": { "windows11": "unsupported" } } ] }""");
+        string none = Manifest("none", """{ "common": [], "versions": {} }""");
+        string notJson = Manifest("broken", "{ \"launch\": { \"7.7\": ");
+        string noManifest = Manifest("empty", null);
+        bool threw = false;
+        bool anyFlag = false;
+        try
+        {
+            anyFlag = LaunchSupport.Windows11Unsupported("7.7", notObject) || LaunchSupport.Windows11Unsupported("7.7", none)
+                || LaunchSupport.Windows11Unsupported("7.7", notJson) || LaunchSupport.Windows11Unsupported("7.7", noManifest)
+                || LaunchSupport.Windows11Unsupported("7.7", Path.Combine(root, "missing"));
+        }
+        catch { threw = true; }
+        Check("launch: a table that is no object, a manifest without one, one that is no JSON, no manifest at all — no question, never a throw",
+            !threw && !anyFlag);
+        Check("launch: the question is asked only for a flagged version on Windows 11 (AskOnWindows11 is the four cases of the two facts)",
+            LaunchSupport.AskOnWindows11(true, true) && !LaunchSupport.AskOnWindows11(true, false)
+            && !LaunchSupport.AskOnWindows11(false, true) && !LaunchSupport.AskOnWindows11(false, false));
+        // The table is read beside the others, and an entry of it changes nothing GamePatcher applies.
+        Check("launch: the table does not make a manifest unusable for GamePatcher",
+            GamePatcher.PlanFor("7.7", flagged).Count == 0 && GamePatcher.IsUpToDate("7.7", Path.Combine(root, "game"), flagged));
+        string? shipped = FindUp("payload/manifest.json");
+        if (shipped is null)
+        {
+            Console.WriteLine("  [SKIP] launch: payload/manifest.json not found from here");
+            return;
+        }
+        string shippedRoot = Path.GetDirectoryName(shipped)!;
+        var asks = ServerVersions.All.Where(v => LaunchSupport.Windows11Unsupported(v, shippedRoot)).ToList();
+        Check($"launch: the shipped manifest does not ask before PLAY on Windows 11 for any of the launcher's versions ({(asks.Count > 0 ? string.Join(", ", asks) : "none")})",
+            asks.Count == 0);
+    }
+
+    static string ShaOf(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+
+    /// <summary>Every file under <paramref name="dir"/> with its hash — what "the folder is as it was" means.</summary>
+    static string Snapshot(string dir) => string.Join("\n",
+        Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.Ordinal)
+            .Select(f => Path.GetRelativePath(dir, f) + " " + Sha(f)));
+
+    static string? FindUp(string relative)
+    {
+        foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+        {
+            var dir = new DirectoryInfo(start);
+            while (dir is not null)
+            {
+                string candidate = Path.Combine(dir.FullName, relative.Replace('/', Path.DirectorySeparatorChar));
+                if (File.Exists(candidate)) return candidate;
+                dir = dir.Parent;
+            }
+        }
+        return null;
     }
 
     static string Write(string root, string relative, string content)
@@ -5987,9 +12757,9 @@ static class PatchSpike
 
     /// <summary>Apply, handing back null instead of throwing: a regression has to stay one FAIL line
     /// instead of an unhandled exception that hides every check after it.</summary>
-    static PatchReport? TryApply(string versionId, string gameDir, string payloadRoot)
+    static PatchReport? TryApply(string versionId, string gameDir, string payloadRoot, bool replaceOwn = false)
     {
-        try { return GamePatcher.Apply(versionId, gameDir, null, payloadRoot); }
+        try { return GamePatcher.Apply(versionId, gameDir, null, payloadRoot, replaceOwn: replaceOwn); }
         catch { return null; }
     }
 
@@ -6036,7 +12806,7 @@ static class AccountsSpike
         try
         {
             WriteManifest(tmp, "1.6", "\"account\": \"aether\", \"password\": \"123123123\"");
-            WriteManifest(tmp, "2.8", "\"account\": \"Aetherr\", \"password\": \"any\"");
+            WriteManifest(tmp, "2.8", "\"account\": \"aetherr\", \"password\": \"any\"");
             WriteManifest(tmp, "3.0", "\"title\": \"no account\"");
             Directory.CreateDirectory(Path.Combine(tmp, "9.9"));
             File.WriteAllText(Path.Combine(tmp, "9.9", "manifest.json"), "{ \"account\": nope");
@@ -6046,7 +12816,7 @@ static class AccountsSpike
             Check("a concrete password from the manifest is offered as the example", v16.PasswordExample == "123123123");
 
             var v28 = GameAccounts.For(new GameVersionInfo { Id = "2.8", Server = "2.8" }, tmp);
-            Check("the second payload has its own account", v28.Account == "Aetherr");
+            Check("the second payload has its own account", v28.Account == "aetherr");
             // "any" is an instruction, not a password: offered as "e.g.: any" it would send the person to type exactly that.
             Check("\"any\" never becomes the password example",
                 v28.PasswordExample == GameAccounts.DefaultPasswordExample);
@@ -6067,6 +12837,18 @@ static class AccountsSpike
                 GameAccounts.For(new GameVersionInfo { Id = "4.2", Server = "4.2" }, tmp).Account.Length == 0);
             Check("manifest without the account field -> empty account",
                 GameAccounts.For(new GameVersionInfo { Id = "3.0", Server = "3.0" }, tmp).Account.Length == 0);
+            // A version whose payload ships no save (configuration files only, no dump) and whose catalogue
+            // entry names no account — absent or "" — shows no login anywhere.
+            WriteManifest(tmp, "3.3", "\"files\": [ { \"src\": \"txt/QuestData.txt\", \"dst\": \"server/data/txt/QuestData.txt\", \"stage\": \"config\" } ], \"mysql\": []");
+            Check("a version without a save and without a default account -> empty account, whether the catalogue leaves it out or names \"\"",
+                ShipsNoSave(Path.Combine(tmp, "3.3", "manifest.json"))
+                && GameAccounts.For(new GameVersionInfo { Id = "3.3", Server = "3.3" }, tmp).Account.Length == 0
+                && GameAccounts.For(new GameVersionInfo { Id = "3.3", Server = "3.3", Account = "" }, tmp).Account.Length == 0);
+            WriteManifest(tmp, "3.4", "\"files\": [ { \"src\": \"sdk/sdk.db\", \"dst\": \"sdk/data/sdk.db\", \"stage\": \"save\" } ]");
+            WriteManifest(tmp, "3.5", "\"mysql\": [ { \"src\": \"mysql/db.sql\" } ]");
+            Check("the rule the real files are held to: a save-stage file or a dump is a save; no manifest says nothing",
+                !ShipsNoSave(Path.Combine(tmp, "3.4", "manifest.json")) && !ShipsNoSave(Path.Combine(tmp, "3.5", "manifest.json"))
+                && !ShipsNoSave(Path.Combine(tmp, "4.2", "manifest.json")));
             // A broken manifest must not throw: it would take down BuildInitState, i.e. the app start.
             Check("invalid manifest -> empty account, no exception",
                 GameAccounts.For(new GameVersionInfo { Id = "9.9", Server = "9.9" }, tmp).Account.Length == 0);
@@ -6114,6 +12896,15 @@ static class AccountsSpike
                 {
                     string fromPayload = GameAccounts.For(new GameVersionInfo { Id = v.Id, Server = v.Server }, payloads).Account;
                     string fromCatalog = (v.Account ?? "").Trim();
+                    // A version whose payload ships no save has no pre-made account: nothing may show one —
+                    // neither its manifest nor the catalogue names a login, so every place that shows it stays
+                    // silent. Every other version has one to show.
+                    if (ShipsNoSave(Path.Combine(payloads, v.Server, "manifest.json")))
+                    {
+                        Check($"version {v.Id} ships no save: no account to show — neither the payload nor the catalogue names one",
+                            fromPayload.Length == 0 && fromCatalog.Length == 0 && GameAccounts.For(v, payloads).Account.Length == 0);
+                        continue;
+                    }
                     Check($"version {v.Id} has an account to show the player",
                         fromPayload.Length > 0 || fromCatalog.Length > 0);
                     // Both set but different = exactly the drift that sends the person into a dead login.
@@ -6173,6 +12964,43 @@ static class AccountsSpike
         string dir = Path.Combine(root, version);
         Directory.CreateDirectory(dir);
         File.WriteAllText(Path.Combine(dir, "manifest.json"), "{ " + body + " }");
+    }
+
+    /// <summary>The payload manifest at <paramref name="path"/> exists and ships no save — the agent's
+    /// <c>manifest_ships_save</c> answers false for it: no <c>files[]</c> entry of the <c>save</c> stage (an
+    /// entry without a stage is one, unless it is flagged <c>tsv</c>: a server data file — the agent's
+    /// <c>effective_stage</c>) and nothing under <c>mysql</c>. False without a manifest (nothing is known
+    /// then) and for one that is no JSON object.</summary>
+    static bool ShipsNoSave(string path)
+    {
+        if (!File.Exists(path)) return false;
+        static bool Truthy(JsonElement e) => e.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.String => (e.GetString() ?? "").Length > 0,
+            JsonValueKind.Number => e.GetDouble() != 0,
+            JsonValueKind.Array => e.GetArrayLength() > 0,
+            JsonValueKind.Object => e.EnumerateObject().Any(),
+            _ => false,
+        };
+        static bool SaveEntry(JsonElement f)
+        {
+            if (f.ValueKind != JsonValueKind.Object) return false;
+            bool hasStage = f.TryGetProperty("stage", out var s);
+            bool save = !hasStage || (s.ValueKind == JsonValueKind.String && s.GetString() == "save");
+            return save && !(f.TryGetProperty("tsv", out var tsv) && Truthy(tsv));
+        }
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            var m = doc.RootElement;
+            if (m.ValueKind != JsonValueKind.Object) return false;
+            bool saveFile = m.TryGetProperty("files", out var files) && files.ValueKind == JsonValueKind.Array
+                && files.EnumerateArray().Any(SaveEntry);
+            bool dump = m.TryGetProperty("mysql", out var mysql) && Truthy(mysql);
+            return !saveFile && !dump;
+        }
+        catch (JsonException) { return false; }
     }
 
     static string? FindUp(string relative)

@@ -17,7 +17,7 @@ void Run(HMODULE* phModule)
 	util::SetCurrentPath(util::GetModulePath(*phModule));
 
 	// Init config
-	config::Initialize((util::GetCurrentPath() / "cfg.json").string());
+	config::Initialize((util::GetCurrentPath() / RELIC_CONFIG_FILE).string());
 
 	// Init logger
 	auto& settings = cheat::feature::Settings::GetInstance();
@@ -62,5 +62,5 @@ void Run(HMODULE* phModule)
 
 	cheat::Init();
 
-    LOG_DEBUG("Config path is at %s", (util::GetCurrentPath() / "cfg.json").string().c_str());
+    LOG_DEBUG("Config path is at %s", (util::GetCurrentPath() / RELIC_CONFIG_FILE).string().c_str());
 }

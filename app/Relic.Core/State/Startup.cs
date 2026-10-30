@@ -2,8 +2,9 @@ using Relic.Core.Util;
 
 namespace Relic.Core.State;
 
-/// <summary>Manages the "run Relic when Windows starts" HKCU Run entry (per-user, no elevation), and
-/// the one-shot RunOnce logon-recovery hook that exists only while a private profile is loaded.</summary>
+/// <summary>Manages the "run Relic when Windows starts" HKCU Run entry (per-user, no elevation), the
+/// one-shot RunOnce logon-recovery hook that exists only while a private profile is loaded, and the RunOnce
+/// value that resumes a Quick Start run after a restart.</summary>
 public static class Startup
 {
     private const string RunKey = @"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
@@ -46,10 +47,11 @@ public static class Startup
     private const string RunOnceKey = @"HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce";
     private const string RecoverValueName = "RelicRecover";
 
-    /// <summary>Spikes only: point the hook at a synthetic key so a test never touches the real RunOnce.</summary>
+    /// <summary>Spikes only: point the RunOnce values at a synthetic key so a test never touches the real RunOnce.</summary>
     public static string? RunOnceKeyOverride { get; set; }
 
-    private static string RecoverKey => RunOnceKeyOverride ?? RunOnceKey;
+    /// <summary>The RunOnce key both values live in: the real one, or the spikes' synthetic key.</summary>
+    private static string RunOnceKeyPath => RunOnceKeyOverride ?? RunOnceKey;
 
     /// <summary>Arm (a private profile was just loaded) or disarm (live is back) the logon recovery.
     /// Arming needs the exe path of THIS process — the launcher, or the standalone "--play" process,
@@ -65,18 +67,59 @@ public static class Startup
     {
         if (string.IsNullOrWhiteSpace(exePath)) return;
         string value = $"\"{exePath}\" --tray";
-        var r = Proc.Run("reg", "add", RecoverKey, "/v", RecoverValueName, "/t", "REG_SZ", "/d", value, "/f");
-        if (!r.Ok) throw new InvalidOperationException($"reg add {RecoverKey}\\{RecoverValueName} failed ({r.Code}): {r.Err.Trim()}");
+        var r = Proc.Run("reg", "add", RunOnceKeyPath, "/v", RecoverValueName, "/t", "REG_SZ", "/d", value, "/f");
+        if (!r.Ok) throw new InvalidOperationException($"reg add {RunOnceKeyPath}\\{RecoverValueName} failed ({r.Code}): {r.Err.Trim()}");
     }
 
     public static void DisarmLogonRecovery()
     {
-        Proc.Run("reg", "delete", RecoverKey, "/v", RecoverValueName, "/f"); // ok if it didn't exist
+        Proc.Run("reg", "delete", RunOnceKeyPath, "/v", RecoverValueName, "/f"); // ok if it didn't exist
     }
 
     public static bool LogonRecoveryArmed()
     {
-        var r = Proc.Run("reg", "query", RecoverKey, "/v", RecoverValueName);
+        var r = Proc.Run("reg", "query", RunOnceKeyPath, "/v", RecoverValueName);
         return r.Ok && r.Out.Contains(RecoverValueName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── Quick Start's resume (RunOnce) ──
+    //
+    // While a Quick Start run is not ended — it runs, or waits for the restart that finishes turning on WSL 2 —
+    // RelicQuickStart = "<Relic.exe>" --quickstart brings the window back at the next logon, so the run goes on
+    // after a restart of Windows or a power cut. A start without --tray or --play shows the window, and a second
+    // instance hands over to the first, so the autostart's --tray start and this one may come in either order.
+    // Windows deletes a RunOnce value before it runs it: every resume arms it again. A paused, ended or discarded
+    // run disarms it, and so does the uninstaller. It sits in the same key as RelicRecover and never touches it.
+
+    private const string QuickStartValueName = "RelicQuickStart";
+
+    /// <summary>Arm (a run is going on) or disarm (it is paused, ended or discarded) the resume value, with the exe
+    /// path of THIS process; a process without a path does not arm.</summary>
+    public static void SetQuickStartResume(bool armed)
+    {
+        if (armed) ArmQuickStartResume(Environment.ProcessPath ?? "");
+        else DisarmQuickStartResume();
+    }
+
+    /// <summary>Writes <c>RelicQuickStart = "&lt;exePath&gt;" --quickstart</c> under RunOnce. Nothing for an empty
+    /// path; a failed write throws.</summary>
+    public static void ArmQuickStartResume(string exePath)
+    {
+        if (string.IsNullOrWhiteSpace(exePath)) return;
+        string value = $"\"{exePath}\" --quickstart";
+        var r = Proc.Run("reg", "add", RunOnceKeyPath, "/v", QuickStartValueName, "/t", "REG_SZ", "/d", value, "/f");
+        if (!r.Ok) throw new InvalidOperationException($"reg add {RunOnceKeyPath}\\{QuickStartValueName} failed ({r.Code}): {r.Err.Trim()}");
+    }
+
+    /// <summary>Removes the resume value (fine when it is not there); <c>RelicRecover</c> stays as it is.</summary>
+    public static void DisarmQuickStartResume()
+    {
+        Proc.Run("reg", "delete", RunOnceKeyPath, "/v", QuickStartValueName, "/f"); // ok if it didn't exist
+    }
+
+    public static bool QuickStartResumeArmed()
+    {
+        var r = Proc.Run("reg", "query", RunOnceKeyPath, "/v", QuickStartValueName);
+        return r.Ok && r.Out.Contains(QuickStartValueName, StringComparison.OrdinalIgnoreCase);
     }
 }

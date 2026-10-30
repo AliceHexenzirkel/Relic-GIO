@@ -92,6 +92,20 @@ public sealed class InstallService
         _relicExePath = relicExePath;
     }
 
+    /// <summary>Where the state is saved (<see cref="RelicState.Save"/>'s default when null) — another file only for
+    /// the spikes, which must never write the real one.</summary>
+    public string? StatePath { get; init; }
+
+    /// <summary>The payload folder the bundled fixes come from (the shipped one when null).</summary>
+    public string? PayloadRoot { get; init; }
+
+    /// <summary>The version ids of the catalogue, for the import's check (<see cref="VersionCatalog.Load"/> when null).</summary>
+    public IReadOnlyCollection<string>? OfferedVersions { get; init; }
+
+    /// <summary>Called with the game folder after the import's check and before its first write — for the spikes, which
+    /// change the folder there as a program that takes a file, or a disk that fills up, would.</summary>
+    public Action<string>? BeforeFirstWrite { get; init; }
+
     /// <summary>Where version <paramref name="versionId"/> installs to. Single source of truth for the path.</summary>
     public static string GameDir(string installRoot, string versionId) =>
         Path.Combine(installRoot, $"Genshin {versionId}");
@@ -192,10 +206,13 @@ public sealed class InstallService
             // cancelled-vs-error flow and the corrupt-cache cleanup on its exact type.
             try
             {
-                if (_state.Installed.RemoveAll(i => i.Id == v.Id) > 0)
+                lock (RelicState.Gate)
                 {
-                    Log.Info($"extract aborted over an installed version — {v.Id} was unregistered (torn directory)");
-                    _state.Save();
+                    if (_state.Installed.RemoveAll(i => i.Id == v.Id) > 0)
+                    {
+                        Log.Info($"extract aborted over an installed version — {v.Id} was unregistered (torn directory)");
+                        _state.Save(StatePath);
+                    }
                 }
             }
             catch (Exception ex) { Log.Error("unregistering the version with the aborted extract failed (non-fatal)", ex); }
@@ -212,7 +229,7 @@ public sealed class InstallService
         // BEFORE the registration below: DetectInjector only records an ayy/anime pair that is
         // already on disk, and a version whose required fix failed must stay unregistered rather
         // than offer PLAY on a client that cannot start.
-        ApplyBundledFixes(v.Id, gameDir, progress, _state.Settings.Enhancements);
+        ApplyBundledFixes(v.Id, gameDir, progress, _state.Settings.Enhancements, PayloadRoot);
 
         // 5: register IMMEDIATELY after that — a Fiddler/shortcut failure below must never leave a
         // fully-extracted multi-GB install unregistered (both are repairable later: Fiddler is
@@ -380,64 +397,103 @@ public sealed class InstallService
     }
 
     /// <summary>
-    /// Registers an ALREADY-DOWNLOADED copy of the game: the user picks its folder, Relic validates
-    /// it and registers it in place — no download, no copy, the files stay exactly where they are —
-    /// then runs the same Fiddler + shortcut finalization as a normal install.
+    /// Registers an ALREADY-DOWNLOADED copy of the game: the user picks its folder (or its GenshinImpact.exe), Relic
+    /// validates it and registers it in place — no download, no copy, the files stay exactly where they are —
+    /// then runs the same Fiddler + shortcut finalization as a normal install (<see cref="ImportFolder"/> has the rest).
     /// </summary>
-    public async Task<InstalledVersion> ImportLocalAsync(
-        GameVersionInfo v, string sourceDir, IProgress<InstallProgress> progress, CancellationToken ct = default)
+    /// <param name="replaceInstalledAt">The folder the player chose to replace with this one (the one the version is
+    /// installed at, as the check named it).</param>
+    public async Task<InstalledVersion> ImportLocalAsync(GameVersionInfo v, string sourceDir,
+        IProgress<InstallProgress> progress, CancellationToken ct = default, string? replaceInstalledAt = null)
     {
-        progress.Report(new(InstallPhase.Import, 0.05, L.T("core.install.import.checking")));
-        // Trim('"'): Explorer's "Copy as path" wraps the path in quotes, and a leading quote makes
-        // GetFullPath resolve the whole thing as a RELATIVE path — a misleading "does not exist" error.
-        string gameDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceDir.Trim().Trim('"')));
-        if (!Directory.Exists(gameDir))
-            throw new InvalidOperationException(L.T("core.install.import.folderMissing", new { dir = gameDir }));
-        if (!File.Exists(Path.Combine(gameDir, "GenshinImpact.exe")))
-            throw new InvalidOperationException(L.T("core.install.import.noExe"));
-        if (!Directory.Exists(Path.Combine(gameDir, "GenshinImpact_Data")))
-            throw new InvalidOperationException(L.T("core.install.import.noData"));
-
-        // Best-effort version check: launcher-made installs carry config.ini with game_version=X.Y.Z.
-        // A repack without the file simply skips the check — but when the file IS there and points at
-        // another version, registering it would produce a client that can't talk to its server.
-        string? found = TryReadGameVersion(Path.Combine(gameDir, "config.ini"));
-        if (found is not null && !string.Equals(found, v.Id, StringComparison.Ordinal))
-            throw new InvalidOperationException(L.T("core.install.import.versionMismatch", new { found, version = v.Id }));
-
-        // One folder = one registration: play/profile-swap/uninstall key on the id, and two ids over
-        // the same dir would fight over the same files.
-        var clash = _state.Installed.FirstOrDefault(i =>
-            !string.Equals(i.Id, v.Id, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(SafeFullPath(i.GameDir), gameDir, StringComparison.OrdinalIgnoreCase));
-        if (clash is not null)
-            throw new InvalidOperationException(L.T("core.install.import.alreadyRegistered", new { version = clash.Id }));
-
-        // Last cancellation checkpoint — registration + finalize run to completion (same rule as the
-        // download path: a cancel past this point would report "cancelled" for an installed version).
-        ct.ThrowIfCancellationRequested();
-        Log.Info($"import local: version={v.Id} dir={gameDir}");
-        progress.Report(new(InstallPhase.Import, 0.4, L.T("core.install.import.registering")));
-
-        // A folder the user downloaded elsewhere is the likeliest one to be missing these files.
-        ApplyBundledFixes(v.Id, gameDir, progress, _state.Settings.Enhancements);
-        var installed = RegisterVersion(v.Id, gameDir, "import");
+        var installed = ImportFolder(v, sourceDir, progress, ct, replaceInstalledAt);
         await FinalizeAsync(installed, progress);
         progress.Report(new(InstallPhase.Done, 1, L.T("core.install.versionReady", new { version = v.Id })));
         return installed;
     }
 
-    /// <summary>The game_version (major.minor) from config.ini, or null when it is missing/unreadable.</summary>
-    private static string? TryReadGameVersion(string configIni)
+    /// <summary>
+    /// The import up to its registration, without the Fiddler setup and the shortcut of <see cref="ImportLocalAsync"/>
+    /// (public so the import spike can drive it). EVERY check of <see cref="ImportCheck"/> runs first — the folder,
+    /// what it holds, the registrations, a client running from it, and the run of Relic's files made without writing,
+    /// whole files hashed, the room they take — so an import the check refuses has written nothing into the folder.
+    /// Then Relic's files (<see cref="GamePatcher.ApplyUndoable"/>) and the registration; a failure the check could not
+    /// foresee (the folder changed after it, a program took a file, the disk filled up) takes back everything the import
+    /// wrote and the registration as it was, and the import is refused with that failure. A version installed at
+    /// another folder moves to this one only when <paramref name="replaceInstalledAt"/> names that very folder; the other
+    /// folder is left exactly as it is. The folder a version is already registered at, imported again, keeps its
+    /// registration's origin. From its check to its registration the import holds the checks of the page
+    /// (<see cref="ImportCheck.HoldChecks"/>): one that runs is stopped first, one asked for meanwhile waits, so none has
+    /// a file of the folder open while the import checks it and writes into it.
+    /// </summary>
+    public InstalledVersion ImportFolder(GameVersionInfo v, string sourceDir, IProgress<InstallProgress> progress,
+        CancellationToken ct = default, string? replaceInstalledAt = null)
     {
+        progress.Report(new(InstallPhase.Import, 0.05, L.T("core.install.import.checking")));
+        using var hold = ImportCheck.HoldChecks(ct);
+        IReadOnlyList<ImportRegistration> registered;
+        lock (RelicState.Gate) registered = ImportRequest.Registrations(_state);
+        var verdict = ImportCheck.Run(new ImportRequest
+        {
+            VersionId = v.Id,
+            Path = sourceDir,
+            Deep = true,
+            ReplaceInstalledAt = replaceInstalledAt,
+            Installed = registered,
+            Offered = OfferedVersions,
+            PayloadRoot = PayloadRoot,
+            WithInjectables = _state.Settings.Enhancements,
+            OwnFilesChoice = _state.Settings.OwnFilesChoiceFor(v.Id),
+        }, ct);
+        if (verdict.Status != ImportVerdict.Ready)
+        {
+            Log.Info($"import local: version={v.Id} \"{sourceDir}\" refused ({verdict.Reason}) — nothing was written");
+            throw verdict.Reason == ImportVerdict.Patch
+                ? new GamePatchException(verdict.Message)
+                : new InvalidOperationException(verdict.Message);
+        }
+        string gameDir = verdict.GameDir;
+
+        // Last cancellation checkpoint — the files + registration + finalize run to completion (same rule as the
+        // download path: a cancel past this point would report "cancelled" for an installed version).
+        ct.ThrowIfCancellationRequested();
+        Log.Info($"import local: version={v.Id} dir={gameDir} identity={verdict.Identity}"
+                 + (verdict.Build.Length > 0 ? $" ({verdict.Build})" : "")
+                 + (verdict.InstalledAt.Length > 0 ? $" — takes the place of {verdict.InstalledAt}" : ""));
+        progress.Report(new(InstallPhase.Import, 0.4, L.T("core.install.import.registering")));
+        BeforeFirstWrite?.Invoke(gameDir);
+
+        var undo = new PatchUndo();
+        List<InstalledVersion> registrations;
+        string? selected;
+        lock (RelicState.Gate)
+        {
+            registrations = _state.Installed.ToList();
+            selected = _state.SelectedVersionId;
+        }
         try
         {
-            if (!File.Exists(configIni)) return null;
-            var m = System.Text.RegularExpressions.Regex.Match(
-                File.ReadAllText(configIni), @"game_version\s*=\s*([0-9]+\.[0-9]+)");
-            return m.Success ? m.Groups[1].Value : null;
+            // A folder the user downloaded elsewhere is the likeliest one to be missing these files.
+            ApplyBundledFixes(v.Id, gameDir, progress, _state.Settings.Enhancements, PayloadRoot, undo);
+            // The folder the version is registered at already: its origin decides whether a removal deletes the files
+            // by default, and importing the same folder again does not change who put it there. Read from the copy of
+            // the registrations, so the folder comparison (it may ask the file system) runs outside the state's lock.
+            var same = registrations.FirstOrDefault(i =>
+                string.Equals(i.Id, v.Id, StringComparison.OrdinalIgnoreCase) && ImportCheck.SameDir(i.GameDir, gameDir));
+            var installed = RegisterVersion(v.Id, gameDir, same?.Origin is { Length: > 0 } origin ? origin : "import");
+            undo.Commit();
+            return installed;
         }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            // The version's registration and the selection it made go back as they were; a registration of another
+            // version made meanwhile stays.
+            _state.RestoreRegistration(v.Id, registrations, selected);
+            var left = undo.Undo();
+            Log.Info($"import local: version={v.Id} dir={gameDir} failed ({ex.Message}) — "
+                     + (left.Count == 0 ? "everything it wrote was taken back" : $"could not take back: {string.Join(", ", left)}"));
+            throw;
+        }
     }
 
     private static string SafeFullPath(string path)
@@ -451,13 +507,16 @@ public sealed class InstallService
     /// not start anyway; the optional ones are reported instead, never silently. The in-game
     /// enhancements DLL (manifest <c>inject</c> entries) is part of the plan only while
     /// <paramref name="withEnhancements"/> is on, and a missing one gets its own, milder wording —
-    /// the game works without it.</summary>
-    private static void ApplyBundledFixes(
-        string versionId, string gameDir, IProgress<InstallProgress> progress, bool withEnhancements)
+    /// the game works without it. <paramref name="undo"/>: the import's run, every write kept so that it can be taken
+    /// back (<see cref="GamePatcher.ApplyUndoable"/>).</summary>
+    private static void ApplyBundledFixes(string versionId, string gameDir, IProgress<InstallProgress> progress,
+        bool withEnhancements, string? payloadRoot, PatchUndo? undo = null)
     {
         progress.Report(new(InstallPhase.Patch, 0.3, L.T("core.install.patch.preparing")));
-        var report = GamePatcher.Apply(versionId, gameDir, m => Log.Info($"patch {versionId}: {m}"),
-            withInjectables: withEnhancements);
+        Action<string> log = m => Log.Info($"patch {versionId}: {m}");
+        var report = undo is null
+            ? GamePatcher.Apply(versionId, gameDir, log, payloadRoot, withInjectables: withEnhancements)
+            : GamePatcher.ApplyUndoable(versionId, gameDir, undo, log, payloadRoot, withInjectables: withEnhancements);
         Log.Info($"patch {versionId}: {report.Summary}");
         // The likeliest optional casualty is mhynot2.dll quarantined by antivirus — it IS an
         // anti-cheat bypass — and without it a Windows 11 install cannot start the client at all.
@@ -474,7 +533,8 @@ public sealed class InstallService
     }
 
     /// <summary>Registers <paramref name="gameDir"/> as version <paramref name="versionId"/> and
-    /// persists the state — shared by the download install and the local import.</summary>
+    /// persists the state — shared by the download install and the local import. The registration and its
+    /// save run under <see cref="RelicState.Gate"/> as one.</summary>
     private InstalledVersion RegisterVersion(string versionId, string gameDir, string origin)
     {
         var installed = new InstalledVersion
@@ -489,10 +549,13 @@ public sealed class InstallService
         // DETECTED, not "selected": a reinstall over a folder that already had Japanese keeps it, and an
         // imported folder gets whatever packs it really carries.
         DetectVoices(installed);
-        _state.Installed.RemoveAll(i => i.Id == versionId);
-        _state.Installed.Add(installed);
-        _state.SelectedVersionId = versionId;
-        _state.Save();
+        lock (RelicState.Gate)
+        {
+            _state.Installed.RemoveAll(i => i.Id == versionId);
+            _state.Installed.Add(installed);
+            _state.SelectedVersionId = versionId;
+            _state.Save(StatePath);
+        }
         return installed;
     }
 
@@ -590,10 +653,13 @@ public sealed class InstallService
             try { profiles.DeleteProfile(inst.ProfileId); }
             catch (Exception ex) { Log.Info($"remove {inst.Id}: profile slot {inst.ProfileId}: {ex.Message}"); }
 
-            _state.Installed.RemoveAll(i => string.Equals(i.Id, inst.Id, StringComparison.OrdinalIgnoreCase));
-            if (string.Equals(_state.SelectedVersionId, inst.Id, StringComparison.OrdinalIgnoreCase))
-                _state.SelectedVersionId = _state.Installed.FirstOrDefault()?.Id;
-            _state.Save();
+            lock (RelicState.Gate)
+            {
+                _state.Installed.RemoveAll(i => string.Equals(i.Id, inst.Id, StringComparison.OrdinalIgnoreCase));
+                if (string.Equals(_state.SelectedVersionId, inst.Id, StringComparison.OrdinalIgnoreCase))
+                    _state.SelectedVersionId = _state.Installed.FirstOrDefault()?.Id;
+                _state.Save(StatePath);
+            }
             Log.Info($"remove: unregistered {inst.Id} (origin={inst.Origin}, dir={inst.GameDir}, deleteFiles={deleteFiles})");
 
             var leftovers = new List<string>();
@@ -1535,13 +1601,18 @@ public sealed class InstallService
 
     /// <summary>Re-read the installed voice packs from the marker files and persist them when they
     /// differ from the record. The disk is the truth (a pack the player copied in, an add whose last
-    /// step never ran); saving only on a change keeps this cheap enough to call on every path.</summary>
+    /// step never ran); saving only on a change keeps this cheap enough to call on every path. The
+    /// markers are read first; the record and its save change under <see cref="RelicState.Gate"/>.</summary>
     private void SyncVoices(InstalledVersion inst)
     {
-        var before = inst.Voices;
-        DetectVoices(inst);
-        if (before is null || !before.SequenceEqual(inst.Voices, StringComparer.OrdinalIgnoreCase))
-            _state.Save();
+        var now = VoiceLanguages.Detect(inst.GameDir);
+        lock (RelicState.Gate)
+        {
+            var before = inst.Voices;
+            inst.Voices = now;
+            if (before is null || !before.SequenceEqual(now, StringComparer.OrdinalIgnoreCase))
+                _state.Save(StatePath);
+        }
     }
 
     private static string Human(long bytes)

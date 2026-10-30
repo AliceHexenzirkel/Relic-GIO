@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Uninstaller for the GIO agent -- removes ONLY the agent (service, files, firewall rule).
-# The game stacks (1.6_live/2.8_live), docker, MySQL data and player progress are NOT touched;
-# the .orig backups and payload files the agent placed INSIDE the stacks stay where they are,
-# because removing those would change the running game server, not the agent.
+# The game stacks (the folders the agent's config names), docker, MySQL data and player progress are
+# NOT touched; the .orig backups and payload files the agent placed INSIDE the stacks stay where they
+# are, because removing those would change the running game server, not the agent.
 #   bash uninstall_agent.sh          # interactive (asks once)
 #   bash uninstall_agent.sh --yes    # non-interactive
 # Works on RHEL-family (firewalld) and Debian-family (ufw or no firewall).

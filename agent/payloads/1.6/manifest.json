@@ -26,6 +26,16 @@
   ],
   "_templates_note": "Progress templates players may start from (policy-gated). Each dump holds exactly one player (uid 1); the agent imports it into relic_tpl_<id> at provision time and copies it onto a new account with copy_save (guids rewritten). 'fresh' (no progress) is implicit. post-gaa is the same account after finishing the GAA quest.",
 
+  "saves": {
+    "schema": "save_schema.json",
+    "clientPrefixes": ["CNRELAndroid1.6.0_", "CNRELAndroid1.6.1_", "CNRELWin1.6.0_", "CNRELWin1.6.1_",
+                       "CNRELiOS1.6.0_", "CNRELiOS1.6.1_", "OSRELAndroid1.6.0_", "OSRELAndroid1.6.1_",
+                       "OSRELWin1.6.0_", "OSRELWin1.6.1_", "OSRELiOS1.6.0_", "OSRELiOS1.6.1_"],
+    "acceptFrom": {
+      "1.6": { "drop": [] }
+    }
+  },
+
   "events": {
     "_note": "Only the GAA events stay open. bootstrap.sh (adjust.sql) rebases ALL events to start now, so without the list below events that do not belong here would run too. Any id that appears in neither list is closed and flagged in the log.",
     "openUntil": "2050-01-01 00:00:00",

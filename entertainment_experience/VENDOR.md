@@ -45,6 +45,19 @@ parent of the 3.0 merge `6efec31bd`). Kept: `cheat-library/src/{appdata,framewor
 `res/assembly_checksum.json` (game 2.8 OS: UnityPlayer `4999961552328781053`, UserAssembly `807890720029543258` — verified identical
 on the client Relic installs), `res/signatures.json`, README, LICENSE, `.gitmodules`. Older tag with the same target: `gmh5225/Genshin-Akebi-GC@v0.8`.
 
+## `mod/cheat-library/src/appdata-32/` — upstream's game 3.2 data (Apache-2.0)
+
+| | |
+|---|---|
+| Upstream | https://github.com/NctimeAza/AnimeGame-Cheat-3.3 (the repository `mod/` comes from) |
+| Ref | commit `ee9258aac2bf1717a1bcec80fa902c7f3db9a8da` (2022-12-04, "Merge pull request #806 from CNLouisLiu/FakeTimePlus"), whose `cheat-library/res/assembly_checksum.json` names `OSRELWin3.2.0` — the parent of `8b2bcf6`, the commit that switches upstream's checksums to 3.3 (it reached the mainline through `4f55c46`, "Merge pull request #808"). An ancestor of tag `v1.2.3`. The mainline's last commit that still names `OSRELWin3.2.0`, `937f4310d946c021faf50a05bfbd7c108e47f71c` ("Merge pull request #809", first parent `ee9258a`), differs from it in `cheat-library/src/appdata/` only by the comma after the CN offset of `MoleMole_PlayerModule_ChangeGameTime`, which Relic restores by hand: the data Relic takes is the same from either. Cross-checked against tag `v1.1.1` = `d754a5fcc8f04d52170489dc226cc9138222cd42` (3.2, single-offset): every offset both carry is the same. |
+| Licence | Apache License 2.0 — the same `LICENSE` blob at `ee9258a`, `v1.1.1` and `v1.2.3` |
+| Taken | from `cheat-library/src/appdata/` at `ee9258a`: `il2cpp-functions.h`, `il2cpp-types-ptr.h`, `il2cpp-api-functions.h`, `il2cpp-unityplayer-functions.h` (the OS column, converted to the single-offset form; the comma missing after the CN offset of `MoleMole_PlayerModule_ChangeGameTime` restored), `il2cpp-types.h` and `il2cpp-metadata-version.h` (as published); of `cheat-library/res/assembly_checksum.json` (`global`), the UnityPlayer sum and the UserAssembly sum of the unpatched file (under `alsoAccepted` in Relic's file). Besides that data only the one-line 3.2 test of `cheat-library/src/user/cheat/world/AutoChallenge.cpp` is taken, with its comment; the rest of the code stays `v1.2.3`'s. |
+| Relic's additions | the RELIC blocks at the end of `il2cpp-functions.h` and `il2cpp-types-ptr.h` (names Relic's code declares, at `0x0`), `0x0` for the NOT_UPDATED region of `il2cpp-api-functions.h` (values upstream never updated, which fall inside other functions of the 3.2 binary) and its RELIC block (`il2cpp_gchandle_get_target`, `il2cpp_custom_attrs_construct` with the values upstream lists only in that file's comment block, slots 92 and 172 of `il2cpp_get_api_table`), the include of `il2cpp-types-relic.h` at the end of `il2cpp-types.h`, and the files `il2cpp-types-relic.h`, `il2cpp-types-asserts.h`, `il2cpp-static-thunks.h`; `res/assembly_checksum-32.json` (the sum of the byte-patched `UserAssembly.dll` Relic leaves on disk and that file's sha256 as `bytepatchSha256`, upstream's sum under `alsoAccepted`) |
+
+Like the rest of the appdata headers this is game-derived material (see "Game-derived data" above): private repository,
+binaries only inside the Relic installer.
+
 ## Gitignored working material (`*_ref/`)
 - `heavy_ref/res/` — the assets listed above.
 - `dumps_ref/` — `Taiga74164-Akebi-GC_-_2022-09-30_02-58-16.bundle` (archive.org, full Akebi git history up to game 3.0,
@@ -794,3 +807,66 @@ on the client Relic installs), `res/signatures.json`, README, LICENSE, `.gitmodu
   what normal mode really does; every stamina prop the server sends is written to `relic-diag.txt` as `[sta]` (server value
   -> what the client got, the mode; the first 60 of a session, then one per 30 s). Builds clean for 16 / 28; the stamina
   change is NOT yet tested in game (a relog clears the owner's current stuck 0 by itself - the login sends the real 170).
+- 2026-10-16 **DevTest, the dev-only test bed** (docs/ENTERTAINMENT-EXPERIENCE.md §9.6; never part of a release). A new
+  `DevTest|x64` configuration in `relic-ee.sln`, `cheat-library.vcxproj` and `cheat-base.vcxproj`: every Release|x64
+  block and per-item setting cloned (`/MT`, `/Brepro`, `/EHa`, map file, its own `bin\v<ver>\DevTest-x64\`) plus
+  `RELIC_DEVTEST=1` for the compiler (both projects) and rc.exe. New files, `ExcludedFromBuild` in Debug, Release and
+  Release_WS, bodies under `#if RELIC_DEVTEST`: `src/user/cheat/misc/DevTest.{h,cpp}` (the feature, group "Dev Test" in
+  the Debug tab: a command channel under `<mod folder>/devtest/` - one `cmd.json`, an answer file per command id, a
+  status twice a second - and the game-thread ops: status, wait, shot, mark, quit, teleport with in-process arrival, the
+  free camera's set / move / path / release through `FreeCamera::PushPose`, entities, avatar, the game's UI switch, the
+  quiet overlay and the menu, transient feature switches, plus a watchdog handler that puts everything back),
+  `DevTestChannel.{h,cpp}` (NavBake's file helpers, copied - NavBake keeps its own), `DevTestCapture.{h,cpp}` (the
+  screenshot: a job slot owned by compare-and-swap, the render thread's CopyResource into a cached staging texture and
+  its later `Map` with `DO_NOT_WAIT`, a worker thread that encodes the PNG through WIC and hashes the DLL with BCrypt -
+  Windows components, no vendor code added), `DevTestUi.{h,cpp}` (the UI tree, button clicks, the login form and the
+  door page, `Application.Quit`, all resolved by name through the il2cpp API). Touch points, each a `#if RELIC_DEVTEST`
+  block or a macro whose Release form is the original text, so that no line after them moves (the log macros carry
+  `__LINE__`): `cheat.cpp` registers `FEAT_INST(DevTest)` before `CameraPath` (the three-line block takes the place
+  of a whitespace-only separator of the feature list, and two other empty lines above the next log macro go),
+  `misc/Debug.h` includes `DevTest.h`, `main.h` names the configuration file
+  (`RELIC_CONFIG_FILE`: `cfg-devtest.json` in a DevTest build, `cfg.json` otherwise; `main.cpp` uses it), `res/res.rc`
+  carries the `DEVTESTMARKER` RCDATA resource, and in cheat-base: `DX11Events::DevPresentEvent` fired before and after
+  `RenderEvent` except for a test present (`DXGI_PRESENT_TEST`; the `RELIC_RENDER_EVENT` macro of `dx11-hook.h`, and on
+  the line of each Present detour's diag tick `RELIC_DEV_PRESENT_FLAGS(Flags)`, which is nothing in Release),
+  `CheatManagerBase::RequestShowMenu` (of a show and a hide waiting for one render the later is served: in a DevTest
+  build each request takes the other back, `RequestHideMenu` included), and ImGui's settings file, which `renderer.cpp`
+  names through `RELIC_IMGUI_INI` (`renderer.h`: `imgui-devtest.ini` in a DevTest build, `imgui.ini` otherwise).
+  `tools/build_ee.ps1`: `-Config DevTest`, `-StageDev <dir>` (never inside the repository, the installed launcher or
+  the launcher's data folder), the DevTest-mark refusals; `build/pe_imports.ps1`: `Test-DevBuildMarker`. The Release
+  DLLs of 2.8 and 1.6 built from this tree are byte-identical to the ones built without it (same toolset). Builds
+  clean for 16 / 28; NOT yet run in game.
+- 2026-10-16 **Game 3.2: `GameVersion=32`** (docs/ENTERTAINMENT-EXPERIENCE.md §8.5). New `src/appdata-32/` from upstream
+  commit `ee9258a` (section above) and `res/assembly_checksum-32.json`; `res/res.rc` embeds that file for 32 and, for
+  32, Teyvat / Enkanomiya / the Chasm without an archipelago dataset (`InteractiveMap.cpp` loads and scales the same).
+  The module check of `framework/il2cpp-init.cpp` goes through `RELIC_MODULE_MATCHES` (`il2cpp-init.h`): on 3.2 it
+  also accepts the sums a module's entry lists under `alsoAccepted`, elsewhere it is the original call. Left out of a
+  32 build, each under `RELIC_GAME_VERSION`: `cheat.cpp` registers neither FlycloakModifier / SkinModifier (they act
+  through ESP's SceneEntityAppear hook) nor RenderResolution / RenderDistance (registered and compiled for 1.6 and
+  2.8 only - their `.cpp` bodies sit under `#if RELIC_GAME_VERSION <= 16 || RELIC_GAME_VERSION == 28`); `esp/ESP.{h,cpp}`
+  install neither the GadgetState nor the two SceneEntityAppear hooks, compile out their notify handling and hide
+  *Hide completed puzzles* (`RELIC_ESP_HIDES_FINISHED`, `ESP.h`, on the line of the original condition: on 3.2 a
+  configuration file that sets it hides nothing and `CheckPuzzleFinished` is not asked), and on 3.2 `GadgetInfo` leaves
+  out the four fields whose types the 3.2 data lacks (born type, gadget type, content case, the proto);
+  `player/InfiniteStamina.cpp` does not install the Wanderer's hook; `visuals/FreeCamera.cpp` installs `CameraStateMgr.FlushStateData` and compiles its body,
+  the `_camera` offset and the *Drive the Game Camera* option for 1.6 / 2.8 only (the option itself on 2.8 only),
+  and a build without the hook always takes the clone; `world/CustomWeather.cpp` keeps the 2.8 `EnviroSky` offsets for
+  2.8 only (`#else` -> `#elif RELIC_GAME_VERSION == 28`) and replaces the area-weather listing and the applied-preset
+  log by empty functions where no layout is known; `world/AutoChallenge.cpp` takes upstream's own 3.2 test on 3.2 (the
+  3.2 `CombatProperty` names no `level`); `misc/Debug.cpp` compiles out the unused `SendInfo_Hook` (`PlayerLoginReq`)
+  and the combat tooltip's level on 3.2; `misc/About.cpp` names 3.2 and the source of its data on 3.2; `game/util.{h,cpp}`
+  (`ShowInGame*`) and `framework/helpers.{h,cpp}` (`string_to_il2cppi(std::wstring)`) are compiled out on 3.2.
+  `RenderDistance.cpp`'s three `#else` branches of raw offsets became `#elif RELIC_GAME_VERSION == 28`, and
+  `CustomWeather.h`, `FreeCamera.h` and `RenderDistance.h` stop the build with `#error` for a game version above 16
+  other than 2.8, 3.2 and 3.3. DevTest: `DevTestUi.cpp` works without the API entries the 3.2 table lacks (assemblies
+  opened by name, methods walked, an overload only when unique by name and arity, statics from the static data of the
+  class that declares them, the type object from `byval_arg` once the API confirms it) and tries 2.8's login form by
+  name; `DevTest.cpp` answers `level: null` and notes that 3.2 has no game-camera drive. `cheat-library.vcxproj` /
+  `cheat-base.vcxproj`: the `GameVersion` comment names 32. `tools/build_ee.ps1`: `-Versions 32` (payload / stage folder
+  `3.2`); `-CopyToPayload` copies no version whose entry `payload/manifest.json` does not list (a warning, nothing
+  written); a build is refused before anything is built when a module of `res/assembly_checksum-<ver>.json` names a
+  `bytepatchSha256` the version's byte patch in the manifest does not give (3.2's UserAssembly.dll). Every edit in a
+  file the 1.6 / 2.8 builds compile keeps the line of each log call (`__LINE__`): the 1.6 and 2.8 Release DLLs built
+  from this tree are byte-identical to the ones built without it (same toolset). The 3.3 reference build leaves the
+  same features out (none of those RVAs or offsets is known for it either) and builds too. Builds clean for 32 (Release
+  and DevTest); NOT yet run in game.

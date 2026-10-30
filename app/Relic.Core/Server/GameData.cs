@@ -4,8 +4,9 @@ namespace Relic.Core.Server;
 
 /// <summary>
 /// The content catalogue behind the GM command screen (from config/gamedata.json): characters,
-/// 5★ weapons and 5★ artifact sets, each tagged with the first supported game version that carries
-/// it. Two jobs: <see cref="ForVersion"/> feeds the pickers only what the selected version knows
+/// 4★ and 5★ weapons and artifact sets, each tagged with the first supported game version that carries
+/// it — and the skins, a table of this class tagged the same way (<see cref="Costumes"/>).
+/// Two jobs: <see cref="ForVersion"/> feeds the pickers only what the selected version knows
 /// about, and <see cref="ResolveAvatar"/>/<see cref="ResolveWeapon"/> turn a typed name or alias
 /// into an id. Unknown names pass through unchanged (a raw id is always accepted), and artifact
 /// SETS still go out as raw "pieceId level" input — the server has no whole-set command.
@@ -56,6 +57,36 @@ public sealed class GameData
         public int Id { get; set; }
         public string Icon { get; set; } = "";
     }
+
+    /// <summary>A skin: the item id the server turns into a costume (<see cref="GmCommands.GiveCostume"/>),
+    /// the character that wears it and the first game version that carries it.</summary>
+    public sealed record CostumeEntry(int Id, string Character, string Name, string Since);
+
+    /// <summary>
+    /// The skins the command screen offers. The ids are those of AvatarCostumeExcelConfigData in the dumps
+    /// the catalogue is built on; the character of each is written by hand, because the dumps from 2.8 on
+    /// have that field's name obfuscated. Each row names the version it first exists in, like every other
+    /// entry of the catalogue, and <see cref="ForVersion"/> filters the list by the same rule. The rows
+    /// are listed as the skins came out: <see cref="CostumeOrder"/> reads the order of their versions
+    /// off them.
+    /// </summary>
+    public static readonly IReadOnlyList<CostumeEntry> Costumes =
+    [
+        new(340000, "Barbara", "Summertime Sparkle", "1.6"),
+        new(340001, "Jean", "Sea Breeze Dandelion", "1.6"),
+        new(340002, "Ningguang", "Orchid's Evening Gown", "2.8"),
+        new(340003, "Keqing", "Opulent Splendor", "2.8"),
+        new(340004, "Diluc", "Red Dead of Night", "2.8"),
+        new(340005, "Fischl", "Ein Immernachtstraum", "2.8"),
+        new(340006, "Jean", "Gunnhildr's Legacy", "2.8"),
+        new(340007, "Amber", "100% Outrider", "2.8"),
+        new(340008, "Mona", "Pact of Stars and Moon", "2.8"),
+        new(340009, "Rosaria", "To the Church's Free Spirit", "2.8"),
+    ];
+
+    /// <summary>The versions <see cref="Costumes"/> names, in the order its rows first name them — the
+    /// order of the versions that brought skins, known whatever the catalogue file holds.</summary>
+    private static readonly List<string> CostumeOrder = Costumes.Select(c => c.Since).Distinct().ToList();
 
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
@@ -154,24 +185,51 @@ public sealed class GameData
     /// Everything the given game version can actually grant: an entry counts as available once its
     /// "since" version has been reached. Deliberately permissive — an unknown version, an empty
     /// versionOrder or an entry with an unrecognised "since" all fall through to "include it", so a
-    /// hand-edited catalogue can never silently empty the pickers.
+    /// hand-edited catalogue can never silently empty the pickers. The skins (<see cref="Costumes"/>) go
+    /// through the same test: this is the one place that decides what a version has. Their table names
+    /// its own versions in order (<see cref="CostumeOrder"/>), so a version it names is ranked by that
+    /// order — a catalogue file without a version order, or one that leaves the version out, would
+    /// otherwise hand it every skin, each a button for an item that version does not have. A version the
+    /// table does not name is ranked by the catalogue's order, like the pickers. The answer also says
+    /// whether the catalogue describes the version at all (<c>covered</c>, <see cref="Covers"/>).
     /// </summary>
     public object ForVersion(string version)
     {
-        int target = VersionOrder.IndexOf((version ?? "").Trim());
-        bool Available(string since)
-        {
-            if (target < 0) return true;
-            int rank = VersionOrder.IndexOf(since ?? "");
-            return rank < 0 || rank <= target;
-        }
-
+        string asked = (version ?? "").Trim();
+        var skinOrder = CostumeOrder.Contains(asked) ? CostumeOrder : VersionOrder;
         return new
         {
-            avatars = Avatars.Where(a => Available(a.Since)).ToList(),
-            weapons = Weapons.Where(w => Available(w.Since)).ToList(),
-            artifactSets = ArtifactSets.Where(s => Available(s.Since)).ToList(),
+            covered = Covers(asked),
+            avatars = Avatars.Where(a => Available(VersionOrder, asked, a.Since)).ToList(),
+            weapons = Weapons.Where(w => Available(VersionOrder, asked, w.Since)).ToList(),
+            artifactSets = ArtifactSets.Where(s => Available(VersionOrder, asked, s.Since)).ToList(),
+            costumes = Costumes.Where(c => Available(skinOrder, asked, c.Since)).ToList(),
         };
+    }
+
+    /// <summary>
+    /// Does the catalogue describe <paramref name="version"/>: its version order names it, or the skins
+    /// table does (<see cref="CostumeOrder"/>). A catalogue without a version order (the first schema, or no
+    /// file) ties nothing to a version and describes every one, and so does a request that names none. The
+    /// lists of <see cref="ForVersion"/> stay permissive whatever this answers; the command screen takes
+    /// them only for a version the catalogue describes — for any other one they would be the content of the
+    /// versions it does describe, offered under this version's name — and otherwise says the catalogue is
+    /// not available for it and offers the numeric-id inputs.
+    /// </summary>
+    public bool Covers(string version)
+    {
+        string asked = (version ?? "").Trim();
+        return asked.Length == 0 || VersionOrder.Count == 0 || VersionOrder.Contains(asked) || CostumeOrder.Contains(asked);
+    }
+
+    /// <summary>Has <paramref name="version"/> reached <paramref name="since"/> in <paramref name="order"/>?
+    /// Yes as well whenever the order does not know one of the two.</summary>
+    private static bool Available(List<string> order, string version, string since)
+    {
+        int target = order.IndexOf(version);
+        if (target < 0) return true;
+        int rank = order.IndexOf(since ?? "");
+        return rank < 0 || rank <= target;
     }
 
     /// <summary>Resolve a name or numeric id to an avatar id string (returns input unchanged if unknown).</summary>

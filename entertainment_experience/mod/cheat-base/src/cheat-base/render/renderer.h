@@ -109,3 +109,11 @@ namespace renderer
 	void RemoveInputLocker(void* id);
 	bool IsInputLocked();
 }
+
+#if RELIC_DEVTEST
+// ImGui's own settings file next to the DLL (the places of the overlay's windows). A DevTest build (the dev-only
+// test bed) keeps a file of its own, so a test session never rewrites the player's imgui.ini.
+#define RELIC_IMGUI_INI "imgui-devtest.ini"
+#else
+#define RELIC_IMGUI_INI "imgui.ini"
+#endif

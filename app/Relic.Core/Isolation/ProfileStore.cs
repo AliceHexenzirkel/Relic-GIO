@@ -308,7 +308,29 @@ public sealed class ProfileStore
                 $"reg {string.Join(' ', args)} failed ({r.Code}): {r.Err.Trim()} {r.Out.Trim()}");
     }
 
-    private static bool RegKeyExists(string key) => Proc.Run("reg", "query", key).Ok;
+    private static bool RegKeyExists(string key) => RegistryKeyExists(key);
+
+    /// <summary>
+    /// Whether a registry key exists. A key under HKCU is asked in-process — one OpenSubKey, under a
+    /// millisecond —, because <c>reg query</c> prints every value of the key, about 40 µs per byte of
+    /// REG_BINARY data: seconds for the game's key, and a swap asks twice. A key that exists but cannot be
+    /// opened for reading counts as present, so the export that follows fails loudly and the slot keeps its
+    /// snapshot instead of losing it. Any other root is asked through reg.exe. Public for the isolation spike.
+    /// </summary>
+    public static bool RegistryKeyExists(string key)
+    {
+        string? sub = null;
+        foreach (string prefix in new[] { @"HKCU\", @"HKEY_CURRENT_USER\" })
+            if (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) { sub = key[prefix.Length..]; break; }
+        if (sub is null) return Proc.Run("reg", "query", key).Ok;
+        try
+        {
+            using var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(sub, writable: false);
+            return k is not null;
+        }
+        catch (System.Security.SecurityException) { return true; }
+        catch (UnauthorizedAccessException) { return true; }
+    }
 
     private static void Robocopy(string src, string dst)
     {

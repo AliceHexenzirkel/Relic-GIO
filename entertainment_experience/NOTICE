@@ -5,6 +5,13 @@ Copyright (c) the Akebi-GC / CCGenshin contributors (Callow/CallowBlack, Taiga74
 licensed under the Apache License, Version 2.0 (see LICENSE). Relic modified it; the modifications are
 recorded in VENDOR.md ("Changes made by Relic") and in this repository's history after the tag ee-vendor-v1.2.3.
 
+The game 3.2 data - mod/cheat-library/src/appdata-32/ and, of mod/cheat-library/res/assembly_checksum-32.json,
+the UnityPlayer sum and the unpatched UserAssembly sum listed under alsoAccepted (the primary UserAssembly sum is
+Relic's own, taken on the byte-patched file) - and the 3.2 test of mod/cheat-library/src/user/cheat/world/
+AutoChallenge.cpp are taken from the same repository at commit ee9258aac2bf1717a1bcec80fa902c7f3db9a8da (Apache
+License, Version 2.0, same copyright holders), cross-checked against its tag v1.1.1; what was taken and what Relic
+added is recorded in VENDOR.md.
+
 Third-party components bundled under mod/cheat-base/vendor/ and mod/cheat-library/res/ (see VENDOR.md):
 Dear ImGui (MIT, ocornut; brightness-fix fork by CallowBlack), {fmt} (MIT), nlohmann/json (MIT), magic_enum (MIT),
 SimpleIni (MIT), stb_image (MIT/Unlicense), WinReg (MIT), Microsoft Detours (MIT), imgui-notify (MIT),

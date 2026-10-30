@@ -4,6 +4,13 @@
 #include <cheat-base/cheat/Feature.h>
 #include <cheat-base/config/config.h>
 
+// "Drive the Game Camera" rests on miHoYoCamera.CameraStateMgr.FlushStateData and on the offset of its _camera
+// (FreeCamera.cpp): both are known for 1.6 and 2.8. The 3.2 build (like the 3.3 reference build) has neither, so it
+// installs no hook, offers no option and always runs the clone. Any other game version decides here first.
+#if RELIC_GAME_VERSION > 16 && RELIC_GAME_VERSION != 28 && RELIC_GAME_VERSION != 32 && RELIC_GAME_VERSION != 33
+#error "FreeCamera: no CameraStateMgr hook or layout is known for this game version (see FreeCamera.cpp)"
+#endif
+
 namespace cheat::feature
 {
 	// Relic: one camera pose as the free camera keeps it - the position ABSOLUTE (world-shift corrected), the

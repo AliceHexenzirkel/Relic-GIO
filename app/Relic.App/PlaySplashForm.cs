@@ -34,16 +34,29 @@ public sealed class PlaySplashForm : Form
         // player can still learn which account to log in with — hence it shows the login data too.
         // The SERVER's word wins (an account created through Relic, or "none on this server" for a
         // stack prepared without the default save); the catalogue only fills in before the server ever
-        // answered. An unknown or empty account adds nothing to the window, not even an empty row.
+        // answered. An unknown account adds nothing to the window, not even an empty row.
         // The password is never shown as an example value: "any" is the shipped default — this window
         // has no server status, so it cannot tell whether the admin turned verification on.
+        // A server whose last answer was that it has NO pre-made account for the version (a version whose
+        // payload ships no save, a stack prepared without the default save), with none created through
+        // Relic: the row says where an account comes from instead — nothing else would before the
+        // game's login screen.
         string account;
-        try { account = GameAccounts.ForVersion(versionId, state ?? RelicState.Load()).Account; }
+        bool noneHere = false;
+        try
+        {
+            var st = state ?? RelicState.Load();
+            account = GameAccounts.ForVersion(versionId, st).Account;
+            noneHere = account.Length == 0 && st.Settings.ServerHost is { Length: > 0 } host
+                && st.ServerAccountFor(host, st.Settings.ServerPort, versionId) is not null;
+        }
         catch (Exception ex) { Log.Error("splash: reading the account (non-fatal)", ex); account = ""; }
-        // One optional row each for the login hint and the enhancements hint, stacked in that order.
+        // One optional row each for the login hint and the enhancements hint, stacked in that order. The
+        // hint about an account of one's own takes two lines.
+        int loginRowH = account.Length > 0 ? 26 : noneHere ? 36 : 0;
         int loginRowY = 186;
-        int eeRowY = account.Length > 0 ? 212 : 186;
-        int height = 200 + (account.Length > 0 ? 32 : 0) + (enhancementsHint ? 26 : 0);
+        int eeRowY = loginRowY + loginRowH;
+        int height = 200 + (loginRowH > 0 ? loginRowH + 6 : 0) + (enhancementsHint ? 26 : 0);
         ClientSize = new Size(460, height);
         BackColor = Color.FromArgb(0x0f, 0x13, 0x20);
         // No TopMost: the session may raise the Windows certificate-approval dialog — DialogFront
@@ -111,7 +124,21 @@ public sealed class PlaySplashForm : Form
                 AutoSize = false,
                 TextAlign = ContentAlignment.MiddleCenter,
                 AutoEllipsis = true,
-                Bounds = new Rectangle(18, loginRowY, 424, 26),
+                Bounds = new Rectangle(18, loginRowY, 424, loginRowH),
+            });
+        }
+        else if (noneHere)
+        {
+            Controls.Add(new Label
+            {
+                Text = L.T("shell.splash.noLoginHint"),
+                Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+                ForeColor = goldDim,
+                BackColor = Color.Transparent,
+                AutoSize = false,
+                TextAlign = ContentAlignment.MiddleCenter,
+                AutoEllipsis = true,
+                Bounds = new Rectangle(18, loginRowY, 424, loginRowH),
             });
         }
         if (enhancementsHint)

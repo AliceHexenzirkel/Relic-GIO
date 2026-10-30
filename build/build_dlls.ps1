@@ -1,29 +1,37 @@
 <#
 .SYNOPSIS
-  Builds Relic's two native components on this PC and ends with a table of the results: the in-game
-  enhancements DLL (CLibrary.dll, one per game version, through entertainment_experience\tools\build_ee.ps1)
-  and the Win11 injector (launcher.exe + mhynot2.dll, through the CMake wrapper in injector\). The
-  prerequisites are checked first; a missing one is named with what to install and the script exits 2.
+  Builds Relic's native components on this PC and ends with a table of the results: the in-game
+  enhancements DLL (CLibrary.dll, one per game version, through entertainment_experience\tools\build_ee.ps1),
+  the Win11 injector (launcher.exe + mhynot2.dll, through the CMake wrapper in injector\) and the RSA key
+  patch (RSAPatch.dll, through the CMake wrapper in rsapatch\). The prerequisites are checked first; a
+  missing one is named with what to install and the script exits 2.
 
 .EXAMPLE
-  .\build\build_dlls.ps1                              # EE for 16 and 28 + the injector; nothing copied
-  .\build\build_dlls.ps1 -Versions 28 -SkipInjector   # one EE DLL
-  .\build\build_dlls.ps1 -SkipEe -Clean               # the injector from an empty injector\build
+  .\build\build_dlls.ps1                              # EE for 16 and 28 + the injector + RSAPatch; nothing copied
+  .\build\build_dlls.ps1 -Versions 28 -SkipInjector   # one EE DLL + RSAPatch
+  .\build\build_dlls.ps1 -SkipEe -Clean               # the injector + RSAPatch from empty build dirs
   .\build\build_dlls.ps1 -Toolset v143                # the EE DLLs with the Visual Studio 2022 toolset
   .\build\build_dlls.ps1 -CopyToPayload               # + payload\<ver>\ee\CLibrary.dll.bin, payload\common\ayy\anime\
-                                                      #   build\*.bin and their sha256 in payload\manifest.json
+                                                      #   build\*.bin, payload\3.2\mhypbase.dll.bin and their sha256
+                                                      #   in payload\manifest.json
 
 .NOTES
   Found with vswhere: MSBuild and the MSVC x64 tools of one Visual Studio / Build Tools install (its
-  vcvars64.bat gives the injector build its compiler environment), CMake and Ninja (the copies bundled
-  with Visual Studio, else PATH). Found on their own: a Windows 10/11 SDK (root = the registry's
-  KitsRoot10, else the ProgramFiles(x86) folder), the initialised injector\mhynot2 submodule, and python
-  for the manifest update. -Toolset auto picks v145 when an MSVC 14.5x toolset is installed under
-  that instance, else v143. The injector is always built with the static C runtime (RELIC_STATIC_CRT).
+  vcvars64.bat gives the injector and RSAPatch builds their compiler environment), CMake and Ninja (the
+  copies bundled with Visual Studio, else PATH). Found on their own: a Windows 10/11 SDK (root = the
+  registry's KitsRoot10, else the ProgramFiles(x86) folder), the initialised injector\mhynot2 and
+  rsapatch\RSAPatch submodules, and python for the manifest update. -Toolset auto picks v145 when an MSVC
+  14.5x toolset is installed under that instance, else v143. The injector is always built with the static
+  C runtime (RELIC_STATIC_CRT); RSAPatch with the dynamic one, which it needs (its TLS callback uses
+  std::filesystem before a static C runtime would be initialised).
 
   The result table says per file whether it equals the committed payload file and whether it imports a
   Visual C++ runtime DLL (build\pe_imports.ps1). Such a file depends on the Visual C++ redistributable of
-  the player's PC, so publish.ps1 refuses it in payload\ and -CopyToPayload does not copy it. -CopyToPayload
+  the player's PC, so publish.ps1 refuses it in payload\ and -CopyToPayload does not copy it - except
+  RSAPatch: it takes the place of the game's own mhypbase.dll, a replacement entry of the manifest, and
+  the game's own plugins need the redistributable anyway. Its -CopyToPayload also records the hash it
+  replaces in the entry's sha256Earlier (payload_manifest.py --set-sha), so a game that holds the earlier
+  build gets the new one while a player's own mhypbase.dll is told apart from both. -CopyToPayload
   replaces committed, in-game-tested binaries: payload\ is what every player's launcher puts into the game
   folder, so launch the game with the new files before committing them. .github\workflows\dlls.yml
   builds the same things on GitHub and never copies.
@@ -35,6 +43,7 @@ param(
     [string]$Toolset = 'auto',
     [switch]$SkipEe,
     [switch]$SkipInjector,
+    [switch]$SkipRsaPatch,
     [switch]$CopyToPayload,
     [switch]$Clean
 )
@@ -44,10 +53,13 @@ $buildEe       = Join-Path $repo 'entertainment_experience\tools\build_ee.ps1'
 $manifestTool  = Join-Path $repo 'entertainment_experience\tools\payload_manifest.py'
 $injectorSrc   = Join-Path $repo 'injector'
 $injectorBuild = Join-Path $injectorSrc 'build'
+$rsapatchSrc   = Join-Path $repo 'rsapatch'
+$rsapatchBuild = Join-Path $rsapatchSrc 'build'
 $payloadMap    = @{ 16 = '1.6'; 28 = '2.8' }
 $vers = @($Versions | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ })
 $needEe  = -not $SkipEe
 $needInj = -not $SkipInjector
+$needRsa = -not $SkipRsaPatch
 
 function Rel([string]$path) {
     if ($path.StartsWith($repo, [StringComparison]::OrdinalIgnoreCase)) { $path.Substring($repo.Length).TrimStart('\') } else { $path }
@@ -72,8 +84,8 @@ if (Test-Path $vswhere) {
     $vsRoot  = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1
     $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
 }
-Add-Prereq 'vswhere.exe' ($needEe -or $needInj) $(if (Test-Path $vswhere) { $vswhere }) $vsHelp
-Add-Prereq 'Visual Studio instance' ($needEe -or $needInj) $vsRoot $vsHelp
+Add-Prereq 'vswhere.exe' ($needEe -or $needInj -or $needRsa) $(if (Test-Path $vswhere) { $vswhere }) $vsHelp
+Add-Prereq 'Visual Studio instance' ($needEe -or $needInj -or $needRsa) $vsRoot $vsHelp
 Add-Prereq 'MSBuild.exe' $needEe $msbuild 'add the MSBuild component to the Visual Studio install'
 
 $msvcDir = $null; $msvcVersions = @()
@@ -82,9 +94,9 @@ if ($vsRoot) {
     $msvcVersions = @(Get-ChildItem $msvcDir -Directory -ErrorAction SilentlyContinue | ForEach-Object Name | Sort-Object -Descending)
 }
 $cl = $msvcVersions | ForEach-Object { Join-Path $msvcDir "$_\bin\Hostx64\x64\cl.exe" } | Where-Object { Test-Path $_ } | Select-Object -First 1
-Add-Prereq 'MSVC x64 tools (cl.exe)' ($needEe -or $needInj) $cl 'add "MSVC v145 - C++ x64/x86 build tools" (or v143) to the Visual Studio install'
+Add-Prereq 'MSVC x64 tools (cl.exe)' ($needEe -or $needInj -or $needRsa) $cl 'add "MSVC v145 - C++ x64/x86 build tools" (or v143) to the Visual Studio install'
 $vcvars = if ($vsRoot) { Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat' } else { $null }
-Add-Prereq 'vcvars64.bat' $needInj $(if ($vcvars -and (Test-Path $vcvars)) { $vcvars }) 'part of the MSVC x64 tools component'
+Add-Prereq 'vcvars64.bat' ($needInj -or $needRsa) $(if ($vcvars -and (Test-Path $vcvars)) { $vcvars }) 'part of the MSVC x64 tools component'
 # The SDK root comes from the installer's KitsRoot10 registry value (the 64-bit view of the key, then the
 # 32-bit one), with the conventional folder under ProgramFiles(x86) as the last candidate; the first root
 # whose Include\<version>\um\windows.h exists is used (newest version), and the row names that root.
@@ -101,7 +113,7 @@ foreach ($r in $sdkRoots) {
         Where-Object { Test-Path (Join-Path $_.FullName 'um\windows.h') } | Sort-Object Name -Descending | Select-Object -First 1
     if ($dir) { $sdk = "$($dir.FullName) (root $($r.Root), from $($r.Source))"; break }
 }
-Add-Prereq 'Windows SDK' ($needEe -or $needInj) $sdk 'add a "Windows 11 SDK" component to the Visual Studio install'
+Add-Prereq 'Windows SDK' ($needEe -or $needInj -or $needRsa) $sdk 'add a "Windows 11 SDK" component to the Visual Studio install'
 
 $cmake = $null; $ninja = $null
 if ($vsRoot) {
@@ -111,12 +123,14 @@ if ($vsRoot) {
 }
 if (-not $cmake) { $c = Get-Command cmake -ErrorAction SilentlyContinue; if ($c) { $cmake = $c.Source } }
 if (-not $ninja) { $n = Get-Command ninja -ErrorAction SilentlyContinue; if ($n) { $ninja = $n.Source } }
-Add-Prereq 'CMake' $needInj $cmake 'add "C++ CMake tools for Windows" to the Visual Studio install, or install CMake and put it on PATH'
-Add-Prereq 'Ninja' $needInj $ninja 'comes with "C++ CMake tools for Windows"; else install Ninja and put it on PATH'
+Add-Prereq 'CMake' ($needInj -or $needRsa) $cmake 'add "C++ CMake tools for Windows" to the Visual Studio install, or install CMake and put it on PATH'
+Add-Prereq 'Ninja' ($needInj -or $needRsa) $ninja 'comes with "C++ CMake tools for Windows"; else install Ninja and put it on PATH'
 $sub = Join-Path $injectorSrc 'mhynot2\CMakeLists.txt'; $subMinhook = Join-Path $injectorSrc 'mhynot2\minhook\CMakeLists.txt'
 Add-Prereq 'injector\mhynot2 submodule' $needInj $(if ((Test-Path $sub) -and (Test-Path $subMinhook)) { Split-Path $sub }) 'run: git submodule update --init --recursive'
+$rsaSub = Join-Path $rsapatchSrc 'RSAPatch\RSAPatch\dllmain.cpp'
+Add-Prereq 'rsapatch\RSAPatch submodule' $needRsa $(if (Test-Path $rsaSub) { Split-Path $rsaSub }) 'run: git submodule update --init --recursive'
 $python = Get-Command python -ErrorAction SilentlyContinue
-Add-Prereq 'python (manifest update)' ($CopyToPayload -and ($needEe -or $needInj)) $(if ($python) { $python.Source }) 'install Python 3 and put python on PATH'
+Add-Prereq 'python (manifest update)' ($CopyToPayload -and ($needEe -or $needInj -or $needRsa)) $(if ($python) { $python.Source }) 'install Python 3 and put python on PATH'
 
 $toolsetNote = 'requested'
 if ($Toolset -eq 'auto') {
@@ -232,6 +246,32 @@ if ($needInj) {
             if ($LASTEXITCODE -ne 0) { throw "payload/manifest.json was not updated for $($o.Bin) (see the message above)" }
         }
         Write-Warning 'payload\common\ayy\anime\build\ now holds this injector build: launch the game through Relic (Windows 10 and 11) before committing it.'
+    }
+}
+
+# ---- RSAPatch -----------------------------------------------------------------------------------------
+if ($needRsa) {
+    Write-Host ''
+    if ($Clean -and (Test-Path $rsapatchBuild)) { Write-Host "==> removing $(Rel $rsapatchBuild)"; Remove-Item -Recurse -Force $rsapatchBuild }
+    Write-Host "==> cmake -S rsapatch -B rsapatch\build -G Ninja -DCMAKE_BUILD_TYPE=Release   (vcvars64 of $vsRoot)"
+    $saved = Save-Environment
+    try {
+        Import-VcEnvironment $vcvars
+        & $cmake -S $rsapatchSrc -B $rsapatchBuild -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_MAKE_PROGRAM=$ninja"
+        if ($LASTEXITCODE -ne 0) { throw "cmake configure failed (exit $LASTEXITCODE)" }
+        & $cmake --build $rsapatchBuild
+        if ($LASTEXITCODE -ne 0) { throw "cmake --build failed (exit $LASTEXITCODE)" }
+    } finally { Restore-Environment $saved }
+
+    $rsaDll = Join-Path $rsapatchBuild 'RSAPatch.dll'
+    $rsaPayloadFile = Join-Path $repo 'payload\3.2\mhypbase.dll.bin'
+    $rsaSha = Add-Result 'RSAPatch.dll (mhypbase.dll, dynamic CRT)' $rsaDll $rsaPayloadFile
+    if ($CopyToPayload) {
+        Copy-Item $rsaDll $rsaPayloadFile -Force
+        Write-Host "    -> $(Rel $rsaPayloadFile)"
+        & python $manifestTool --set-sha '3.2/mhypbase.dll.bin' $rsaSha
+        if ($LASTEXITCODE -ne 0) { throw "payload/manifest.json was not updated for mhypbase.dll.bin (see the message above)" }
+        Write-Warning 'payload\3.2\mhypbase.dll.bin now holds this RSAPatch build: launch the 3.2 client through Relic before committing it.'
     }
 }
 

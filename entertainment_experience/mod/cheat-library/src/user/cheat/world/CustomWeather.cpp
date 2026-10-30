@@ -82,7 +82,7 @@ namespace cheat::feature
     static constexpr float kCrashA2 = 4.2f;
     static constexpr float kCrashA3 = 2.0f;
     static constexpr int64_t kDamageProbeDelayMs = 400;   // ~two EventManager ticks - the event is QUEUED
-#else
+#elif RELIC_GAME_VERSION == 28
     static constexpr size_t kSkyWeatherOffset = 0xA8;
     static constexpr size_t kPresetHasLightningOffset = 0x13D1;
 #endif
@@ -107,7 +107,7 @@ namespace cheat::feature
         "Data/Environment/Weather/BigWorld/Weather_Snow",
         "Data/Environment/Weather/BigWorld/Weather_MengDeInStorm",
     };
-
+#if RELIC_GAME_VERSION <= 16 || RELIC_GAME_VERSION == 28   // the two logs below read the layouts of the dumped builds
     // What the game itself would offer here. Short names, current area only - a hint, not an inventory.
     static void LogAreaWeatherList(void* Enviro)
     {
@@ -158,7 +158,10 @@ namespace cheat::feature
             }
         });
     }
-
+#else   // no EnviroSky layout and no weather-list getter on this build: the asset probe logs only what ChangeWeather answers
+    static void LogAreaWeatherList(void*) {}
+    static void LogWeatherPreset(void*) {}
+#endif
 #if RELIC_GAME_VERSION <= 16
     // Relic: upstream's Lightning toggle only MOVES EntityType::Lightning entities the weather has already
     // spawned. On 1.6 there are never any to move - the bolt is a server-spawned gadget (server excel
@@ -225,7 +228,6 @@ namespace cheat::feature
         return state;
     }
 #endif
-
     CustomWeather::CustomWeather() : Feature(),
         NFP(f_Enabled, "CustomWeather", "Custom weather", false),
         NFP(f_Lightning, "CustomWeather", "Lighting", false),
@@ -245,7 +247,6 @@ namespace cheat::feature
 
         events::GameUpdateEvent += MY_METHOD_HANDLER(CustomWeather::OnGameUpdate);
     }
-
     const FeatureGUIInfo& CustomWeather::GetGUIInfo() const
     {
         TRANSLATED_GROUP_INFO("Custom Weather", "Visuals");
@@ -312,7 +313,6 @@ namespace cheat::feature
         ConfigWidget(_TR("Lightning"), f_Lightning, _TR("Lightning target enemy, works with RainHeavy weather."));
 #endif
     }
-
     bool CustomWeather::NeedStatusDraw() const
     {
         return f_Enabled->enabled();

@@ -10,14 +10,16 @@ Version accuracy comes from Dimbreath/AnimeGameData's history: each supported ve
 the commit that actually carries that build's data, so "what existed in 1.6" is a fact, not a guess.
     1.6 -> 72c9112a7c5e  "game_1.5.1_1.6.0_diff"
     2.8 -> d56ed231c451  "OSRELWin2.8.0_R8078355_S8017153_D8078038"
+    3.2 -> e7c944395d00  "OSRELWin3.2.0_R11078128_S10998085_D11077560"
 
 Icons come from Enka's UI mirror (the game's own UI_* sprites); the game's local .blk archives are
 MiHoYo-encrypted and not extractable.
 
 The same run writes config/tweakdata.json, the display catalogue of the Gameplay page: every enemy,
-reward item, resin domain and quest of the supported versions by id, with its English name and its
-sprite name, plus the sprites of the enemies and of the reward palette. Enka serves no enemy icon
-and only a 64 px copy of a few item icons, so those sprites come from a chain of hosts
+reward item, resin domain and quest of the supported versions by id -- a quest there is a main quest or
+the chapter of a hangout event, the id the reward tiers of that event are listed by --, with its English
+name and its sprite name, plus the sprites of the enemies and of the reward palette. Enka serves no enemy
+icon and only a 64 px copy of a few item icons, so those sprites come from a chain of hosts
 (SPRITE_CHAIN).
 
 Usage (from the repo root):
@@ -25,7 +27,8 @@ Usage (from the repo root):
     python build/make_catalog.py --no-icons      # data only (fast)
 
 Every table and every sprite download is kept under build/_gamedata_cache: with the cache and the
-icon folder in place a run needs no network.
+icon folder in place a run needs no network. A version's folder there names the pin its tables were
+read at (pin.txt, check_cache_pin): after a change of that pin in VERSIONS, delete the folder.
 """
 import http.client
 import io
@@ -66,7 +69,7 @@ SPRITE_CHAIN = {
 SPRITE_PX = 128
 
 # Ordered oldest -> newest; an item's "since" is the FIRST version it appears in.
-VERSIONS = [("1.6", "72c9112a7c5e"), ("2.8", "d56ed231c451")]
+VERSIONS = [("1.6", "72c9112a7c5e"), ("2.8", "d56ed231c451"), ("3.2", "e7c944395d00")]
 
 NEEDED = [
     "ExcelBinOutput/WeaponExcelConfigData.json",
@@ -90,23 +93,41 @@ TWEAK_NEEDED = [
     "ExcelBinOutput/DailyDungeonConfigData.json",
     "ExcelBinOutput/CityConfigData.json",
     "ExcelBinOutput/MainQuestExcelConfigData.json",
+    "ExcelBinOutput/ChapterExcelConfigData.json",
+    "ExcelBinOutput/CoopRewardExcelConfigData.json",
 ]
+
+# The hangout events. The agent's catalogue lists a reward tier of one under its chapter, so the page names
+# such a row by the chapter's row of the chapter table: "<chapter number>: <chapter title>", the game's own texts
+# ("Hangout Event: Barbara - Act I: Wellspring of Healing"). That table holds the chapters of the story quests as
+# well, whose ids main quests carry too; of its ids only the chapters a hangout reward names are a quest's
+# (hangout_chapters).
+CHAPTER_TABLE = "ChapterExcelConfigData.json"
+COOP_REWARD_TABLE = "CoopRewardExcelConfigData.json"
 
 # The entrance points of the world map, for the name of the place a domain is entered from
 # ("Midsummer Courtyard"). Only a full build carries the file -- the 1.6 commit is a diff without
-# BinOutput -- and that build obfuscates the three keys read from it: the entrance's title text,
-# its dungeon list and its rows of the daily rotation.
-SCENE_POINTS = {"2.8": "BinOutput/Scene/Point/scene3_point.json"}
-POINT_TITLE, POINT_DUNGEONS, POINT_ROTATION = "PFMFPKFDNEK", "JHHFPGJNMIN", "OIBKFJNBLHO"
+# BinOutput --, and a build may obfuscate its keys: the points object, an entrance's title text, its
+# dungeon list and its rows of the daily rotation. The dumps refresh BinOutput only now and then: 2.8
+# and 3.2 carry the file of 2.7 unchanged, so 3.2 reads the file of the next build that refreshed it
+# (its revision numbers follow 3.2's) -- names of places, resolved against 3.2's own tables: an
+# entrance whose dungeon list names a dungeon 3.2 lacks is left out. "commit" None = the version's
+# pin (VERSIONS).
+SCENE_POINTS = {
+    "2.8": {"path": "BinOutput/Scene/Point/scene3_point.json", "commit": None, "points": "points",
+            "title": "PFMFPKFDNEK", "dungeons": "JHHFPGJNMIN", "rotation": "OIBKFJNBLHO"},
+    "3.2": {"path": "BinOutput/Scene/Point/scene3_point.json", "commit": "1a6597f5a673", "points": "FFPNEODINCK",
+            "title": "titleTextID", "dungeons": "dungeonIds", "rotation": "dungeonRandomList"},
+}
 
 # The sections of the Gameplay catalogue and, for each, the tables whose ids decide an entry's
-# "since".
+# "since" (section_ids: of the chapter table, the hangout chapters alone).
 TWEAK_ID_TABLES = {
     "monsters": ["MonsterExcelConfigData.json"],
     "items": ["MaterialExcelConfigData.json", "WeaponExcelConfigData.json",
               "ReliquaryExcelConfigData.json", "HomeWorldFurnitureExcelConfigData.json"],
     "domains": ["DungeonExcelConfigData.json"],
-    "quests": ["MainQuestExcelConfigData.json"],
+    "quests": ["MainQuestExcelConfigData.json", CHAPTER_TABLE],
 }
 TWEAK_SECTIONS = tuple(TWEAK_ID_TABLES)
 
@@ -125,6 +146,14 @@ SLOT = {
     "EQUIP_DRESS": "circlet",
 }
 SLOT_ORDER = ["flower", "plume", "sands", "goblet", "circlet"]
+# The main-stat depot every piece of a slot rolls from when nothing narrows it (build_version).
+STANDARD_DEPOT = {
+    "EQUIP_BRACER": 4000,
+    "EQUIP_NECKLACE": 2000,
+    "EQUIP_SHOES": 1000,
+    "EQUIP_RING": 5000,
+    "EQUIP_DRESS": 3000,
+}
 
 # The low-tier family (setId < 14000) also carries the 3-star-max sets (Adventurer, Lucky Dog,
 # Traveling Doctor). Their rank-4 rows exist in the tables but never drop in game at that rarity,
@@ -144,9 +173,14 @@ WEAPONS_QUEST_ONLY = {11420}
 # (tweak_items).
 CURRENCY = {201, 202, 203, 204, 101, 102, 105, 106}
 WISH = {221, 222, 223, 224}
+# The type line of a MATERIAL_AVATAR_MATERIAL row -> its palette class. The text map writes a line the way
+# its build does: the Sumeru talent books of 3.2 say "Talent Level-Up Materials". A line this table does not
+# know files its rows under "other" -- no sprite, no chip --, so the run names every such line
+# (unknown_material_lines).
 AVATAR_MATERIAL_GROUP = {
     "Character Level-Up Material": "ascension",
     "Talent Level-Up Material": "talent",
+    "Talent Level-Up Materials": "talent",
     "Weapon Ascension Material": "weaponMaterial",
     "Refinement Material": "weaponMaterial",
 }
@@ -193,16 +227,49 @@ def get(d, *names, default=None):
 
 
 _tables = {}  # parsed once per run: both catalogues read the text map, the largest table
+_pins_checked = set()  # the versions whose cache folder was held to their pin in this run
+PIN_FILE = "pin.txt"
+
+
+def check_cache_pin(version):
+    """CACHE/<version>/pin.txt names the pin the folder's own files were read at (a folder without it is
+    taken for the pin's, and the file is written). A folder of another pin stops the run: its tables would
+    pass for the new pin's."""
+    if version in _pins_checked:
+        return
+    pin, folder = dict(VERSIONS)[version], os.path.join(CACHE, version)
+    marker = os.path.join(folder, PIN_FILE)
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            kept = fh.read().strip()
+    except FileNotFoundError:
+        os.makedirs(folder, exist_ok=True)
+        with open(marker, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(pin + "\n")
+        kept = pin
+    if kept != pin:
+        raise SystemExit(f"!! {version}: {folder} holds the tables of {kept}, not of the pin {pin} -- delete the "
+                         "folder after a change of the pin")
+    _pins_checked.add(version)
 
 
 def fetch(version, commit, path):
-    local = os.path.join(CACHE, version, os.path.basename(path))
+    """A file of the dumps at a commit, parsed, kept under CACHE/<version>/. A file read at a commit
+    other than the version's pin (SCENE_POINTS) is kept as <commit>_<file name>, so it never passes for
+    a file of the pin; the pin's own files are kept by their name, in a folder held to the pin
+    (check_cache_pin)."""
+    check_cache_pin(version)
+    name = os.path.basename(path)
+    if commit != dict(VERSIONS).get(version):
+        name = f"{commit}_{name}"
+    local = os.path.join(CACHE, version, name)
     if local in _tables:
         return _tables[local]
     if not os.path.exists(local):
         os.makedirs(os.path.dirname(local), exist_ok=True)
         url = RAW.format(commit=commit, path=path)
-        print(f"  [{version}] downloading {os.path.basename(path)} ...", flush=True)
+        print(f"  [{version}] downloading {os.path.basename(path)}"
+              + ("" if name == os.path.basename(path) else f" at {commit}") + " ...", flush=True)
         # Through a temp file: a download that broke off must not pass for the table on the next run.
         req = urllib.request.Request(url, headers=UA)
         with urllib.request.urlopen(req, timeout=180) as r, open(local + ".part", "wb") as fh:
@@ -274,20 +341,23 @@ def build_version(version, commit):
             if nm:
                 affix_name[aid] = nm
 
-    by_set = {}
+    by_set, rank = {}, {}
     for p in pieces:
         sid = get(p, "SetId")
         slot = SLOT.get(get(p, "EquipType"))
         if not sid or not slot:
             continue
-        # Several ids share a (set, slot) -- they differ only in the initial sub-stat count (the
-        # trailing digit) and sub-stat pool. Pick the HIGHEST id deterministically: that is the
-        # variant that spawns with the most starting sub-stats, and it matches the ids the curated
-        # config/gamedata.json already ships (e.g. Blizzard Strayer flower = 71544, not 23454).
-        cur = by_set.setdefault(sid, {}).get(slot)
+        # Several ids share a (set, slot): they differ in the main-stat depot, the initial sub-stat
+        # count (the trailing digit) and the sub-stat pool. The variant a set's piece drops with wins:
+        # the slot's own main-stat depot (a piece with another depot rolls its main stat from a
+        # narrower pool), the most starting sub-stats, then the highest id -- the ids the curated
+        # config/gamedata.json ships (e.g. Blizzard Strayer flower = 71544, not 23454).
         pid = get(p, "Id")
-        if cur is None or pid > cur["id"]:
-            by_set[sid][slot] = {"slot": slot, "id": pid, "icon": get(p, "Icon")}
+        key = (get(p, "MainPropDepotId") == STANDARD_DEPOT[get(p, "EquipType")],
+               get(p, "AppendPropNum") or 0, pid)
+        if key > rank.get((sid, slot), (False, -1, -1)):
+            rank[(sid, slot)] = key
+            by_set.setdefault(sid, {})[slot] = {"slot": slot, "id": pid, "icon": get(p, "Icon")}
 
     artifacts = {}
     for sid, slots in by_set.items():
@@ -471,6 +541,19 @@ def item_group(m, type_desc):
     return "other"
 
 
+def unknown_material_lines(data, name_of):
+    """The type lines of the named MATERIAL_AVATAR_MATERIAL rows that AVATAR_MATERIAL_GROUP does not know
+    -> {line: number of rows}: such a row is filed as "other" (item_group)."""
+    lines = {}
+    for m in data["MaterialExcelConfigData.json"]:
+        if get(m, "MaterialType", default="") != "MATERIAL_AVATAR_MATERIAL" or not name_of(get(m, "NameTextMapHash")):
+            continue
+        line = name_of(get(m, "TypeDescTextMapHash"))
+        if line not in AVATAR_MATERIAL_GROUP:
+            lines[line] = lines.get(line, 0) + 1
+    return lines
+
+
 def stars(row):
     """Rarity of an item row, 0 when the game gives it none. The card of a collab character
     carries 105: the mark of a special five-star on top of its stars."""
@@ -552,13 +635,18 @@ def tweak_items(data, name_of):
     return rows, sprites
 
 
-def domain_entrances(data, name_of, points):
+def domain_entrances(data, name_of, points, keys):
     """{dungeon id: the name of the map entrance it is entered from}, out of the scene's entrance points.
 
     An entrance lists its dungeons itself (an artifact domain: one per difficulty) or names rows of
-    the daily rotation (a talent or weapon domain: one set of difficulties per weekday). A point
-    whose obfuscated keys do not hold what they should -- dungeon ids, rotation rows -- is left out.
+    the daily rotation (a talent or weapon domain: one set of difficulties per weekday). keys = the
+    names the file gives the entrance's title text, its dungeon list and its rotation rows
+    (SCENE_POINTS). A point whose keys do not hold what they should -- dungeon ids, rotation rows of
+    this version's own tables -- is left out.
     """
+    if keys is None:
+        return {}
+    key_title, key_dungeons, key_rotation = keys
     texts = ui_texts(data, name_of)
     dungeons = {get(d, "Id") for d in data["DungeonExcelConfigData.json"]}
     rotation = {get(r, "Id"): r for r in data["DailyDungeonConfigData.json"]}
@@ -570,9 +658,9 @@ def domain_entrances(data, name_of, points):
 
     entrance = {}
     for p in points.values():
-        title = p.get(POINT_TITLE)
+        title = p.get(key_title)
         title = texts.get(title, "") if isinstance(title, str) else ""
-        direct, rows = ids(p.get(POINT_DUNGEONS, []), dungeons), ids(p.get(POINT_ROTATION, []), rotation)
+        direct, rows = ids(p.get(key_dungeons, []), dungeons), ids(p.get(key_rotation, []), rotation)
         if p.get("$type") != "DungeonEntry" or not title or direct is None or rows is None:
             continue
         for row in rows:
@@ -582,16 +670,16 @@ def domain_entrances(data, name_of, points):
     return entrance
 
 
-def tweak_domains(data, name_of, points):
+def tweak_domains(data, name_of, points, keys):
     """The resin domains -> {id: entry}: every DUNGEON_DAILY_FIGHT row with a statue reward.
 
     The name ends in the difficulty as a roman numeral ("... Fires of Purification VI"): it becomes
     "tier" and leaves the name; a name without one takes its tier from the level order of the rows
-    that share it. "entrance" is there for a domain the map has an entrance to; a row the game
-    never opened is flagged released = false.
+    that share it. "entrance" is there for a domain the map has an entrance to (points + keys:
+    domain_entrances); a row the game never opened is flagged released = false.
     """
     city = {get(c, "CityId"): name_of(get(c, "CityNameTextMapHash")) for c in data["CityConfigData.json"]}
-    entrance = domain_entrances(data, name_of, points)
+    entrance = domain_entrances(data, name_of, points, keys)
     rows = {}
     for d in data["DungeonExcelConfigData.json"]:
         full = name_of(get(d, "NameTextMapHash"))
@@ -634,6 +722,35 @@ def tweak_quests(data, name_of):
     return rows
 
 
+def hangout_chapters(data):
+    """The ids of the chapters the hangout rewards name (a reward row of the coop reward table is one tier of
+    one chapter)."""
+    return {get(r, "ChapterId") for r in data[COOP_REWARD_TABLE]} - {None, 0}
+
+
+def tweak_hangouts(data, name_of):
+    """The chapter of every hangout reward -> {id: entry}: name = "<chapter number>: <chapter title>" as the
+    chapter table writes them, type "hangout". A chapter without both texts has no entry."""
+    chapters = {get(c, "Id"): c for c in data[CHAPTER_TABLE]}
+    rows = {}
+    for cid in sorted(hangout_chapters(data)):
+        c = chapters.get(cid) or {}
+        number, title = name_of(get(c, "ChapterNumTextMapHash")), name_of(get(c, "ChapterTitleTextMapHash"))
+        if number and title:
+            rows[cid] = {"id": cid, "name": f"{number}: {title}", "type": "hangout"}
+    return rows
+
+
+def section_ids(data, section):
+    """Every id the tables of a section carry (TWEAK_ID_TABLES): of the chapter table the hangout chapters
+    alone -- its other ids are the story chapters', and main quests carry some of those ids as well."""
+    ids = set()
+    for table in TWEAK_ID_TABLES[section]:
+        carried = {get(r, "Id") for r in data[table]}
+        ids |= (carried & hangout_chapters(data)) if table == CHAPTER_TABLE else carried
+    return ids
+
+
 def build_tweak_version(version, commit):
     """What the Gameplay page shows by name in this version: the entries of each section by id,
     every id its tables carry, and the sprites to fetch."""
@@ -646,37 +763,62 @@ def build_tweak_version(version, commit):
         text = tm.get(str(h), "").strip()
         return "" if UNTRANSLATED.search(text) else text
 
-    points = fetch(version, commit, SCENE_POINTS[version])["points"] if version in SCENE_POINTS else {}
+    spec = SCENE_POINTS.get(version)
+    points, keys = {}, None
+    if spec:
+        at = spec["commit"] or commit
+        doc = fetch(version, at, spec["path"])
+        points = doc.get(spec["points"]) if isinstance(doc, dict) else None
+        if not isinstance(points, dict):
+            raise SystemExit(f"!! {version}: {spec['path']} at {at} holds no object {spec['points']}")
+        keys = (spec["title"], spec["dungeons"], spec["rotation"])
     monsters, monster_sprites = tweak_monsters(data, name_of)
     items, item_sprites = tweak_items(data, name_of)
+    hangouts = tweak_hangouts(data, name_of)
     return {
         "monsters": monsters,
         "items": items,
-        "domains": tweak_domains(data, name_of, points),
-        "quests": tweak_quests(data, name_of),
-        "ids": {sec: {get(r, "Id") for t in tables for r in data[t]}
-                for sec, tables in TWEAK_ID_TABLES.items()},
+        "domains": tweak_domains(data, name_of, points, keys),
+        "quests": {**tweak_quests(data, name_of), **hangouts},
+        "ids": {sec: section_ids(data, sec) for sec in TWEAK_ID_TABLES},
         "sprites": {**monster_sprites, **item_sprites},
+        "materialLines": unknown_material_lines(data, name_of),
+        # (check_hangouts: a hangout chapter is listed among the quests by its id)
+        "hangoutChapters": hangout_chapters(data),
+        "hangoutRows": set(hangouts),
+        "mainQuests": {get(q, "Id") for q in data["MainQuestExcelConfigData.json"]},
     }
 
 
 def merge_tweak_versions(snapshots):
     """Fold the per-version snapshots into one list per section, sorted by id, and one sprite list.
 
-    since = the first version whose tables carry the id; every other field is the newest version's
-    row: later builds fix typos, and only they have the domain sub type.
+    since = the first version whose tables carry the id; city = the region most versions name for the
+    row, a tie to the newest: a domain does not move, and a build that files one under another region
+    (3.2 puts Cecilia Garden's domains in Liyue) is outvoted by the others; every other field is the
+    newest version's row: later builds fix typos, and only they have the domain sub type.
     """
     merged, sprites = {}, {}
     for sec in TWEAK_SECTIONS:
-        rows, since = {}, {}
+        rows, since, cities = {}, {}, {}
         for version, snap in snapshots:
             for i in snap["ids"][sec]:
                 since.setdefault(i, version)
+            for i, row in snap[sec].items():
+                if "city" in row:
+                    cities.setdefault(i, []).append(row["city"])
             rows.update(snap[sec])
-        merged[sec] = [dict(rows[i], since=since[i]) for i in sorted(rows)]
+        merged[sec] = [dict(rows[i], since=since[i], **({"city": most_named(cities[i])} if i in cities else {}))
+                       for i in sorted(rows)]
     for _, snap in snapshots:
         sprites.update(snap["sprites"])
     return merged, sprites
+
+
+def most_named(values):
+    """The value named most often in a list ordered oldest -> newest; a tie goes to the newest of the tied."""
+    top = max(values.count(v) for v in values)
+    return next(v for v in reversed(values) if values.count(v) == top)
 
 
 def fetch_sprite(host, icon):
@@ -775,11 +917,142 @@ def write_tweakdata(catalog):
         fh.write("{\n" + ",\n".join(parts) + "\n}\n")
 
 
+def check_entrances(snapshots):
+    """Stops the build when a version of SCENE_POINTS resolves no domain entrance, or when a domain an
+    earlier version names an entrance for -- and which this version still has -- is left without one,
+    a later version without a scene-point file of its own (no row in SCENE_POINTS) included: the newest
+    version's row wins (merge_tweak_versions), so such a row would drop the name on the page of every
+    version. A version before the first one that names entrances is not looked at. Returns the line that
+    says what was found."""
+    first, notes = {}, []
+    for v, snap in snapshots:
+        if v not in SCENE_POINTS and not first:
+            continue
+        named = {i for i, row in snap["domains"].items() if "entrance" in row}
+        if v in SCENE_POINTS and not named:
+            raise SystemExit(f"!! {v}: the scene-point file names no domain entrance -- its keys "
+                             "(SCENE_POINTS) do not fit the file")
+        lost = {}
+        for i, earlier in first.items():
+            if i in snap["domains"] and i not in named:
+                lost.setdefault(earlier, []).append(i)
+        if lost:
+            raise SystemExit("\n".join(
+                [f"!! {v}: {len(ids)} domains lose the entrance {earlier} names: "
+                 + ", ".join(str(i) for i in sorted(ids)) for earlier, ids in sorted(lost.items())]
+                + ([] if v in SCENE_POINTS else [f"!! {v} has no row in SCENE_POINTS: its rows name no entrance"])))
+        for i in named:
+            first.setdefault(i, v)
+        notes.append(f"{v} {len(named)} domains")
+    return "  entrances: " + (", ".join(notes) + ", none lost" if notes else "no version reads scene points")
+
+
+def check_hangouts(snapshots):
+    """Stops the build when the id of a hangout chapter is the id of a main quest -- in any version: the page
+    lists a reward row by the id of its quest or of its chapter, and the catalogue keeps one row per id. Returns
+    the line that says what was found: the chapters per version, and how many of them have a name."""
+    chapters = set().union(*(snap["hangoutChapters"] for _v, snap in snapshots))
+    quests = set().union(*(snap["mainQuests"] for _v, snap in snapshots))
+    clash = sorted(chapters & quests)
+    if clash:
+        raise SystemExit("!! the hangout chapters " + ", ".join(str(i) for i in clash) + " carry the id of a main "
+                         "quest as well -- a reward row is listed by the id of its quest or of its chapter")
+    return "  hangout chapters: " + ", ".join(
+        f"{v} {len(snap['hangoutChapters'])} ({len(snap['hangoutRows'])} named)" for v, snap in snapshots
+    ) + ", none with the id of a main quest"
+
+
+def read_previous_tweakdata():
+    """The catalogue as it is before this run writes it ({} when there is none or it cannot be read)."""
+    try:
+        with open(TWEAK_JSON, encoding="utf-8") as fh:
+            previous = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return previous if isinstance(previous, dict) else {}
+
+
+def report_older_ids(previous, merged):
+    """Lines that say what the newest version's rows change for the ids the previous catalogue
+    already had: their names, then their other fields (name, icon and since left out)."""
+    def rest(row):
+        return {k: v for k, v in row.items() if k not in ("name", "icon", "since")}
+
+    lines = []
+    for sec in TWEAK_SECTIONS:
+        old = {r["id"]: r for r in previous.get(sec) or [] if isinstance(r, dict) and "id" in r}
+        renamed, changed = [], []
+        for row in merged[sec]:
+            before = old.get(row["id"])
+            if before is None:
+                continue
+            if before.get("name") != row.get("name"):
+                renamed.append(f"{row['id']} {before.get('name')!r} -> {row.get('name')!r}")
+            a, b = rest(before), rest(row)
+            if a != b:
+                changed.append(f"{row['id']} ({', '.join(sorted(k for k in a.keys() | b.keys() if a.get(k) != b.get(k)))})")
+        lines.append(f"   {sec}: names changed for {len(renamed)} older ids"
+                     + (": " + "; ".join(renamed[:10]) + ("; ..." if len(renamed) > 10 else "") if renamed else ""))
+        lines.append(f"   {sec}: other fields changed for {len(changed)} older ids"
+                     + (", e.g. " + ", ".join(changed[:10]) if changed else ""))
+    return lines
+
+
+def agent_catalogue_ids(cat):
+    """The ids of each section that the agent's catalogue of the Gameplay settings
+    (agent/payloads/<v>/tweaks.json) hands the page: every monster it offers or a spawn slot holds,
+    every reward item, every domain, every quest of a quest reward."""
+    def ints(values):
+        return {int(i) for i in values if str(i).isdigit()}
+
+    abyss, domains, quests = cat.get("abyss") or {}, cat.get("domains") or {}, cat.get("quests") or {}
+    monsters = ints(cat.get("monsters") or {})
+    for chamber in (abyss.get("chambers") or {}).values():
+        for half in chamber.get("halves") or []:
+            monsters |= ints((half.get("slots") or {}).values())
+    for lineup in (domains.get("lineups") or {}).values():
+        monsters |= ints((lineup.get("slots") or {}).values())
+    return {
+        "monsters": monsters,
+        "items": ints(cat.get("items") or {}),
+        "domains": ints(domains.get("list") or {}),
+        "quests": ints(q for r in (quests.get("rewards") or {}).values() for q in r.get("quests") or []),
+    }
+
+
+def report_agent_ids(merged):
+    """Lines that name, per version, the ids of the agent's catalogue the display catalogue has no
+    row for: the page shows such an id as "#<id>"."""
+    have = {sec: {r["id"] for r in merged[sec]} for sec in TWEAK_SECTIONS}
+    lines = []
+    for v, _ in VERSIONS:
+        path = os.path.join(REPO, "agent", "payloads", v, "tweaks.json")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                ids = agent_catalogue_ids(json.load(fh))
+        except FileNotFoundError:
+            lines.append(f"   {v}: no agent catalogue")
+            continue
+        except (OSError, ValueError, AttributeError) as e:
+            lines.append(f"   {v}: the agent catalogue cannot be read ({e})")
+            continue
+        for sec in TWEAK_SECTIONS:
+            missing = sorted(ids[sec] - have[sec])
+            lines.append(f"   {v} {sec}: {len(missing)} of {len(ids[sec])} ids without a display row"
+                         + (", e.g. " + ", ".join(str(i) for i in missing[:10]) if missing else ""))
+    return lines
+
+
 def build_tweakdata(want_icons):
     print("\n== Gameplay catalogue: enemies, reward items, domains, quests ==")
     snapshots = [(v, build_tweak_version(v, c)) for v, c in VERSIONS]
     for v, s in snapshots:
         print(f"  {v}: " + ", ".join(f"{len(s[sec])} {sec}" for sec in TWEAK_SECTIONS))
+    print(check_entrances(snapshots))
+    print(check_hangouts(snapshots))
+    unknown = [f"{v} {line!r} ({n} items)" for v, s in snapshots for line, n in sorted(s["materialLines"].items())]
+    print("  material type lines: " + ("every one known" if not unknown else
+          "NOT in AVATAR_MATERIAL_GROUP (filed as other, no sprite): " + "; ".join(unknown)))
     merged, sprites = merge_tweak_versions(snapshots)
 
     if want_icons:
@@ -806,11 +1079,13 @@ def build_tweakdata(want_icons):
         "_comment": (
             "Generated by build/make_catalog.py — do not edit. Display data of the Gameplay page: "
             "names and sprite names by id. 'since' = the first supported version whose game data "
-            "has the id; every other field is the newest version's."
+            "has the id; a domain's 'city' = the region most of those versions name; every other field "
+            "is the newest version's."
         ),
         "versionOrder": [v for v, _ in VERSIONS],
         **merged,
     }
+    previous = read_previous_tweakdata()
     write_tweakdata(catalog)
     print(f"\n-> {TWEAK_JSON}  ({os.path.getsize(TWEAK_JSON) / 1024:.0f} KB)")
     for sec in TWEAK_SECTIONS:
@@ -819,6 +1094,12 @@ def build_tweakdata(want_icons):
         if any("icon" in r for r in rows):
             note.append(f"{sum(1 for r in rows if 'icon' in r)} with a sprite")
         print(f"   {len(rows)} {sec} ({', '.join(note)})")
+    print("\n== against the previous catalogue: the ids it already had ==")
+    for line in report_older_ids(previous, merged):
+        print(line)
+    print("\n== the agent's catalogues (agent/payloads/<v>/tweaks.json): ids the page would show as #<id> ==")
+    for line in report_agent_ids(merged):
+        print(line)
 
 
 def main():

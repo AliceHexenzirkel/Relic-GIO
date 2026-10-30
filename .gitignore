@@ -90,5 +90,6 @@ desktop.ini
 scratch/
 tmp/
 
-# Native injector build output (the source is the injector/mhynot2 submodule)
+# Native build output (the sources are the injector/mhynot2 and rsapatch/RSAPatch submodules)
 injector/build/
+rsapatch/build/

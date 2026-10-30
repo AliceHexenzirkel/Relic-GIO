@@ -1,3 +1,6 @@
 [submodule "injector/mhynot2"]
 	path = injector/mhynot2
 	url = https://github.com/khang06/mhynot2.git
+[submodule "rsapatch/RSAPatch"]
+	path = rsapatch/RSAPatch
+	url = https://github.com/34736384/RSAPatch

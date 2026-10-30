@@ -17,7 +17,7 @@ namespace Relic.Core.Install;
 public sealed class GameMirrorInfo
 {
     /// <summary>Stable key stored in <c>RelicSettings.Source</c>; must match across versions that
-    /// carry the same mirror. A version without it simply falls back to the CDN.</summary>
+    /// carry the same mirror. A version without it simply starts from the first host it has.</summary>
     public string Id { get; set; } = "";
     /// <summary>Shown in the UI (wizard + Settings).</summary>
     public string Label { get; set; } = "";
@@ -169,6 +169,12 @@ public sealed class GameVersionInfo
 
     /// <summary>Game + the default (English) pack — what the version card quotes.</summary>
     public long DefaultInstallSize => Client.Size + (VoicePack(VoiceLanguages.Default)?.Size ?? 0);
+
+    /// <summary>Does the catalogue name the official CDN for any archive of this version (the client or
+    /// a voice pack)? A version may carry none: its mirrors are then its only hosts, and the wizard
+    /// offers no "Official CDN" card for it.</summary>
+    public bool HasCdn =>
+        !string.IsNullOrWhiteSpace(Client.CdnUrl) || Voices.Values.Any(p => !string.IsNullOrWhiteSpace(p.CdnUrl));
 }
 
 /// <summary>

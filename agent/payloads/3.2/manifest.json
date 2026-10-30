@@ -1,0 +1,43 @@
+{
+  "version": "3.2",
+  "title": "Akasha Pulses, the Kalpa Flame Rises",
+  "note": "No save: a Prepare in the 'default' mode runs as 'keep' here (the database the stack has stays as it is), there is no pre-made account and no progress template -- every account starts a new character. Two server data tables are the package's own with cells changed, both installed whenever a progress choice is applied, in every progress mode, and never reverted (stage config). QuestData_Exported.txt: four cells in two rows -- the quest repair of the GIO guide: the condition 'event 2005001 has ended' taken out of quest 200001, and quest 800001's 'event 2003001 has ended' replaced by 'quest 2003001 is finished' --, so the server offers both quests once their other conditions hold. NewActivityCondData.txt: 47 cells in 46 rows, the day gates of the events the events block keeps open -- Fabulous Fungus Frenzy's 42 conditions 'event day < 19' become 'day < 7777', and so does the day of its row 2017501 ('day >= 19': close the event's content, lock map points 682 / 704 / 707), and the four 'Event Ending' mails (2017601, 5099008, 5107013, 5108016) wait for day 7777 as well, so none of them is sent; the event days on which acts, stages and photo spots open stay as the package has them, and so does 5108017's 'day < 5' (it hands its NPCs over to 5108018 from day 5). sdk/data/sdk.db is the vendor's empty account database and sdk/Dockerfile the vendor's Dockerfile with flask and werkzeug pinned: the package is published with an sdk.db that holds two accounts and their tokens and a Dockerfile that pins neither, and each of the two files is replaced only while it is byte for byte that copy (overMd5).",
+
+  "_stages_note": "files[].stage: 'config' = server data files installed in every progress mode (default / keep / fixes) and never reverted; 'bootstrap' = files put in place right before the vendor bootstrap creates the database and builds the images, and again at every Prepare, each only over a file whose md5 is one of its overMd5 (no .orig kept). md5 pins the bytes of the payload file itself.",
+  "files": [
+    { "src": "txt/QuestData_Exported.txt", "dst": "server/data/txt/QuestData_Exported.txt", "stage": "config", "tsv": true, "md5": "e8e83077678f178148890920aaa21ed5" },
+    { "src": "txt/NewActivityCondData.txt", "dst": "server/data/txt/NewActivityCondData.txt", "stage": "config", "tsv": true, "md5": "b00c4c8590a7f3e91c1c9ab6628851a2" },
+
+    { "src": "sdk/data/sdk.db", "dst": "sdk/data/sdk.db", "stage": "bootstrap", "md5": "82006cb51e3fff11391a4a8e2e4c90be", "overMd5": ["6ed4f3242897eaff8c2a191194d6e8bf"] },
+    { "src": "sdk/Dockerfile",  "dst": "sdk/Dockerfile",  "stage": "bootstrap", "md5": "bb4b9433d230c9a0eab6b0f3185e30f8", "overMd5": ["f18326c4e089a24bcac0173d2ac44605"] }
+  ],
+
+  "saves": {
+    "schema": "save_schema.json",
+    "clientPrefixes": ["CNRELAndroid3.2.0_", "CNRELWin3.2.0_", "CNRELiOS3.2.0_", "OSRELAndroid3.2.0_",
+                       "OSRELWin3.2.0_", "OSRELiOS3.2.0_"],
+    "acceptFrom": {
+      "1.6": { "drop": ["PlayerDataBin.6.5.1.2.2"] },
+      "2.8": { "drop": [] },
+      "3.2": { "drop": [] }
+    }
+  },
+
+  "events": {
+    "_note": "The four events of this version that the package opens stay open; the three older events it opens are closed, so the quests that wait for their end are offered (Perilous Trail's story quests, Omni-Ubiquity Net). Any id that appears in neither list is closed and flagged in the log. Each open event needs an Adventure Rank (20 or 30); Fabulous Fungus Frenzy and Outside the Canvas, Inside the Lens also need their prerequisite quests or the event page's Quick Start. They are kept open only while txt/NewActivityCondData.txt is in place (needsFiles: the stack's file holds the payload's bytes): with the package's own table Fabulous Fungus Frenzy closes its content for good on event day 19 -- the server keeps that in the save of every player who had the event -- so while the stack holds another table nothing is opened: the open events stay on the dates they have, and one an earlier run held open until openUntil ends now, its begin time kept. Applying a progress choice (Re-apply the progress) installs the table, then they open until openUntil.",
+    "openUntil": "2050-01-01 00:00:00",
+    "closedWindow": ["1998-06-09 10:00:00", "1998-06-28 03:59:59"],
+    "needsFiles": ["server/data/txt/NewActivityCondData.txt"],
+    "gaa": {
+      "2017001": "Fabulous Fungus Frenzy -- the version's main event (Adventure Rank 30)",
+      "5099001": "Adventurer's Trials (Adventure Rank 20)",
+      "5107001": "Hypostatic Symphony: Dissonant Verse (Adventure Rank 20)",
+      "5108001": "Outside the Canvas, Inside the Lens: Greenery Chapter (Adventure Rank 30)"
+    },
+    "others": {
+      "2003001": "Invitation of Windblume -- a 1.4 event, not from this version",
+      "2013001": "Perilous Trail -- a 2.7 event, must be finished (its story quests 1019 / 1029 / 1030 wait for its end)",
+      "5051001": "Bantan Sango Case Files -- a 2.3 event, must be finished (Omni-Ubiquity Net waits for its end)"
+    }
+  }
+}

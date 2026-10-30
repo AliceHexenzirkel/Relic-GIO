@@ -1,10 +1,22 @@
-"""Quest reward rows and the daily-commission drops.
+"""Quest and hangout reward rows, and the daily-commission drops.
 
 A quest's reward is a RewardData.txt row named by the parent quest's cell 任务奖励RewardID (a ',' / ';' list; 0 =
-none) in MainQuestData.txt or MainQuestData_Exported.txt -- the server loads both. A row may be rewritten in
-place only when exactly one quest names it and nothing else in the data does; "anything else" is found the
-way the tables name their references: every column of every other table whose header says Reward / 奖励 and
-that holds at least one RewardData id.
+none) in MainQuestData.txt or MainQuestData_Exported.txt -- the server loads both.
+
+A hangout event pays its rewards out of RewardData.txt as well: CoopRewardData.txt names one row per reward tier
+of a hangout chapter, and the tier is claimed once that many of the chapter's endings were reached, whichever
+they are (its condition: 领取条件1类型 6, COOP_COND_CHAPTER_END_FINISH_COUNT, with the chapter and the number of
+endings as its two parameters). Such a row is listed with its chapter where a quest row has its quest, as the
+kind "hangout", and with the number of endings it asks for as its `tier`. Proven while building: the condition
+is that one and counts the endings of the reward's own chapter, the chapter is a CoopChapterData row whose id is
+no main quest's, and the tiers of a chapter ask for 1 up to its number of endings (its CoopPointData rows of the
+type 3, POINT_END), each once.
+
+A row may be rewritten in place only when exactly one quest -- or exactly one hangout reward -- names it and
+nothing else in the data does; "anything else" is found the way the tables name their references: every column
+of every other table whose header says Reward / 奖励 and that holds at least one RewardData id. The two columns
+the rows are listed by -- the quests' 任务奖励RewardID and CoopRewardData's 奖励ID -- are those references
+already, and are not counted again.
 
 Daily commissions do not use RewardData: DailyTaskRewardData names one DropTreeData row per adventure-rank
 bracket, DailyTaskLevelData the bonus for all four commissions.
@@ -24,6 +36,20 @@ MAIN_QUEST_TABLES = ("MainQuestData", "MainQuestData_Exported")
 REWARD_COLUMN = "任务奖励RewardID"
 # 任务类型 (the server's QuestType; an empty cell reads as 0) -> the kind a multiplier is set for
 KIND_BY_TYPE = {"": "archon", "0": "archon", "2": "story", "3": "event", "5": "commission", "7": "world"}
+# The hangout events: the kind of their reward rows; the tables -- the reward tiers, the chapters, the story
+# points of a chapter --; the columns of a tier: its id, the reward row it grants, its chapter and its claim
+# condition (type, first and second parameter).
+HANGOUT = "hangout"
+COOP_REWARDS, COOP_CHAPTERS, COOP_POINTS = "CoopRewardData", "CoopChapterData", "CoopPointData"
+COOP_REWARD_ID, COOP_REWARD_COLUMN, COOP_CHAPTER_COLUMN = "ID", "奖励ID", "对应章节ID"
+COOP_CONDITION = ("领取条件1类型", "领取条件1参数1", "领取条件1参数2")
+# the condition of a tier: this many endings of the chapter reached (COOP_COND_CHAPTER_END_FINISH_COUNT)
+COOP_ENDINGS_REACHED = "6"
+# CoopChapterData: the id of a chapter. CoopPointData: the chapter of a point and its type; type 3 (POINT_END) is
+# an ending.
+COOP_CHAPTER_ID = "章节ID"
+COOP_POINT_CHAPTER, COOP_POINT_TYPE = "章节ID", "节点类型"
+COOP_POINT_END = "3"
 # columns that hold RewardData ids although their header does not say so
 EXTRA_REFERENCE_COLUMNS = {("ActivitySalesmanData", "奖池")}
 # scalar cells of a reward row = virtual items the server merges into the row's item list
@@ -55,8 +81,85 @@ def _reward_cells(table, cells, where):
     return out
 
 
+def _hangout_endings(stack):
+    """{chapter id: the number of its endings} of every chapter CoopChapterData defines, its endings counted
+    among the CoopPointData rows."""
+    chapters = stack.table(COOP_CHAPTERS)
+    endings = {}
+    for line, r in chapters.rows:
+        endings[to_int(r[chapters.col(COOP_CHAPTER_ID)], "%s:%d" % (chapters.rel, line))] = 0
+    points = stack.table(COOP_POINTS)
+    c_chapter, c_type = points.col(COOP_POINT_CHAPTER), points.col(COOP_POINT_TYPE)
+    for line, r in points.rows:
+        if r[c_type].strip() != COOP_POINT_END:
+            continue
+        chapter = to_int(r[c_chapter], "%s:%d" % (points.rel, line))
+        if chapter in endings:
+            endings[chapter] += 1
+    return endings
+
+
+def _hangout_rewards(stack, row_of, main_quests):
+    """-> {reward id: [(chapter id, tier)]}: the reward row of every CoopRewardData row, with the chapter it
+    belongs to and the number of that chapter's endings it asks for. `row_of` = the RewardData rows by id,
+    `main_quests` = {main quest id: where its row is}. Proven, each with the file and line named: the reward is
+    a RewardData row; the condition is the number of endings reached, of the reward's own chapter; the chapter
+    is a CoopChapterData row and its id is no main quest's (a reward row is listed by the id of its quest or of
+    its chapter); a tier asks for 1 up to the chapter's number of endings, and the tiers of a chapter are each
+    of those numbers, each once."""
+    t = stack.table(COOP_REWARDS)
+    c_id, c_reward, c_chapter = t.col(COOP_REWARD_ID), t.col(COOP_REWARD_COLUMN), t.col(COOP_CHAPTER_COLUMN)
+    c_type, c_counted, c_tier = (t.col(name) for name in COOP_CONDITION)
+    endings = _hangout_endings(stack)
+    named = collections.OrderedDict()
+    tiers = collections.OrderedDict()   # chapter id -> {tier: the line of the row that asks for it}
+    for line, r in t.rows:
+        where = "%s:%d" % (t.rel, line)
+        coop = to_int(r[c_id], where)
+        rid = to_int(r[c_reward], where)
+        if rid not in row_of:
+            raise CatalogError("%s: the hangout reward %d names the reward %d, which RewardData does not define"
+                               % (where, coop, rid))
+        condition = r[c_type].strip()
+        if condition != COOP_ENDINGS_REACHED:
+            raise CatalogError("%s: the hangout reward %d is claimed on the condition %r, not on the number of the "
+                               "chapter's endings reached (%s)" % (where, coop, condition, COOP_ENDINGS_REACHED))
+        chapter, counted = to_int(r[c_chapter], where), to_int(r[c_counted], where)
+        if counted != chapter:
+            raise CatalogError("%s: the hangout reward %d of chapter %d counts the endings of chapter %d"
+                               % (where, coop, chapter, counted))
+        if chapter not in endings:
+            raise CatalogError("%s: the hangout reward %d belongs to chapter %d, which CoopChapterData does not "
+                               "define" % (where, coop, chapter))
+        if chapter in main_quests:
+            raise CatalogError("%s: the hangout reward %d belongs to chapter %d, which is the id of a main quest "
+                               "too (%s) -- a reward row is listed by the id of its quest or of its chapter"
+                               % (where, coop, chapter, main_quests[chapter]))
+        tier = to_int(r[c_tier], where)
+        if not 1 <= tier <= endings[chapter]:
+            raise CatalogError("%s: the hangout reward %d is tier %d of chapter %d, which has %d endings -- a tier "
+                               "asks for 1 up to the chapter's number of endings"
+                               % (where, coop, tier, chapter, endings[chapter]))
+        asked = tiers.setdefault(chapter, {})
+        if tier in asked:
+            raise CatalogError("%s: the hangout reward %d is tier %d of chapter %d, and so is the reward on line %d "
+                               "-- each tier of a chapter asks for another number of endings"
+                               % (where, coop, tier, chapter, asked[tier]))
+        asked[tier] = line
+        named.setdefault(rid, []).append((chapter, tier))
+    for chapter, asked in tiers.items():
+        missing = [n for n in range(1, endings[chapter] + 1) if n not in asked]
+        if missing:
+            raise CatalogError("%s:%d: chapter %d has %d endings, and no hangout reward of it is tier %d -- the "
+                               "tiers of a chapter are 1 up to its number of endings, each once"
+                               % (t.rel, min(asked.values()), chapter, endings[chapter], missing[0]))
+    return named
+
+
 def build_rewards(stack, items):
-    """-> (the "rewards" map of the "quests" section, report dict)."""
+    """-> (the "rewards" map of the "quests" section, report dict). A row: its kind, the quests that name it --
+    for a hangout row, its chapter --, whether it may be rewritten in place, and for a row exactly one hangout
+    reward names, the number of the chapter's endings it asks for (`tier`)."""
     rewards = stack.table("RewardData")
     row_of = {}
     for line, r in rewards.rows:
@@ -66,11 +169,13 @@ def build_rewards(stack, items):
         row_of[rid] = (line, r)
 
     quests = collections.OrderedDict()      # reward id -> [(quest id, kind)]
+    main_quests = {}                        # main quest id -> where its row is
     for name in MAIN_QUEST_TABLES:
         t = stack.table(name)
         for line, r in t.rows:
             where = "%s:%d" % (t.rel, line)
             quest = to_int(r[t.col("父任务ID")], where)
+            main_quests.setdefault(quest, where)
             for token in _SPLIT.split(r[t.col(REWARD_COLUMN)]):
                 if token.strip() == "":
                     continue
@@ -85,6 +190,9 @@ def build_rewards(stack, items):
                     raise CatalogError("%s: quest %d has the type %s, which has no reward multiplier"
                                        % (where, quest, r[t.col("任务类型")]))
                 quests.setdefault(rid, []).append((quest, kind))
+    hangouts = _hangout_rewards(stack, row_of, main_quests)
+    for rid, tiers in hangouts.items():
+        quests.setdefault(rid, []).extend((chapter, HANGOUT) for chapter, _tier in tiers)
 
     # who else names a reward id
     others = collections.Counter()
@@ -93,6 +201,7 @@ def build_rewards(stack, items):
             continue
         columns = [ci for ci, header in enumerate(stack.header(name))
                    if not (name in MAIN_QUEST_TABLES and header == REWARD_COLUMN)
+                   and not (name == COOP_REWARDS and header == COOP_REWARD_COLUMN)
                    and ("reward" in header.lower() or "奖励" in header
                         or (name, header) in EXTRA_REFERENCE_COLUMNS)]
         if not columns:
@@ -127,8 +236,12 @@ def build_rewards(stack, items):
         if not held or len(set(item for item, _ in held)) != len(held):
             raise CatalogError("%s: the reward %d is empty or holds an item twice" % (where, rid))
         quest_ids = sorted(set(q for q, _ in users))
-        edit = 1 if len(quest_ids) == 1 and not others[rid] else 0
+        # (a hangout row may be rewritten in place, and carries its tier, only while ONE tier names it)
+        tiers = hangouts.get(rid, [])
+        edit = 1 if len(quest_ids) == 1 and len(tiers) <= 1 and not others[rid] else 0
         out[str(rid)] = {"kind": kinds[0], "quests": quest_ids, "edit": edit}
+        if len(tiers) == 1:
+            out[str(rid)]["tier"] = tiers[0][1]
         report[kinds[0]] += 1
         report["editable"] += edit
     return out, dict(report)

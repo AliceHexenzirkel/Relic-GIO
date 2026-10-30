@@ -1,0 +1,18 @@
+{
+ "version": "3.2",
+ "_note": "Ready-made 3.2_dev docker stack on the Internet Archive (an all-in-one server package: the 2.8 docker skeleton with ASAN builds of the services, plus a tenth service, tothemoonserver, that its compose file keeps under the profile donotstart -- without it the gateserver logs a failed connection about once a second, and nothing else changes). Same mechanism as 1.6 and 2.8 (download next to GIO_DIR_32, size + md5 verified, extracted, top folder renamed onto GIO_DIR_32); `alt` is the same tree as a .zip (Deflate and Store), which the agent unpacks itself -- what a box without a 7z extractor takes. Two files of the packs the package was put together from are in it: sdk/data/sdk.db with two accounts and their tokens, and an sdk/Dockerfile that pins neither flask nor werkzeug; the payload's bootstrap stage replaces each with the vendor's own while it is exactly that file. Its server/res holds an empty NavMesh folder and a server_res_version_md5_list.txt that names no navmesh file (its lines are a client resource index), and its compose file keeps the pathfinding server under donotstart: the stack runs without one, as it ships.",
+ "label": "Internet Archive",
+ "url": "https://archive.org/download/GIO-3.2_dev/3.2_dev.7z",
+ "size": 2374948383,
+ "md5": "e2d11d607666f7c8ea5e57cb38b410df",
+ "alt": [
+  {
+   "url": "https://archive.org/download/GIO-3.2_dev/3.2_dev.zip",
+   "size": 4153263969,
+   "md5": "55003fe229f3843a5b382d7ede847a39"
+  }
+ ],
+ "extractedSize": 18098241095,
+ "topDir": "3.2_dev",
+ "strays": []
+}

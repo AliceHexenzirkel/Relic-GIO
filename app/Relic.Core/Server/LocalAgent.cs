@@ -12,8 +12,9 @@ namespace Relic.Core.Server;
 /// The agent config on this PC, parsed the way the agent itself parses it (<c>parse_config_text</c> +
 /// <c>apply_config_file</c> in gio_agent.py): BOM tolerated, '#' comments and blank lines skipped,
 /// blanks around '=' trimmed, matching surrounding quotes stripped, keys limited to
-/// <c>[A-Za-z_][A-Za-z0-9_]*</c>, and the FIRST occurrence of a repeated key wins. Two parsers that
-/// disagree would have the launcher dial an agent on a port it never bound.
+/// <c>[A-Za-z_][A-Za-z0-9_]*</c>, and the FIRST occurrence of a repeated key wins — letter case not
+/// counted, as in the environment of Windows the agent reads them into. Two parsers that disagree would
+/// have the launcher dial an agent on a port it never bound.
 /// </summary>
 public sealed record LocalAgentConfig(IReadOnlyDictionary<string, string> All)
 {
@@ -25,8 +26,11 @@ public sealed record LocalAgentConfig(IReadOnlyDictionary<string, string> All)
     public string BindIp => Get("GIO_BIND_IP");
     public string AdvertisedIp => Get("GIO_ADVERTISED_IP");
     public string AdvertisedHost => Get("GIO_ADVERTISED_HOST");
-    public string Dir16 => Get("GIO_DIR_16");
-    public string Dir28 => Get("GIO_DIR_28");
+    /// <summary>The stack folder the config names for a version (its <see cref="ServerVersions.DirKey"/>
+    /// line), or "" when it names none.</summary>
+    public string DirOf(string version) => Get(ServerVersions.DirKey(version));
+    public string Dir16 => DirOf("1.6");
+    public string Dir28 => DirOf("2.8");
     public string ServerName => Get("GIO_SERVER_NAME");
     /// <summary>Blank = derived by the agent per version from the stack's <c>.env</c> <c>OUTER_IP</c>. Not a
     /// secret (the sign key is <c>GIO_MUIP_KEY</c>): a re-install form pre-fills it, since the form writes the
@@ -48,20 +52,27 @@ public sealed record LocalAgentConfig(IReadOnlyDictionary<string, string> All)
     /// With "Keep .env settings" off that is the configured <see cref="BindIp"/> (blank when none is
     /// set): the agent puts it into a stack's <c>.env</c> (<c>OUTER_IP</c>) when it prepares the stack.
     /// While <see cref="KeepEnv"/> is on the agent applies no bind IP and each stack keeps the
-    /// <c>OUTER_IP</c> its own <c>.env</c> holds, so that value is read from <c>&lt;Dir16&gt;\.env</c> and
-    /// <c>&lt;Dir28&gt;\.env</c> (<see cref="LocalAgent.StackOuterIp"/>) and taken when
-    /// <see cref="AgreedOuterIp"/> accepts it; when it does not — no <c>.env</c> yet, stacks that
-    /// disagree, an address that is not this PC's — the stored <see cref="BindIp"/> stands in. With the
-    /// option on, every read of this property reads the two files again and, for an address that is not
+    /// <c>OUTER_IP</c> its own <c>.env</c> holds, so that value is read from the <c>.env</c> of every
+    /// stack folder the config names (<see cref="StackDirs"/>, <see cref="LocalAgent.StackOuterIp"/>) and
+    /// taken when <see cref="AgreedOuterIp"/> accepts it; when it does not — no <c>.env</c> yet, stacks
+    /// that disagree, an address that is not this PC's — the stored <see cref="BindIp"/> stands in. With
+    /// the option on, every read of this property reads those files again and, for an address that is not
     /// loopback, binds one UDP socket.</summary>
     public string StackBindIp => KeepEnv
-        ? AgreedOuterIp(new[] { LocalAgent.StackOuterIp(Dir16), LocalAgent.StackOuterIp(Dir28) }, LocalAgent.CanBind) ?? BindIp
+        ? AgreedOuterIp(StackDirs.Select(LocalAgent.StackOuterIp), LocalAgent.CanBind) ?? BindIp
         : BindIp;
+
+    private static readonly System.Text.RegularExpressions.Regex StackDirKey = new(@"^GIO_DIR_[0-9]+\z");
+
+    /// <summary>Every stack folder the config names: the value of each <c>GIO_DIR_&lt;digits&gt;</c> key,
+    /// whatever version it stands for — the agent that reads this file may know a version this launcher
+    /// does not list, and that stack publishes its ports on this PC like the others.</summary>
+    private IEnumerable<string> StackDirs => All.Where(kv => StackDirKey.IsMatch(kv.Key)).Select(kv => kv.Value);
 
     /// <summary>The one address the <c>OUTER_IP</c> values of the stacks stand for, or null when they give
     /// none to go by. A blank value is a stack that names none (no <c>.env</c> yet) and has no say.
     /// "localhost" and every 127.* value count as 127.0.0.1 — the agent's <c>_is_loopback</c>. The stacks
-    /// that name one must agree: the launcher keeps ONE host for both versions. An address that is not
+    /// that name one must agree: the launcher keeps ONE host for every version. An address that is not
     /// loopback must be one <paramref name="canBind"/> accepts — docker publishes the stack's ports on
     /// it, which this PC can only do on an address it has — and never 0.0.0.0, which publishes on every
     /// address of this PC and leaves none to dial. Pure.</summary>
@@ -96,9 +107,11 @@ public sealed record LocalAgentConfig(IReadOnlyDictionary<string, string> All)
 }
 
 /// <summary>What <see cref="LocalAgent.Uninstall"/> did, step by step; <paramref name="Leftovers"/> names
-/// the files it could not delete (in use — a hotpatch pack a client is downloading, an open log).</summary>
+/// the files it could not delete (in use — a hotpatch pack a client is downloading, an open log), and
+/// <paramref name="KeptRules"/> the firewall rules of the agent that are still there afterwards (not asked to go, or
+/// not removed).</summary>
 public sealed record UninstallReport(bool Stopped, bool AutostartRemoved, bool FirewallRemoved, string? FirewallError,
-    bool FilesRemoved, IReadOnlyList<string> Leftovers);
+    bool FilesRemoved, IReadOnlyList<string> Leftovers, IReadOnlyList<string>? KeptRules = null);
 
 /// <summary>
 /// The GIO agent running on THIS Windows PC (Docker Desktop + Python). Relic ships the same
@@ -136,32 +149,105 @@ public static class LocalAgent
 
     public static bool IsInstalled => File.Exists(ConfigPath) && File.Exists(ScriptPath);
 
-    /// <summary>Find a usable CPython ≥ 3.10: the <c>py</c> launcher first, then <c>python</c> on PATH.
-    /// Returns null when none qualifies (the UI then shows install guidance).</summary>
-    public static PythonInfo? FindPython()
+    /// <summary>Spikes only: the interpreters the Python registry entries name, in the order they are tried, in
+    /// place of this PC's (<see cref="RegistryPythons"/>).</summary>
+    public static Func<IReadOnlyList<string>>? PythonRegistryOverride { get; set; }
+
+    /// <summary>Spikes only: one interpreter probe in place of a process — (program, arguments, the environment it
+    /// runs with) → (exit code, output), or null for a program that did not start.</summary>
+    public static Func<string, string, IReadOnlyDictionary<string, string>, (int Code, string Output)?>? PythonProbeOverride { get; set; }
+
+    /// <summary>What every interpreter probe adds to its environment: the Python install manager installs no runtime
+    /// because a launch command found none.</summary>
+    public static readonly IReadOnlyDictionary<string, string> PythonProbeEnvironment =
+        new Dictionary<string, string>(StringComparer.Ordinal) { ["PYTHON_MANAGER_AUTOMATIC_INSTALL"] = "false" };
+
+    /// <summary>The probe: the interpreter's own path and its version, written as UTF-8 whatever the console's code page
+    /// (an embeddable Python ignores PYTHONIOENCODING, and a user folder may hold a letter that code page lacks).</summary>
+    private const string PythonProbeCode = "import sys;sys.stdout.reconfigure(encoding='utf-8');print(sys.executable);print('%d.%d'%sys.version_info[:2])";
+
+    /// <summary>The interpreters <see cref="FindPython"/> asks, in order: Relic's own Python (its tools folder), then the
+    /// Python registry entries (PEP 514: this user's, then the machine's, <see cref="RegistryPythons"/>), then
+    /// <c>py -3</c>, <c>python</c> and <c>python3</c> from PATH — (program, the arguments before the probe's code).</summary>
+    public static IReadOnlyList<(string Exe, string Args)> PythonCandidates()
     {
-        foreach (var (exe, args) in new[] { ("py", "-3 -c"), ("python", "-c"), ("python3", "-c") })
+        var list = new List<(string, string)>();
+        if (File.Exists(Setup.SetupTools.PythonExe)) list.Add((Setup.SetupTools.PythonExe, "-c"));
+        foreach (var exe in PythonRegistryOverride?.Invoke() ?? RegistryPythons()) list.Add((exe, "-c"));
+        list.Add(("py", "-3 -c"));
+        list.Add(("python", "-c"));
+        list.Add(("python3", "-c"));
+        return list;
+    }
+
+    /// <summary>The interpreters the Python registry entries name (PEP 514, <c>Software\Python\PythonCore\&lt;tag&gt;\InstallPath</c>
+    /// — its <c>ExecutablePath</c>, else <c>python.exe</c> in the folder it names): this user's first, then the
+    /// machine's (64-bit view); within each the newest version first, a 64-bit one before a 32-bit one of the same
+    /// version; each once, and only one that is there. Never throws.</summary>
+    public static IReadOnlyList<string> RegistryPythons()
+    {
+        var found = new List<(int Order, Version Version, bool X86, string Exe)>();
+        var tagVersion = new System.Text.RegularExpressions.Regex(@"^([0-9]+)\.([0-9]+)");
+        foreach (var (hive, view, order) in new[] { (RegistryHive.CurrentUser, RegistryView.Default, 0), (RegistryHive.LocalMachine, RegistryView.Registry64, 1) })
         {
             try
             {
-                var psi = new ProcessStartInfo(exe)
+                using var root = RegistryKey.OpenBaseKey(hive, view);
+                using var core = root.OpenSubKey(@"Software\Python\PythonCore", writable: false);
+                if (core is null) continue;
+                foreach (var tag in core.GetSubKeyNames())
                 {
-                    Arguments = args + " \"import sys;print(sys.executable);print('%d.%d'%sys.version_info[:2])\"",
-                    UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true,
-                };
-                using var p = Process.Start(psi);
-                if (p is null) continue;
-                string output = p.StandardOutput.ReadToEnd();
-                if (!p.WaitForExit(8000)) { try { p.Kill(); } catch { } continue; }
-                if (p.ExitCode != 0) continue;
-                var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    using var ip = core.OpenSubKey(tag + @"\InstallPath", writable: false);
+                    if (ip is null) continue;
+                    string? exe = ip.GetValue("ExecutablePath") as string;
+                    if (string.IsNullOrWhiteSpace(exe) && ip.GetValue("") is string dir && dir.Trim().Length > 0)
+                        exe = Path.Combine(dir.Trim(), "python.exe");
+                    if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe.Trim())) continue;
+                    var m = tagVersion.Match(tag);
+                    var version = m.Success ? new Version(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value)) : new Version(0, 0);
+                    found.Add((order, version, tag.EndsWith("-32", StringComparison.OrdinalIgnoreCase), exe.Trim()));
+                }
+            }
+            catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException or FormatException or OverflowException)
+            {
+                Log.Info($"python registry entries ({hive}): {ex.Message}");
+            }
+        }
+        return found.OrderBy(f => f.Order).ThenByDescending(f => f.Version).ThenBy(f => f.X86)
+            .Select(f => f.Exe).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    /// <summary>An interpreter that is no runtime of its own: one under a <c>\WindowsApps\</c> folder (the Store's
+    /// app-execution aliases and its packages, whose writes to AppData Windows redirects) or in the Python install
+    /// manager's alias folder (<c>%LocalAppData%\Python\bin</c>). Never the answer of <see cref="FindPython"/>.</summary>
+    public static bool IsAliasPython(string? path)
+    {
+        string p = (path ?? "").Trim().Replace('/', '\\');
+        if (p.Contains(@"\WindowsApps\", StringComparison.OrdinalIgnoreCase)) return true;
+        string aliases = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Python", "bin");
+        return p.StartsWith(aliases.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Find a usable CPython ≥ 3.10 among <see cref="PythonCandidates"/>, in their order: each is asked for
+    /// its <c>sys.executable</c> and version (8 s at most, its input closed — a program that waits for an answer is not
+    /// waited for), with <see cref="PythonProbeEnvironment"/> in its environment, so the Python install manager never
+    /// downloads a runtime because a command found none. An answer under <c>\WindowsApps\</c> or in the install
+    /// manager's alias folder is passed over (<see cref="IsAliasPython"/>). Returns null when none qualifies (the UI
+    /// then shows install guidance). Every probe is a process: a caller on the message thread runs this off it.</summary>
+    public static PythonInfo? FindPython()
+    {
+        foreach (var (exe, args) in PythonCandidates())
+        {
+            try
+            {
+                if (ProbePython(exe, args) is not { Code: 0 } answer) continue;
+                var lines = answer.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                 if (lines.Length < 2) continue;
                 string path = lines[0], ver = lines[1];
                 var parts = ver.Split('.');
                 if (parts.Length < 2 || !int.TryParse(parts[0], out int maj) || !int.TryParse(parts[1], out int min)) continue;
                 if (maj < 3 || (maj == 3 && min < 10)) continue;
-                if (!File.Exists(path)) continue;
-                // WindowsApps stubs (the Store alias) resolve through an app-execution alias; that is fine.
+                if (IsAliasPython(path) || !File.Exists(path)) continue;
                 string exeW = Path.Combine(Path.GetDirectoryName(path)!, "pythonw.exe");
                 if (!File.Exists(exeW)) exeW = path;
                 return new PythonInfo(path, exeW, ver);
@@ -171,12 +257,80 @@ public static class LocalAgent
         return null;
     }
 
-    /// <summary>A 7z extractor the agent on this PC can use for the server-package download (the same
-    /// candidates as its <c>find_extractor()</c>): 7-Zip's 7z.exe in its usual homes or on PATH,
+    /// <summary>One interpreter probe of <paramref name="exe"/> with <paramref name="args"/> (the arguments before the
+    /// probe's code): (exit code, standard output read as UTF-8), null when the program did not answer within 8 s —
+    /// its input closed, its output read as it comes, the whole process tree ended at the deadline
+    /// (<see cref="Setup.TimedProcess"/>). A program that does not start throws.</summary>
+    private static (int Code, string Output)? ProbePython(string exe, string args)
+    {
+        if (PythonProbeOverride is { } fake) return fake(exe, args + " \"" + PythonProbeCode + "\"", PythonProbeEnvironment);
+        var argv = args.Split(' ', StringSplitOptions.RemoveEmptyEntries).Append(PythonProbeCode).ToList();
+        var r = Setup.TimedProcess.Run(exe, argv, TimeSpan.FromSeconds(8), PythonProbeEnvironment, CancellationToken.None);
+        return r.Code is { } code ? (code, System.Text.Encoding.UTF8.GetString(r.Stdout)) : null;
+    }
+
+    /// <summary>A 7z extractor the agent on this PC can use for the server-package download, in this order: the
+    /// <c>GIO_7Z</c> the installed agent's configuration names (when it is a file that is there), Relic's own
+    /// <c>7zr.exe</c> (its tools folder), then the agent's usual candidates (<see cref="OwnExtractor"/>). Relic's
+    /// <c>7zr.exe</c> reaches the agent only through <c>GIO_7Z</c>: every install writes it when the agent finds no
+    /// tool of its own (<see cref="FillSevenZip"/>). Null = nothing usable.</summary>
+    public static string? FindExtractor() => ConfiguredExtractor() ?? RelicSevenZip() ?? OwnExtractor();
+
+    /// <summary>The <c>GIO_7Z</c> of the installed agent's configuration when it names a file that is there (a tar is
+    /// taken only when it reads 7z, as the agent takes it); null otherwise.</summary>
+    private static string? ConfiguredExtractor()
+    {
+        var c = ReadConfig();
+        if (c is null || !c.All.TryGetValue("GIO_7Z", out var raw)) return null;
+        string tool = (raw ?? "").Trim();
+        if (tool.Length == 0) return null;
+        try
+        {
+            if (!File.Exists(tool)) return null;
+            string name = Path.GetFileNameWithoutExtension(tool).ToLowerInvariant();
+            return name is "tar" or "bsdtar" && !TarReadsSevenZip(tool) ? null : tool;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return null; }
+    }
+
+    /// <summary>Relic's <c>7zr.exe</c> when it is there.</summary>
+    private static string? RelicSevenZip() => File.Exists(Setup.SetupTools.SevenZipExe) ? Setup.SetupTools.SevenZipExe : null;
+
+    /// <summary>Does the agent on this PC find an extractor without Relic's — the one its configuration names
+    /// (<c>GIO_7Z</c>) or one of its usual candidates?</summary>
+    public static bool AgentFindsExtractor() => ConfiguredExtractor() is not null || OwnExtractor() is not null;
+
+    /// <summary>The <c>GIO_7Z</c> an install writes when the plan names none: <paramref name="relicPath"/> (Relic's
+    /// <c>7zr.exe</c>) when that file is there, the agent finds no extractor of its own and the path is one the plan
+    /// takes (<see cref="AgentInstallPlan.SevenZipPathOk"/> — a value written by itself never refuses an install); null
+    /// — nothing to write — otherwise. Pure.</summary>
+    public static string? SevenZipFill(string? named, bool relicHas, string relicPath, bool agentFindsOwn) =>
+        string.IsNullOrWhiteSpace(named) && relicHas && !agentFindsOwn && AgentInstallPlan.SevenZipPathOk(relicPath) ? relicPath.Trim() : null;
+
+    /// <summary>Fill a Windows plan's <see cref="AgentInstallPlan.SevenZip"/> by <see cref="SevenZipFill"/> from this
+    /// PC's files, so no install — the form's included — leaves the agent a <c>.7z</c> package it cannot unpack. True
+    /// when it filled it.</summary>
+    public static bool FillSevenZip(AgentInstallPlan plan)
+    {
+        if (plan is null || !plan.IsWindows) return false;
+        string relic = Setup.SetupTools.SevenZipExe;
+        bool there = File.Exists(relic);
+        if (SevenZipFill(plan.SevenZip, there, relic, AgentFindsExtractor()) is not { } fill)
+        {
+            if (there && string.IsNullOrWhiteSpace(plan.SevenZip) && !AgentInstallPlan.SevenZipPathOk(relic))
+                Log.Info($"local agent install: Relic's 7zr.exe is not written as GIO_7Z ({relic} is no path the configuration can hold)");
+            return false;
+        }
+        plan.SevenZip = fill;
+        return true;
+    }
+
+    /// <summary>The extractors the agent on this PC finds by itself (the same candidates as its
+    /// <c>find_extractor()</c> after <c>GIO_7Z</c>): 7-Zip's 7z.exe in its usual homes or on PATH,
     /// Bandizip's bz.exe, else Windows' own <c>System32\tar.exe</c> — bsdtar, accepted only when it was
     /// built with liblzma (it reads LZMA2 .7z then), and always by FULL path: Git for Windows puts a GNU
     /// tar on PATH that shadows it and knows no 7z at all. Null = nothing usable.</summary>
-    public static string? FindExtractor()
+    private static string? OwnExtractor()
     {
         var candidates = new List<string>();
         foreach (var env in new[] { "ProgramFiles", "ProgramFiles(x86)" })
@@ -199,35 +353,100 @@ public static class LocalAgent
         string tar = Path.Combine(sysRoot, "System32", "tar.exe");
         try
         {
-            if (File.Exists(tar))
-            {
-                var res = Proc.Run(tar, "--version");
-                if (res.Ok && (res.Out + res.Err).Contains("liblzma", StringComparison.OrdinalIgnoreCase)) return tar;
-            }
+            if (File.Exists(tar) && TarReadsSevenZip(tar)) return tar;
         }
         catch (Exception ex) { Log.Info($"tar.exe probe: {ex.Message}"); }
         return null;
     }
 
+    /// <summary>What <c>tar.exe --version</c> said of the file at its path, time and size: whether that tar was
+    /// built with liblzma changes only with the file itself, while asking it starts a process — and the
+    /// install form asks <see cref="FindExtractor"/> at every folder it checks.</summary>
+    private static (string Path, DateTime Written, long Length, bool Lzma)? _tarProbe;
+    private static readonly object TarProbeLock = new();
+
+    /// <summary>Does the tar at <paramref name="tar"/> read a .7z (its <c>--version</c> names liblzma)? Asked
+    /// once per file: the answer is remembered by the file's path, time and size. A run that does not end
+    /// well is not remembered.</summary>
+    private static bool TarReadsSevenZip(string tar)
+    {
+        var file = new FileInfo(tar);
+        var (path, written, length) = (file.FullName, file.LastWriteTimeUtc, file.Length);
+        lock (TarProbeLock)
+        {
+            if (_tarProbe is { } known && known.Path == path && known.Written == written && known.Length == length) return known.Lzma;
+        }
+        var res = Proc.Run(tar, "--version");
+        bool lzma = res.Ok && (res.Out + res.Err).Contains("liblzma", StringComparison.OrdinalIgnoreCase);
+        if (res.Ok) lock (TarProbeLock) _tarProbe = (path, written, length, lzma);
+        return lzma;
+    }
+
     /// <summary>Copy the shipped agent + payloads, write the config (merged with the previous one, see
     /// <see cref="MergeConfig(string, string?)"/>), run <c>--selftest</c>. Does not start the agent. Throws
-    /// with a user-facing message on failure.</summary>
+    /// with a user-facing message on failure — every refusal of the plan comes before anything is written.
+    /// A folder the previous config stores for a version is kept, whatever the form named: a stack folder
+    /// changes only through a relocation (<see cref="AgentInstallPlan.KeepStoredFolders"/>, applied to
+    /// <paramref name="plan"/> itself, so the caller reads the rows as the install left them). The config is
+    /// read again right before it is written, and a folder the running agent relocated meanwhile is the one
+    /// the version keeps; a config that cannot be read then is not written at all (the new agent files are
+    /// in place by then, the same state an update leaves). Returns the versions the agent really has to
+    /// download.</summary>
     public static IReadOnlyList<string> Install(AgentInstallPlan plan, PythonInfo python, Action<string>? log = null, string? agentDir = null)
     {
         if (!plan.IsWindows) throw new InvalidOperationException("LocalAgent.Install: plan target is not windows");
+        // The configuration this install replaces is read FIRST: the folders it stores stay, and a file
+        // that is there but cannot be read refuses the install before anything is written.
+        string? previous = ReadConfigTextForInstall();
+        var stored = previous is null ? null : ParseConfig(previous);
+        foreach (var k in plan.KeepStoredFolders(v => stored?.DirOf(v) ?? ""))
+        {
+            if (!k.Replaced) continue;
+            string line = L.T("core.deploy.dirKept", new { version = k.Version, dir = k.Stored, given = k.Given });
+            log?.Invoke(line);
+            Log.Info("local agent install: " + line);
+        }
+        // A folder the form names is written, and handed to the follow-up, the way the agent answers it
+        // (os.path.normpath): "C:\relic_servers\\3.2_live" would otherwise read as another folder than the
+        // agent's "C:\relic_servers\3.2_live" once a re-point went where it was asked.
+        plan.NormalizeWindowsFolders();
+        // The extractor the agent will unpack with: Relic's own 7zr.exe when the agent finds no tool of its own.
+        if (FillSevenZip(plan)) log?.Invoke(L.T("core.deploy.sevenZipUsed", new { path = plan.SevenZip }));
         var errs = plan.Validate();
         if (errs.Count > 0) throw new InvalidOperationException(string.Join("\n", errs));
-        // A version marked for download is skipped by the stack check — but the agent will have to
-        // EXTRACT what it downloads, and on Windows nothing guarantees a 7z tool: refuse now, with the
-        // fix in the message, rather than let a 2 GB download fail at its very last step.
+        if (!string.IsNullOrWhiteSpace(plan.SevenZip) && !File.Exists(plan.SevenZip.Trim()))
+            throw new InvalidOperationException(L.T("core.deploy.sevenZipMissing", new { path = plan.SevenZip.Trim() }));
+        // A folder the form names must be on a drive the agent can use (the agent's own relocation rule):
+        // Docker Desktop bind-mounts no network drive, a CD cannot be written, a RAM disk loses its files at
+        // a reboot. A folder the configuration stores is the agent's own and is not asked about.
+        var drives = plan.Versions
+            .Where(v => (plan.ChoiceFor(v) is StackChoice.Have or StackChoice.Download) && !plan.FolderIsStored(v)
+                && !string.IsNullOrWhiteSpace(plan.DirFor(v)))
+            .Select(v => DriveProblem(v, plan.DirFor(v))).OfType<string>().ToList();
+        if (drives.Count > 0) throw new InvalidOperationException(string.Join("\n", drives));
         var missing = plan.MissingStackEntries(p => Directory.Exists(p) || File.Exists(p));
         if (missing.Count > 0) throw new InvalidOperationException(L.T("core.deploy.stackIncomplete", new { list = string.Join(", ", missing) }));
-        if (plan.FetchVersions().Count > 0 && FindExtractor() is null)
-            throw new InvalidOperationException(L.T("core.deploy.noExtractorWindows"));
-
+        // A download into a folder the form names that holds other files: the agent would refuse it.
+        var occupied = plan.DownloadTargetProblems(FolderKindOf);
+        if (occupied.Count > 0) throw new InvalidOperationException(string.Join("\n", occupied));
+        // The agent to install comes first: a build that ships none has no catalogue either, and the
+        // answers below would then name a package that is not published where the agent itself is what
+        // is missing.
         string src = agentDir ?? ShippedAgentDir;
         string srcScript = Path.Combine(src, "gio_agent.py");
         if (!File.Exists(srcScript)) throw new InvalidOperationException(L.T("core.deploy.agentMissingInBuild", new { path = srcScript }));
+        // A version marked for download is skipped by the stack check, so two things are asked of its
+        // package instead — of the catalogue this install copies to the agent. There must be one: a mark
+        // the agent has nothing to download for would only fail once the install is done. And where the
+        // package comes as a .7z the agent will have to EXTRACT it with a tool, which nothing guarantees
+        // on Windows: refuse now, with the fix in the message, rather than let a multi-GB download fail
+        // at its very last step. A package that comes as a .zip takes none — the agent reads it itself.
+        StackPackage Package(string version) => ServerVersions.Package(version, Path.Combine(src, "payloads"));
+        var unpublished = plan.FetchProblems(Package);
+        if (unpublished.Count > 0) throw new InvalidOperationException(string.Join("\n", unpublished));
+        if (plan.FetchNeedsExtractor(Package) && string.IsNullOrWhiteSpace(plan.SevenZip) && !AgentFindsExtractor())
+            throw new InvalidOperationException(L.T("core.deploy.noExtractorWindows"));
+
         if (Updating) throw new InvalidOperationException(L.T("core.deploy.updateRunning"));
         Directory.CreateDirectory(Root);
         log?.Invoke(L.T("core.deploy.copyingAgent", new { dir = Root }));
@@ -296,12 +515,26 @@ public static class LocalAgent
         // file — set from the Agent settings card, added by hand (GIO_FETCH_DISK_RESERVE,
         // HTTPS_PROXY, …) or typed at an earlier install into a field left blank now (the MySQL root
         // password, the Flask key) — survives the re-install, like install_agent.sh keeps it on
-        // Linux. An unreadable file keeps nothing (it is replaced either way); values are never logged,
-        // only the key names.
-        string? previous = null;
-        try { if (File.Exists(ConfigPath)) previous = File.ReadAllText(ConfigPath); }
-        catch (Exception ex) { Log.Error("reading the previous local agent config (non-fatal: nothing is kept)", ex); }
-        string config = MergeConfig(plan.RenderConfig(), previous, out var kept);
+        // Linux. Values are never logged, only the key names. The file is read once more right before it
+        // is written: the agent that runs may have changed it meanwhile (Agent settings, a relocation),
+        // and a folder it relocated is the one the version keeps. One that cannot be read now is not
+        // written: merged over the first reading, it would point a relocated version back at the folder
+        // it left. The new files stay — the configuration is the one the agent already has, as after an
+        // update — and the next install finishes the job.
+        string? late;
+        try { late = ReadConfigText(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Error("local agent install: the configuration could not be read again before it is written (left as it is)", ex);
+            throw new InvalidOperationException(L.T("core.deploy.configUnreadableLate", new { path = ConfigPath, error = ex.Message }));
+        }
+        if (!string.Equals(late, previous, StringComparison.Ordinal))
+        {
+            var lateCfg = late is null ? null : ParseConfig(late);
+            plan.KeepStoredFolders(v => lateCfg?.DirOf(v) ?? "");
+            Log.Info("local agent install: the configuration changed during the install -- its folders are taken as they are now");
+        }
+        string config = MergeConfig(plan.RenderConfig(), late, out var kept);
         File.WriteAllText(ConfigPath, config, new System.Text.UTF8Encoding(false));
         if (kept.Count > 0)
         {
@@ -319,8 +552,8 @@ public static class LocalAgent
                 : L.T("core.deploy.fetchSkipped", new { version = v, dir = plan.DirFor(v) }));
 
         log?.Invoke(L.T("core.deploy.selftest"));
-        // 300 s: the selftest takes ~25 s on a fast Windows PC (real file I/O an antivirus scans); slow laptops need the margin.
-        var (code, output) = Run(python.Exe, $"\"{ScriptPath}\" --selftest", Root, timeoutMs: 300_000);
+        // 900 s: the selftest takes about two minutes on a fast Windows PC (real file I/O an antivirus scans); slow laptops need the margin.
+        var (code, output) = Run(python.Exe, $"\"{ScriptPath}\" --selftest", Root, timeoutMs: 900_000);
         Log.Info($"local agent selftest exit={code}\n{Tail(output, 2000)}");
         if (code != 0) throw new InvalidOperationException(L.T("core.deploy.selftestFailed", new { tail = Tail(output, 600) }));
         log?.Invoke(L.T("core.deploy.selftestOk"));
@@ -722,7 +955,7 @@ public static class LocalAgent
                 throw new InvalidOperationException(L.T("core.deploy.updateFolderBusy", new { dir = StagePath, error = ex.Message }));
             }
             log?.Invoke(L.T("core.deploy.selftest"));
-            var (code, output) = Run(python.Exe, $"\"{stagedScript}\" --selftest", StagePath, timeoutMs: 300_000);
+            var (code, output) = Run(python.Exe, $"\"{stagedScript}\" --selftest", StagePath, timeoutMs: 900_000);
             Log.Info($"local agent update: selftest of the staged agent exit={code}\n{Tail(output, 2000)}");
             if (code != 0) throw new InvalidOperationException(L.T("core.deploy.selftestFailed", new { tail = Tail(output, 600) }));
             log?.Invoke(L.T("core.deploy.selftestOk"));
@@ -975,29 +1208,15 @@ public static class LocalAgent
         return sb.ToString();
     }
 
-    /// <summary>The config file on this PC, parsed like the agent parses it; null when there is none (or it
-    /// cannot be read — logged, never thrown: the start screen calls this on every init).</summary>
+    /// <summary>The config file on this PC, parsed like the agent parses it (<see cref="ParseConfig"/>); null
+    /// when there is none (or it cannot be read — logged, never thrown: the start screen calls this on
+    /// every init).</summary>
     public static LocalAgentConfig? ReadConfig()
     {
         try
         {
             if (!File.Exists(ConfigPath)) return null;
-            var d = new Dictionary<string, string>(StringComparer.Ordinal);
-            // ReadAllText already drops a UTF-8 BOM; the explicit trim covers a file written without one
-            // being read through a different detection path.
-            foreach (var raw in File.ReadAllText(ConfigPath).TrimStart('\uFEFF').Split('\n'))
-            {
-                string line = raw.Trim();
-                if (line.Length == 0 || line[0] == '#') continue;
-                int eq = line.IndexOf('=');
-                if (eq < 0) continue;
-                string k = line[..eq].Trim(), v = line[(eq + 1)..].Trim();
-                if (v.Length >= 2 && v[0] == v[^1] && v[0] is '"' or '\'') v = v[1..^1];
-                if (!ConfigKeyRe.IsMatch(k)) continue;
-                // FIRST occurrence wins: apply_config_file only sets a key the environment lacks.
-                if (!d.ContainsKey(k)) d[k] = v;
-            }
-            return new LocalAgentConfig(d);
+            return ParseConfig(File.ReadAllText(ConfigPath));
         }
         catch (Exception ex)
         {
@@ -1005,6 +1224,133 @@ public static class LocalAgent
             return null;
         }
     }
+
+    /// <summary>A config text parsed the way the agent on this PC reads its file (<see cref="LocalAgentConfig"/>): a
+    /// BOM tolerated, '#' comments and blank lines skipped, blanks around '=' trimmed, matching surrounding
+    /// quotes stripped, keys limited to <c>[A-Za-z_][A-Za-z0-9_]*</c>, the FIRST occurrence of a repeated
+    /// key wins — whatever its letter case: the agent puts the values into the environment of Windows, where
+    /// <c>gio_dir_16</c> and <c>GIO_DIR_16</c> are one name. Pure; never throws.</summary>
+    public static LocalAgentConfig ParseConfig(string? text)
+    {
+        var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // File.ReadAllText already drops a UTF-8 BOM; the explicit trim covers a text that still has one.
+        foreach (var raw in (text ?? "").TrimStart('\uFEFF').Split('\n'))
+        {
+            string line = raw.Trim();
+            if (line.Length == 0 || line[0] == '#') continue;
+            int eq = line.IndexOf('=');
+            if (eq < 0) continue;
+            string k = line[..eq].Trim(), v = line[(eq + 1)..].Trim();
+            if (v.Length >= 2 && v[0] == v[^1] && v[0] is '"' or '\'') v = v[1..^1];
+            if (!ConfigKeyRe.IsMatch(k)) continue;
+            // FIRST occurrence wins: apply_config_file only sets a key the environment lacks.
+            if (!d.ContainsKey(k)) d[k] = v;
+        }
+        return new LocalAgentConfig(d);
+    }
+
+    /// <summary>The text of the config file on this PC, null when there is none. A file another program
+    /// holds is waited for like any file of the agent (<see cref="RetryIo"/>); one that still cannot be
+    /// read throws its <see cref="IOException"/> / <see cref="UnauthorizedAccessException"/> — the caller
+    /// decides what an unreadable configuration means.</summary>
+    private static string? ReadConfigText()
+    {
+        string? text = null;
+        RetryIo(() => text = File.Exists(ConfigPath) ? File.ReadAllText(ConfigPath) : null);
+        return text;
+    }
+
+    /// <summary><see cref="ReadConfigText"/> as an install reads it, before anything is written: a file that
+    /// is there but still cannot be read refuses the install (<c>core.deploy.configUnreadable</c>) — merged
+    /// over nothing, the re-install would drop every folder and setting the agent has.</summary>
+    private static string? ReadConfigTextForInstall()
+    {
+        try { return ReadConfigText(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidOperationException(L.T("core.deploy.configUnreadable", new { path = ConfigPath, error = ex.Message }));
+        }
+    }
+
+    /// <summary>The config file on this PC as an install reads it (<see cref="ParseConfig"/>): null when there is
+    /// none; a file another program holds is waited for, and one that still cannot be read throws the
+    /// install's own refusal, <c>core.deploy.configUnreadable</c> — never a config read as empty, which would
+    /// name another token than the one the running agent answers to.</summary>
+    public static LocalAgentConfig? ReadConfigForInstall() => ReadConfigTextForInstall() is { } text ? ParseConfig(text) : null;
+
+    /// <summary>Spikes only: the drive type <see cref="DriveTypeOf"/> answers for a drive letter, in place of
+    /// the system's (like <see cref="RootOverride"/>). Null = the system's answer.</summary>
+    public static Func<char, int>? DriveTypeOverride { get; set; }
+
+    /// <summary>The type of a drive of this PC, by GetDriveTypeW's numbers: 0 unknown, 1 no such drive
+    /// (no root), 2 removable, 3 fixed, 4 network, 5 CD / DVD, 6 RAM disk. 0 on any failure; never throws.</summary>
+    public static int DriveTypeOf(char letter)
+    {
+        try { return DriveTypeOverride?.Invoke(letter) ?? (int)new DriveInfo(letter + ":\\").DriveType; }
+        catch { return 0; }
+    }
+
+    /// <summary>Why the agent on this PC could not use <paramref name="dir"/> as a stack folder of
+    /// <paramref name="version"/> because of its drive, or null: the drive types the agent's own relocation
+    /// refuses (<c>_WIN_DRIVE_REFUSED</c>) — no such drive, a network drive (a mapped letter), a CD / DVD
+    /// drive, a RAM disk. Only a full path on a drive letter is judged
+    /// (<see cref="AgentInstallPlan.IsWindowsDrivePath"/>); anything else is null. Never throws.</summary>
+    public static string? DriveProblem(string version, string dir)
+    {
+        if (!AgentInstallPlan.IsWindowsDrivePath(dir)) return null;
+        char letter = char.ToUpperInvariant(dir[0]);
+        string? why = DriveTypeOf(letter) switch
+        {
+            1 => L.T("core.deploy.drive.none"),
+            4 => L.T("core.deploy.drive.network"),
+            5 => L.T("core.deploy.drive.cd"),
+            6 => L.T("core.deploy.drive.ram"),
+            _ => null,
+        };
+        return why is null ? null : L.T("core.deploy.dirDriveType", new { version, dir, drive = letter + ":", why });
+    }
+
+    /// <summary>Why the agent on this PC could not use <paramref name="dir"/> as a stack folder of
+    /// <paramref name="version"/>, or null: not a full path on a drive letter (<c>core.deploy.dirNotLocal</c>), or a
+    /// drive it refuses (<see cref="DriveProblem"/>). Null for a blank folder. Never throws.</summary>
+    public static string? FolderProblem(string version, string? dir)
+    {
+        string d = (dir ?? "").Trim();
+        if (d.Length == 0) return null;
+        return AgentInstallPlan.IsWindowsDrivePath(d) ? DriveProblem(version, d) : L.T("core.deploy.dirNotLocal", new { version, dir = d });
+    }
+
+    /// <summary>What stands at a stack folder of this PC — the agent's <c>relocate_target_kind</c>: a blank
+    /// name or nothing at that name = <see cref="FolderKind.Absent"/>; a folder without an entry = Empty;
+    /// one that holds a <c>docker-compose.yml.tmpl</c> or <c>docker-compose.yml</c> file = Stack; a file, a
+    /// folder with other files, a link to a folder that is not there, a folder that cannot be listed =
+    /// Other. A network path — UNC, or a drive letter of a network drive — is <see cref="FolderKind.Unknown"/>
+    /// and NOT touched: a share that is not connected would hold the caller for the network's timeout.
+    /// Never throws.</summary>
+    public static FolderKind FolderKindOf(string? dir)
+    {
+        string d = (dir ?? "").Trim();
+        if (d.Length == 0) return FolderKind.Absent;
+        if (d.StartsWith(@"\\", StringComparison.Ordinal) || d.StartsWith("//", StringComparison.Ordinal)) return FolderKind.Unknown;
+        if (d.Length >= 2 && d[1] == ':' && char.IsAsciiLetter(d[0]) && DriveTypeOf(char.ToUpperInvariant(d[0])) == 4) return FolderKind.Unknown;
+        try
+        {
+            FileAttributes attributes;
+            try { attributes = File.GetAttributes(d); }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { return FolderKind.Absent; }
+            if (!attributes.HasFlag(FileAttributes.Directory) || !Directory.Exists(d)) return FolderKind.Other;
+            if (!Directory.EnumerateFileSystemEntries(d).Any()) return FolderKind.Empty;
+            if (File.Exists(Path.Combine(d, "docker-compose.yml.tmpl")) || File.Exists(Path.Combine(d, "docker-compose.yml")))
+                return FolderKind.Stack;
+            return FolderKind.Other;
+        }
+        catch (Exception) { return FolderKind.Other; }
+    }
+
+    /// <summary><see cref="FolderKindOf"/> as the page reads it: "none" for a blank folder name, else
+    /// "absent", "empty", "stack", "other" or "unknown". Never throws.</summary>
+    public static string FolderKindName(string? dir) =>
+        string.IsNullOrWhiteSpace(dir) ? "none" : FolderKindOf(dir).ToString().ToLowerInvariant();
 
     /// <summary>UTF-8 that skips the bytes it cannot decode — how the agent opens a stack's <c>.env</c>
     /// (<c>errors="ignore"</c>).</summary>
@@ -1064,6 +1410,50 @@ public static class LocalAgent
         catch (SocketException) { return false; }
     }
 
+    /// <summary>
+    /// The PATH a program started now should get: the machine's <c>Path</c> (the registry's, environment names
+    /// expanded), then the user's, then every entry of <paramref name="current"/> — this process's PATH, which was
+    /// fixed when the launcher started — that is not in yet. Each entry once, letter case and a separator at its end
+    /// not counted; empty entries dropped. Pure (the expansion reads this process's environment).
+    /// </summary>
+    public static string FreshPath(string? machine, string? user, string? current)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var parts = new List<string>();
+        void Add(string? list, bool expand)
+        {
+            foreach (var raw in (list ?? "").Split(';'))
+            {
+                string entry = raw.Trim();
+                if (entry.Length == 0) continue;
+                if (expand) entry = Environment.ExpandEnvironmentVariables(entry);
+                string key = entry.TrimEnd('\\', '/');
+                if (seen.Add(key.Length > 0 ? key : entry)) parts.Add(entry);
+            }
+        }
+        Add(machine, true);
+        Add(user, true);
+        Add(current, false);
+        return string.Join(";", parts);
+    }
+
+    /// <summary><see cref="FreshPath"/> with the registry's two <c>Path</c> values as Windows holds them now and this
+    /// process's PATH. A value that cannot be read counts as empty.</summary>
+    public static string FreshPathNow()
+    {
+        static string? Read(RegistryKey root, string sub)
+        {
+            try
+            {
+                using var k = root.OpenSubKey(sub, writable: false);
+                return k?.GetValue("Path", null, RegistryValueOptions.DoNotExpandEnvironmentNames) as string;
+            }
+            catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException) { return null; }
+        }
+        return FreshPath(Read(Registry.LocalMachine, @"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+            Read(Registry.CurrentUser, "Environment"), Environment.GetEnvironmentVariable("PATH"));
+    }
+
     /// <summary>Start the agent hidden with <c>pythonw</c> (stdout/stderr go to <see cref="LogPath"/>
     /// through the agent's own <c>--log</c>). Returns the pid. Idempotent: a healthy running agent is
     /// left alone. /health is asked every quarter of a second until it answers, for
@@ -1089,6 +1479,9 @@ public static class LocalAgent
             UseShellExecute = false,
             CreateNoWindow = true,
         };
+        // The PATH Windows holds now, not the one this launcher started with: a program installed since — Docker
+        // Desktop for this user puts its folder on the user's PATH — is found by the agent at once.
+        psi.Environment["PATH"] = FreshPathNow();
         var p = Process.Start(psi) ?? throw new InvalidOperationException(L.T("core.deploy.startFailed"));
         File.WriteAllText(PidPath, p.Id.ToString());
         log?.Invoke(L.T("core.deploy.started", new { pid = p.Id }));
@@ -1104,7 +1497,7 @@ public static class LocalAgent
     }
 
     /// <summary>Stop the agent on this PC — the one the pid file names, or, when that file is gone or
-    /// stale (an autostarted agent never has one), the python process LISTENING on <paramref name="port"/>.
+    /// stale, the python process LISTENING on <paramref name="port"/>.
     /// Kills the whole tree, then waits (≤ 3 s) until /health stops answering, so a StartAsync right
     /// after never races the dying process for the port.</summary>
     public static void Stop(int port, Action<string>? log = null)
@@ -1151,9 +1544,10 @@ public static class LocalAgent
     }
 
     /// <summary>The agent process on this PC whether or not WE started it: the pid file first, else the
-    /// python process listening on <paramref name="port"/> (an agent started by the HKCU Run value writes
-    /// no pid file and would otherwise read as "installed, stopped" — a second start then dies on the bound
-    /// port). Same "is it python" test as <see cref="RunningPid"/>.</summary>
+    /// python process listening on <paramref name="port"/> (the agent writes that file itself only when it
+    /// runs with <c>--config</c>; one started otherwise, or whose file was deleted, would read as "installed,
+    /// stopped" — a second start then dies on the bound port). Same "is it python" test as
+    /// <see cref="RunningPid"/>.</summary>
     public static (bool Running, int Pid) FindRunning(int port)
     {
         var byFile = RunningPid();
@@ -1250,62 +1644,147 @@ public static class LocalAgent
     /// <summary>The one name the add/show/delete netsh calls share, so they can never drift apart.</summary>
     public static string FirewallRuleName(int port) => $"Relic GIO agent ({port})";
 
-    /// <summary>The first of the two elevations in Relic, admin-mode only and user-clicked: an inbound
-    /// allow rule for the agent's TCP port scoped to the python executable. Returns null on success,
-    /// else the error text (a declined UAC prompt is a normal outcome).</summary>
-    public static string? OpenFirewallPort(int port)
+    /// <summary>The game's login port (TCP) and its game port (UDP): what a server other PCs join must let in.</summary>
+    public const int GameLoginPort = 21000, GameUdpPort = 21081;
+
+    /// <summary>The rule for the game's login port (any program, any network profile).</summary>
+    public const string ServerRuleTcp = "Relic GIO server (21000 TCP)";
+
+    /// <summary>The rule for the game's UDP port (any program, any network profile).</summary>
+    public const string ServerRuleUdp = "Relic GIO server (21081 UDP)";
+
+    /// <summary>The rules of the agent on this PC, in the order they are added: the agent's port, then — for a server
+    /// other PCs join — the game's two ports.</summary>
+    public static IReadOnlyList<string> FirewallRuleNames(int port, bool gamePorts = true) =>
+        gamePorts ? new[] { FirewallRuleName(port), ServerRuleTcp, ServerRuleUdp } : new[] { FirewallRuleName(port) };
+
+    private static string NetshExe => Path.Combine(Environment.SystemDirectory, "netsh.exe");
+    private static string CmdExe => Path.Combine(Environment.SystemDirectory, "cmd.exe");
+
+    /// <summary>
+    /// The arguments of the ONE elevated <c>cmd.exe</c> that writes the rules:
+    /// <c>/d /v:off /s /c "&lt;netsh delete&gt; &amp; &lt;netsh add&gt; &amp;&amp; …"</c> — no AutoRun command, no delayed
+    /// expansion (a '!' in a path stays a letter), netsh by its full path. The agent's own rule
+    /// (<see cref="FirewallRuleName"/>: TCP <paramref name="port"/>, scoped to <paramref name="program"/>, its pythonw;
+    /// the program is left out when the path holds a '%' or a '"', which cmd would read) is always written anew: every
+    /// rule of that name is deleted — whatever the delete answers — and the rule added for the pythonw of now, so a rule
+    /// an earlier Python or install left is repaired and never doubled. With <paramref name="gamePorts"/> TCP 21000 and
+    /// UDP 21081 follow for any program, each unless <paramref name="present"/> names it. Every rule is
+    /// <c>dir=in action=allow profile=any</c>; the adds are joined by <c>&amp;&amp;</c>. Pure.
+    /// </summary>
+    public static string FirewallCommandLine(int port, bool gamePorts, string? program, Func<string, bool>? present = null)
+    {
+        string netsh = "\"" + NetshExe + "\"";
+        string prog = (program ?? "").Trim();
+        bool scoped = prog.Length > 0 && prog.IndexOfAny(new[] { '%', '"' }) < 0;
+        var adds = new List<string>();
+        void Add(string name, string protocol, int localPort, bool withProgram) =>
+            adds.Add($"{netsh} advfirewall firewall add rule name=\"{name}\" dir=in action=allow protocol={protocol} localport={localPort} profile=any"
+                + (withProgram && scoped ? $" program=\"{prog}\"" : ""));
+        Add(FirewallRuleName(port), "TCP", port, true);
+        if (gamePorts)
+        {
+            if (present?.Invoke(ServerRuleTcp) != true) Add(ServerRuleTcp, "TCP", GameLoginPort, false);
+            if (present?.Invoke(ServerRuleUdp) != true) Add(ServerRuleUdp, "UDP", GameUdpPort, false);
+        }
+        return "/d /v:off /s /c \"" + $"{netsh} advfirewall firewall delete rule name=\"{FirewallRuleName(port)}\" & "
+            + string.Join(" && ", adds) + "\"";
+    }
+
+    /// <summary>The arguments of the ONE elevated <c>cmd.exe</c> that deletes the rules <paramref name="names"/>: one
+    /// <c>netsh advfirewall firewall delete rule</c> per name, each run whatever the one before answered (no AutoRun
+    /// command, no delayed expansion). Pure.</summary>
+    public static string FirewallRemoveCommandLine(IEnumerable<string> names)
+    {
+        string netsh = "\"" + NetshExe + "\"";
+        return "/d /v:off /s /c \"" + string.Join(" & ", (names ?? Array.Empty<string>()).Select(n => $"{netsh} advfirewall firewall delete rule name=\"{n}\"")) + "\"";
+    }
+
+    /// <summary>
+    /// The first elevation of the agent on this PC, user-clicked: the inbound allow rules (<see cref="FirewallCommandLine"/>)
+    /// in ONE Windows permission prompt — the agent's TCP port scoped to its pythonw, always written anew (a rule left
+    /// for another pythonw is repaired) and, with <paramref name="gamePorts"/> (a server other PCs join), TCP 21000 and
+    /// UDP 21081 when they are not there yet. Returns null on success, else the error text (a declined prompt is a
+    /// normal outcome).
+    /// </summary>
+    public static string? OpenFirewallPort(int port, bool gamePorts = false)
     {
         try
         {
+            var present = new HashSet<string>(gamePorts ? new[] { ServerRuleTcp, ServerRuleUdp }.Where(RuleExists) : Array.Empty<string>(), StringComparer.Ordinal);
+            bool several = gamePorts && present.Count < 2;
             var python = ReadPython() ?? FindPython();
-            string program = python?.ExeW ?? "";
-            string rule = $"advfirewall firewall add rule name=\"{FirewallRuleName(port)}\" dir=in action=allow protocol=TCP localport={port}" +
-                          (program.Length > 0 ? $" program=\"{program}\"" : "");
-            var psi = new ProcessStartInfo("netsh.exe", rule) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
-            using var p = Process.Start(psi);
-            if (p is null) return "netsh did not start";
-            if (!p.WaitForExit(60_000)) return "netsh timed out";
-            return p.ExitCode == 0 ? null : $"netsh exit code {p.ExitCode}";
-        }
-        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
-        {
-            return L.T("core.deploy.uacDeclined");
+            string args = FirewallCommandLine(port, gamePorts, python?.ExeW, present.Contains);
+            var psi = new ProcessStartInfo(CmdExe, args)
+            {
+                UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = Environment.SystemDirectory,
+            };
+            try
+            {
+                using var p = Process.Start(psi);
+                if (p is null) return L.T("core.deploy.firewallFailed", new { code = -1 });
+                if (!p.WaitForExit(60_000)) return L.T("core.deploy.firewallTimeout");
+                return p.ExitCode == 0 ? null : L.T("core.deploy.firewallFailed", new { code = p.ExitCode });
+            }
+            catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+            {
+                return L.T(several ? "core.deploy.uacDeclinedRules" : "core.deploy.uacDeclined");
+            }
         }
         catch (Exception ex) { return ex.Message; }
     }
 
-    /// <summary>Is our inbound rule for <paramref name="port"/> present? Read unelevated — showing rules
-    /// needs no rights; netsh answers exit 1 ("No rules match") when there is none.</summary>
-    public static bool FirewallRuleExists(int port)
+    /// <summary>Spikes only: what <c>netsh advfirewall firewall show rule</c> answers for a rule name — its exit code —
+    /// in place of netsh.</summary>
+    public static Func<string, int>? FirewallShowOverride { get; set; }
+
+    /// <summary>Is the rule named <paramref name="name"/> there? Read unelevated — showing rules needs no rights — and
+    /// decided by netsh's exit code alone (0 = there, 1 = "no rules match"; its text is in the language of Windows).
+    /// Never throws.</summary>
+    private static bool RuleExists(string name)
     {
-        try
-        {
-            var res = Proc.Run("netsh", "advfirewall", "firewall", "show", "rule", "name=" + FirewallRuleName(port));
-            return res.Ok && !res.Out.Contains("No rules match", StringComparison.OrdinalIgnoreCase);
-        }
+        if (FirewallShowOverride is { } fake) return fake(name) == 0;
+        try { return Proc.Run(NetshExe, "advfirewall", "firewall", "show", "rule", "name=" + name).Code == 0; }
         catch (Exception ex) { Log.Info($"netsh show rule: {ex.Message}"); return false; }
     }
 
-    /// <summary>The second elevation, the mirror of <see cref="OpenFirewallPort"/>: delete the rule that
-    /// call added. User-clicked (the uninstall dialog's checkbox, off by default), never run from the
-    /// launcher's own --uninstall-cleanup. Null on success, else the error text (UAC declined =
-    /// <c>core.deploy.uacDeclined</c>).</summary>
+    /// <summary>Is the inbound rule for the agent's <paramref name="port"/> there (<see cref="RuleExists"/>)?</summary>
+    public static bool FirewallRuleExists(int port) => RuleExists(FirewallRuleName(port));
+
+    /// <summary>Are both rules of the game's ports there (<see cref="ServerRuleTcp"/>, <see cref="ServerRuleUdp"/>)?</summary>
+    public static bool ServerRulesExist() => RuleExists(ServerRuleTcp) && RuleExists(ServerRuleUdp);
+
+    /// <summary>The rules of the agent on this PC that are there, by name, in <see cref="FirewallRuleNames"/>' order.</summary>
+    public static IReadOnlyList<string> FirewallRulesPresent(int port) => FirewallRuleNames(port).Where(RuleExists).ToList();
+
+    /// <summary>The second elevation, the mirror of <see cref="OpenFirewallPort"/>: delete every rule it added that is
+    /// there — the agent's port's and the game ports' — in ONE Windows permission prompt
+    /// (<see cref="FirewallRemoveCommandLine"/>). User-clicked (the uninstall dialog's checkbox, off by default), never
+    /// run from the launcher's own --uninstall-cleanup. Null when none is left, else the error text (a declined prompt
+    /// = <c>core.deploy.uacDeclinedRemove</c>, or <c>core.deploy.uacDeclinedRemoveRules</c> naming the rules for more
+    /// than one; rules that stayed are named).</summary>
     public static string? RemoveFirewallRule(int port)
     {
+        var names = new List<string>();
         try
         {
-            string rule = $"advfirewall firewall delete rule name=\"{FirewallRuleName(port)}\"";
-            var psi = new ProcessStartInfo("netsh.exe", rule) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
+            names.AddRange(FirewallRulesPresent(port));
+            if (names.Count == 0) return null;
+            var psi = new ProcessStartInfo(CmdExe, FirewallRemoveCommandLine(names))
+            {
+                UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = Environment.SystemDirectory,
+            };
             using var p = Process.Start(psi);
-            if (p is null) return "netsh did not start";
-            if (!p.WaitForExit(60_000)) return "netsh timed out";
-            return p.ExitCode == 0 ? null : $"netsh exit code {p.ExitCode}";
+            if (p is null) return L.T("core.deploy.firewallRemoveFailed", new { rules = string.Join(", ", names) });
+            if (!p.WaitForExit(60_000)) return L.T("core.deploy.firewallTimeout");
+            var left = FirewallRulesPresent(port);
+            return left.Count == 0 ? null : L.T("core.deploy.firewallRemoveFailed", new { rules = string.Join(", ", left) });
         }
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
         {
             // Its own text: the "was not added" of OpenFirewallPort would tell the admin the opposite
-            // of what happened and hide that the inbound rule outlives the agent.
-            return L.T("core.deploy.uacDeclinedRemove");
+            // of what happened and hide that the inbound rules outlive the agent.
+            return names.Count > 1 ? L.T("core.deploy.uacDeclinedRemoveRules", new { rules = string.Join(", ", names) }) : L.T("core.deploy.uacDeclinedRemove");
         }
         catch (Exception ex) { return ex.Message; }
     }
@@ -1313,7 +1792,8 @@ public static class LocalAgent
     /// <summary>
     /// Remove the agent from this PC in the order <c>uninstall_agent.sh</c> uses on Linux: the process
     /// (pid file or listener), the autostart value — only when it points at THIS root, so a spike root
-    /// never touches the real one — the firewall rule when asked (the one elevated step), then every
+    /// never touches the real one — the firewall rules when asked (the one elevated step; the rules that stay are
+    /// named in the report), then every
     /// file under <see cref="Root"/> entry by entry, bottom-up, one retry after a second: a single locked
     /// file (a voice pack a client is being served, an open log) must cost that file alone, not the whole
     /// cleanup, and is reported in the leftovers. Nothing outside the root is ever touched — the docker
@@ -1341,12 +1821,15 @@ public static class LocalAgent
 
         bool firewallRemoved = false;
         string? firewallError = null;
-        if (removeFirewall && FirewallRuleExists(port))
+        if (removeFirewall && FirewallRulesPresent(port).Count > 0)
         {
             firewallError = RemoveFirewallRule(port);
             firewallRemoved = firewallError is null;
             if (firewallRemoved) log?.Invoke(L.T("core.deploy.firewallRemoved"));
         }
+        // Every rule that stays is named: an inbound rule outlives the agent it was added for.
+        var keptRules = FirewallRulesPresent(port);
+        foreach (var rule in keptRules) log?.Invoke(L.T("core.deploy.firewallRuleKept", new { rule }));
 
         var leftovers = new List<string>();
         string root = Root;
@@ -1362,7 +1845,7 @@ public static class LocalAgent
         bool filesRemoved = !Directory.Exists(root);
         if (filesRemoved) log?.Invoke(L.T("core.deploy.filesRemoved", new { dir = root }));
         else foreach (var l in leftovers) log?.Invoke(l);
-        return new UninstallReport(stopped, autostartRemoved, firewallRemoved, firewallError, filesRemoved, leftovers);
+        return new UninstallReport(stopped, autostartRemoved, firewallRemoved, firewallError, filesRemoved, leftovers, keptRules);
     }
 
     /// <summary>Delete <paramref name="dir"/>'s contents one entry at a time (never
@@ -1442,6 +1925,7 @@ public static class LocalAgent
             RedirectStandardOutput = true, RedirectStandardError = true,
         };
         psi.Environment["PYTHONIOENCODING"] = "utf-8";
+        psi.Environment["PATH"] = FreshPathNow();
         using var p = Process.Start(psi) ?? throw new InvalidOperationException($"cannot start {exe}");
         var sb = new System.Text.StringBuilder();
         p.OutputDataReceived += (_, e) => { if (e.Data is not null) lock (sb) sb.AppendLine(e.Data); };

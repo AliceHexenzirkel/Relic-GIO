@@ -1,0 +1,28 @@
+{
+  "name": "m-dt1-28-smoke",
+  "version": "2.8",
+  "description": "M-DT1 on 2.8, the channel works: a fresh status that names the DevTest build and the staged DLL at the login screen, a shot there, the world reached (the owner logs in, or the slot logs in by itself), shots without and with the overlay, two minutes with the window in the background, and a quit after which the runner puts the profile, Fiddler and the release DLL back.",
+  "server": {"expectHost": "${RELIC_DEVTEST_HOST}", "agent": "${RELIC_DEVTEST_AGENT}", "tokenEnv": "RELIC_DEVTEST_TOKEN"},
+  "runner": {"window": "1600x900", "ownFiles": "keep"},
+  "config": {"Debug": {"DevTest": {"Enabled": true}}, "General": {"Logging": {"FileLogging": true}}},
+  "session": {"noFaults": true, "maxPresentStall": 2.0},
+  "steps": [
+    {"label": "channel round trip", "op": "wait", "until": {"seconds": 0}, "timeout": 240},
+    {"label": "the ops of this build", "op": "ping",
+     "expect": {"ops": {"contains": ["status", "wait", "shot", "mark", "quit"]}, "resolved.quit": true}},
+    {"label": "status at the login screen", "op": "status",
+     "expect": {"gameVersion": 28, "dllSha256": {"regex": "^[0-9a-fA-F]{64}$"}}},
+    {"label": "login screen", "op": "shot", "overlay": false, "out": "login", "timeout": 10,
+     "expect": {"outcome": "saved", "width": {"min": 640}, "height": {"min": 360}, "format": {"in": [27, 28, 29, 87, 88, 90, 91, 92, 93]},
+              "copyPlusMemcpyMs": {"max": 10}}},
+    {"label": "in the world", "op": "wait", "until": {"inGame": true, "sceneNot": 0}, "timeout": 900},
+    {"label": "status in the world", "op": "status",
+     "expect": {"inGame": true, "scene": {"min": 1}, "uid": {"min": 1}, "pos": {"len": 3}}},
+    {"label": "field without the overlay", "op": "shot", "overlay": false, "out": "field-plain", "expect": {"outcome": "saved", "width": {"min": 640}, "copyPlusMemcpyMs": {"max": 10}}},
+    {"label": "field with the overlay", "op": "shot", "overlay": true, "out": "field-overlay", "expect": {"outcome": "saved", "width": {"min": 640}, "copyPlusMemcpyMs": {"max": 10}}},
+    {"label": "mark the background measurement", "op": "mark", "text": "M-DT1: two minutes in the background start"},
+    {"label": "two minutes in the background", "op": "measure", "seconds": 120, "onFail": "continue",
+     "expect": {"samples": {"min": 100}, "unfocusedSamples": {"min": 1}, "maxPresentStall": {"max": 2}}},
+    {"label": "quit", "op": "quit"}
+  ]
+}

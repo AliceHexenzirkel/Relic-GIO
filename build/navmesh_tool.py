@@ -3,12 +3,15 @@
 
   python build/navmesh_tool.py inspect <file.navmesh> [--json]
   python build/navmesh_tool.py inventory <stack dir> [--md5]
-  python build/navmesh_tool.py pack <1.6|2.8> <source dir> [--out <dir>] [--vendor-list <md5 list | stack dir>]
+  python build/navmesh_tool.py pack <ver> <source dir> [--out <dir>] [--vendor-list <md5 list | stack dir>]
                                     [--note <text>] [--force]
   python build/navmesh_tool.py verify <bundle dir>
   python build/navmesh_tool.py md5list <md5 list file | -> <bundle dir>
   python build/navmesh_tool.py fromunity <scene id> <export dir> --out <dir>     # Unity bake -> server files
   python build/navmesh_tool.py regions <file.navmesh>                            # the region rule against a vendor file
+  python build/navmesh_tool.py navdata <archive> --version <v> --url <https url> [--vendor-list <md5 list | stack dir>]
+                                       [--label <text>] [--note <text>]          # print the archive's navdata.json
+  python build/navmesh_tool.py navdata-check <navdata.json> <archive> [--vendor-list <md5 list | stack dir>]
 
 The pathfindingserver loads `<stack>/server/res/NavMesh/*.navmesh` -- and only the files named in
 `<stack>/server/res/server_res_version_md5_list.txt` (one line per file, `<md5>  ./NavMesh/<name>`).
@@ -16,23 +19,34 @@ A bundle is the SMALL set of files that add to or replace the vendor's own set, 
 `pack` compares every file with the vendor's md5 list and leaves out what the stack already ships byte
 for byte. Layout: `<out>/<ver>/navmesh.json` + `<out>/<ver>/NavMesh/<name>.navmesh`; build/publish.ps1
 ships it as `agent/payloads/<ver>/navmesh/` and the agent installs it into the stack from there.
+A pathfinding data archive is the opposite: the WHOLE of what a stack's server/res holds for the server
+(NavMesh/, server_res_version.txt, the md5 list; no top folder), for a stack whose package came without
+it. Its catalogue, `agent/payloads/<ver>/navdata.json`, names every file the agent may put in place;
+`navdata` prints it (nothing is written: redirect the output) and `navdata-check` derives it again from
+the archive and compares. A .7z is read through 7-Zip's command-line tool and unpacked into a temporary
+folder (TMPDIR, else the system's own), which is removed on every way out; a .zip is read directly.
 docs/NAVMESH.md has the file format and the workflow.
 
-Exit codes: 0 ok; 1 a check failed (a mismatch, an invalid file, an empty or refused pack); 2 usage, or
-an input that cannot be read.
+Exit codes: 0 ok; 1 a check failed (a mismatch, an invalid file, an empty or refused pack, a refused
+archive, a catalogue that does not agree with its archive); 2 usage, or an input that cannot be read
+(a .7z without a 7-Zip tool, or without the room to unpack it).
 """
 import argparse
+import contextlib
 import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import stat
 import struct
 import sys
+import tempfile
+import urllib.parse
+import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VERSIONS = ("1.6", "2.8")
 DEFAULT_OUT = os.path.join(ROOT, "_bundled_navmesh")
 MANIFEST = "navmesh.json"
 MANIFEST_FORMAT = 1
@@ -646,8 +660,10 @@ def source_files(src):
 
 
 def cmd_pack(args):
-    if args.version not in VERSIONS:
-        print("version must be one of {}".format(", ".join(VERSIONS)), file=sys.stderr)
+    # Any game version: whether a build may ship a bundle for it is publish.ps1's check (a version the agent's
+    # payloads know).
+    if not GAME_VERSION_RE.match(args.version):
+        print("version must be a game version (<digits>.<digits>), not {!r}".format(args.version), file=sys.stderr)
         return 2
     try:
         src, files = source_files(args.source)
@@ -757,10 +773,10 @@ def bundle_dirs(path):
 def folder_version(ver_dir):
     """The version a folder stands for: its own name, or its parent's when it is the published navmesh/ folder."""
     base = os.path.basename(ver_dir)
-    if base in VERSIONS:
+    if GAME_VERSION_RE.match(base):
         return base
     parent = os.path.basename(os.path.dirname(ver_dir))
-    if base == "navmesh" and parent in VERSIONS:
+    if base == "navmesh" and GAME_VERSION_RE.match(parent):
         return parent
     return None
 
@@ -774,8 +790,8 @@ def verify_dir(ver_dir):
         return [str(e)]
     if m.get("format") != MANIFEST_FORMAT:
         problems.append("format {!r}: this tool understands format {}".format(m.get("format"), MANIFEST_FORMAT))
-    if m.get("version") not in VERSIONS:
-        problems.append("version {!r}: not one of {}".format(m.get("version"), ", ".join(VERSIONS)))
+    if not isinstance(m.get("version"), str) or not GAME_VERSION_RE.match(m["version"]):
+        problems.append("version {!r}: not a game version (<digits>.<digits>)".format(m.get("version")))
     fv = folder_version(ver_dir)
     if fv and m.get("version") != fv:
         problems.append("navmesh.json says version {!r} but the folder is for {}".format(m.get("version"), fv))
@@ -1691,13 +1707,612 @@ def cmd_fromunity(args):
     return 1 if any(ex["problems"] for *_, ex in written) else 0
 
 
+# --------------------------------------------------------------------------------------------- navdata
+#
+# A pathfinding data archive holds the whole of what a stack's server/res folder holds for the server -- NavMesh/
+# with the files it loads, server_res_version.txt and the md5 list --, for a stack whose package came without it.
+# Its members have no top folder: they are the content of server/res. The catalogue, agent/payloads/<ver>/
+# navdata.json, names every file of it the agent may put in place: path, size, md5, and `vendor` = the vendor's
+# own md5 list names the file with that md5. The archive's md5 list is not one of them -- the agent writes the
+# lines of the files it puts in place into the stack's own list --, but it has to name every file of the archive
+# with that file's md5 and nothing else: an archive whose list says otherwise is not one stack's server/res.
+
+NAVDATA_LABEL = "Internet Archive"
+NAVDATA_VERSION_FILE = "server_res_version.txt"
+NAVDATA_LIST = os.path.basename(MD5_LIST)
+# The keys of a catalogue in the order navdata writes them (_note only when one is given), and of each file.
+NAVDATA_KEYS = ("version", "label", "_note", "url", "size", "md5", "extractedSize", "files")
+NAVDATA_FILE_KEYS = ("path", "size", "md5", "vendor")
+NAVDATA_FORMATS = ("7z", "zip")
+NAVDATA_MAX = 16 * MB           # a catalogue holds one entry per file: some hundred KB, never this much
+NAVDATA_SPARE = 64 * MB         # left free where a .7z is unpacked
+SEVENZIP_UNPACK_TIMEOUT = 3600
+SHOWN_MAX = 12                  # names quoted per refusal
+GAME_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\Z")
+HEX32_RE = re.compile(r"^[0-9a-f]{32}\Z")
+SEVENZIP_MAGIC = b"7z\xbc\xaf\x27\x1c"
+ARCHIVE_MAGIC = (b"PK", SEVENZIP_MAGIC, b"Rar!")
+
+
+class ArchiveRefused(Exception):
+    """An archive that is not a pathfinding data archive; `problems` holds every reason."""
+
+    def __init__(self, problems):
+        super().__init__("; ".join(problems))
+        self.problems = list(problems)
+
+
+class ArchiveUnreadable(Exception):
+    """An archive this box cannot read: a .7z without a 7-Zip tool, without the room to unpack it."""
+
+
+def package_tool():
+    """build/stack_package.py, whose readers of a server package -- the 7-Zip tool and its listing, the agent's
+    rule for a zip member's name, a member read in memory -- read a pathfinding data archive too. Imported on first
+    use, so that the other commands still run from a copy of this file alone."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import stack_package
+    return stack_package
+
+
+def shown(names):
+    """Up to SHOWN_MAX names, with the count of the rest."""
+    names = list(names)
+    return ", ".join(names[:SHOWN_MAX]) + (" and {} more".format(len(names) - SHOWN_MAX) if len(names) > SHOWN_MAX else "")
+
+
+def navdata_path_problem(path, is_dir=False):
+    """Why a member of a pathfinding data archive -- its path with `/`, no trailing one -- cannot be one: None, or
+    the reason. The members are the content of server/res: the folder NavMesh/ and the files directly in it whose
+    name the server loads (NAME_RE), server_res_version.txt and server_res_version_md5_list.txt. Nothing else: no
+    top folder, no other folder, no file beside them."""
+    folder, _, name = path.rpartition("/")
+    if is_dir:
+        if path == NAVMESH_SUBDIR:
+            return None
+        return "a folder other than NavMesh/ (the members are the content of server/res, without a top folder)"
+    if not folder:
+        if path in (NAVDATA_VERSION_FILE, NAVDATA_LIST):
+            return None
+        return "a file beside NavMesh/ that is neither {} nor {}".format(NAVDATA_VERSION_FILE, NAVDATA_LIST)
+    if folder != NAVMESH_SUBDIR:
+        return "a file in a folder other than NavMesh/ (the members are the content of server/res, without a top folder)"
+    if len(name) > NAME_MAX or not NAME_RE.match(name):
+        return ("a file in NavMesh/ whose name the server does not load (scene_<id>[_<activity>][_<bx>_<by>].navmesh or "
+                "scenepolygon_<id>_<polygon>_<tag>.navmesh)")
+    return None
+
+
+def navdata_content_problem(path, data):
+    """Why the bytes of a NavMesh/ file are not a file the server loads under its name -- None, or the reason: the
+    container and its tiles as `inspect` checks them, and the scene id of its first four bytes against the name's."""
+    if not path.startswith(NAVMESH_SUBDIR + "/"):
+        return None
+    try:
+        c = parse_container(data)
+    except NavmeshError as e:
+        return "container: {}".format(e)
+    if c["problems"]:
+        return "; ".join(c["problems"])
+    scene = classify_name(path[len(NAVMESH_SUBDIR) + 1:])["scene"]
+    if c["scene"] != scene:
+        return "the file says scene {}, the name says scene {}".format(c["scene"], scene)
+    return None
+
+
+def navdata_url_format(url):
+    """The archive format a catalogue's address names ("7z", "zip") by the extension of its last path segment, or
+    None -- the agent reads the format of the file it downloads from nothing else."""
+    try:
+        path = urllib.parse.urlsplit(url).path
+    except ValueError:
+        return None
+    ext = os.path.splitext(path.rsplit("/", 1)[-1])[1].lower()
+    return ext[1:] if ext[1:] in NAVDATA_FORMATS else None
+
+
+def navdata_url_problem(url):
+    """Why a catalogue may not name this address -- None, or the reason. The agent's rule for the address of an
+    archive (an https:// address without a blank, a quote or a backslash, of a .7z or a .zip), with a host and a
+    file of its own and no query or fragment: the agent names the host to the admin."""
+    if not isinstance(url, str) or not url.startswith("https://") or len(url) < len("https://x/y"):
+        return "must be an https:// address"
+    if any(c in url for c in " \t\r\n\"'\\"):
+        return "holds a blank, a quote or a backslash"
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return "cannot be read as an address"
+    if not host or parts.query or parts.fragment or not parts.path.rsplit("/", 1)[-1]:
+        return "must be https://<host>/<path of the archive>, without a query or a fragment"
+    if navdata_url_format(url) is None:
+        return "must name a .7z or a .zip file"
+    return None
+
+
+def navdata_catalog_problems(cat):
+    """Why a catalogue is not one navdata writes -- [] when it is: its keys, the form of every value, and its files:
+    each a path the agent may fill in (never the md5 list), once, in the order of the paths' UTF-8 bytes."""
+    if not isinstance(cat, dict):
+        return ["not a JSON object"]
+    out = []
+    extra = [k for k in cat if k not in NAVDATA_KEYS]
+    if extra:
+        out.append("keys navdata does not write: {}".format(", ".join(extra)))
+    lacking = [k for k in NAVDATA_KEYS if k != "_note" and k not in cat]
+    if lacking:
+        out.append("keys it lacks: {}".format(", ".join(lacking)))
+    if not isinstance(cat.get("version"), str) or not GAME_VERSION_RE.match(cat["version"]):
+        out.append("version must be a game version (<digits>.<digits>)")
+    if not isinstance(cat.get("label"), str) or not cat["label"].strip():
+        out.append("label must be a text")
+    if "_note" in cat and not isinstance(cat["_note"], str):
+        out.append("_note must be a text")
+    problem = navdata_url_problem(cat.get("url"))
+    if problem:
+        out.append("url {}".format(problem))
+    for key in ("size", "extractedSize"):
+        v = cat.get(key)
+        if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+            out.append("{} must be a positive integer (bytes)".format(key))
+    if not isinstance(cat.get("md5"), str) or not HEX32_RE.match(cat["md5"]):
+        out.append("md5 must be 32 lower-case hex digits")
+    files = cat.get("files")
+    if not isinstance(files, list) or not files:
+        out.append("files must be a list of {path, size, md5, vendor} objects, at least one")
+        return out
+    paths, seen, twice, total = [], set(), set(), 0
+    for i, e in enumerate(files):
+        if not isinstance(e, dict) or set(e) != set(NAVDATA_FILE_KEYS):
+            out.append("files[{}] must be an object of exactly {}".format(i, ", ".join(NAVDATA_FILE_KEYS)))
+            continue
+        path, size, md5 = e["path"], e["size"], e["md5"]
+        if not isinstance(path, str) or path == NAVDATA_LIST or navdata_path_problem(path):
+            out.append("files[{}]: {!r} is not a file the agent may put in place (NavMesh/<a name the server loads> or "
+                       "{})".format(i, path, NAVDATA_VERSION_FILE))
+            continue
+        paths.append(path)
+        (twice if path in seen else seen).add(path)
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            out.append("files[{}] ({}): size must be an integer of 0 or more (bytes)".format(i, path))
+        else:
+            total += size
+        if not isinstance(md5, str) or not HEX32_RE.match(md5):
+            out.append("files[{}] ({}): md5 must be 32 lower-case hex digits".format(i, path))
+        if not isinstance(e["vendor"], bool):
+            out.append("files[{}] ({}): vendor must be true or false".format(i, path))
+    if twice:
+        out.append("files names {} more than once: {}".format(plural(len(twice), "path"), shown(sorted(twice))))
+    elif paths != sorted(paths, key=lambda p: p.encode("utf-8")):
+        out.append("files are not in the order navdata writes them (by the path's UTF-8 bytes)")
+    if paths and not any(p.startswith(NAVMESH_SUBDIR + "/") for p in paths):
+        out.append("files holds no NavMesh/ file")
+    extracted = cat.get("extractedSize")
+    if isinstance(extracted, int) and not isinstance(extracted, bool) and extracted < total:
+        out.append("extractedSize ({:,}) is less than the bytes of its files ({:,})".format(extracted, total))
+    return out
+
+
+def navdata_bytes(cat):
+    """A catalogue as navdata writes it: one-space indent, the characters as they are, LF, one after the brace."""
+    return (json.dumps(cat, indent=1, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def navdata_ordered(cat):
+    """A catalogue navdata_catalog_problems passed, its keys and each file's in the order navdata writes them."""
+    out = {k: cat[k] for k in NAVDATA_KEYS if k in cat}
+    out["files"] = [{k: e[k] for k in NAVDATA_FILE_KEYS} for e in cat["files"]]
+    return out
+
+
+def archive_format(path):
+    """"7z" or "zip", by what the file IS: an address names the format by its extension, and the file has to be
+    of the format its address names."""
+    with open(path, "rb") as f:
+        head = f.read(8)
+    if head.startswith(SEVENZIP_MAGIC):
+        return "7z"
+    if zipfile.is_zipfile(path):
+        return "zip"
+    raise ArchiveRefused(["{} is neither a 7z nor a zip archive".format(path)])
+
+
+def read_vendor_list(spec):
+    """{(md5, path)} of every line of the vendor's md5 list (the file, or a stack folder holding it) that names a
+    file, paths normalised as the agent reads them."""
+    return {(md5, path) for md5, path, _ in list_entries(decode_list(read_bytes(resolve_vendor_list(spec))))}
+
+
+def zip_navdata_members(sp, zf):
+    """(name as stored, path, size, is a folder, the ZipInfo, [what the member itself is refused for]) of every member
+    of a zip. A member is judged by the name the archive STORES: the one zipfile hands out is tidied for the system it
+    runs on (a backslash reads as `/` on Windows)."""
+    out = []
+    for info in zf.infolist():
+        stored = info.orig_filename
+        is_dir = stored.endswith("/")
+        own = []
+        if info.flag_bits & sp.ZIP_FLAGS_ENCRYPTED:
+            own.append("an encrypted member")
+        if info.flag_bits & sp.ZIP_FLAG_PATCHED:
+            own.append("a member of compressed patched data")
+        if info.external_attr >> 28 == 0xA:     # a Unix mode whose file type is "symbolic link"
+            own.append("a symbolic link")
+        out.append((stored, stored.rstrip("/") if is_dir else stored, info.file_size, is_dir, info, own))
+    return out
+
+
+def sevenzip_navdata_members(sp, tool, archive):
+    """The same of a .7z, from the 7-Zip tool's listing (`l -slt`)."""
+    # 7-Zip writes names in the console's code page on Windows unless told otherwise.
+    try:
+        r = sp.run_7zip(tool, "l", ["-slt"] + (["-sccUTF-8"] if os.name == "nt" else []), archive)
+    except sp.PackageError as e:
+        raise ArchiveUnreadable(str(e))
+    if r.returncode != 0:
+        raise ArchiveRefused(["{} cannot be listed ({} exit {}: {})".format(
+            archive, os.path.basename(tool), r.returncode, sp.sevenzip_said(r))])
+    head, listed = sp.parse_7zip_listing(r.stdout.decode("utf-8", "replace"))
+    if head.get("Type", "7z") != "7z":
+        raise ArchiveRefused(["7-Zip reads {} as a {} archive, not as 7z".format(archive, head["Type"])])
+    out = []
+    for props in listed:
+        # the tool prints a member's path with the separator of the system it runs on
+        path = props["Path"].replace(os.sep, "/")
+        is_dir, is_link = sp.sevenzip_entry_type(props)
+        own = []
+        if props.get("Encrypted") == "+":
+            own.append("an encrypted member")
+        if is_link:
+            own.append("a symbolic link")
+        try:
+            size = int(props.get("Size") or 0)
+        except ValueError:
+            raise ArchiveRefused(["{}: the listing gives no size for {}".format(archive, path)])
+        out.append((path, path, size, is_dir, props["Path"], own))
+    return out
+
+
+def navdata_listing_problems(sp, members):
+    """Why a listing is not one of a pathfinding data archive -- [] when it is: each reason with the members it holds
+    for (what a member is, the agent's rule for a member's name, a path stored twice), and an archive without a
+    navmesh file. Judged before anything is unpacked."""
+    by_reason, seen = {}, set()
+    for stored, path, _size, is_dir, _ref, own in members:
+        reasons = list(own)
+        problem = sp.member_name_problem(stored) or navdata_path_problem(path, is_dir)
+        if problem:
+            reasons.append(problem)
+        if not is_dir:
+            if path in seen:
+                reasons.append("a path stored more than once")
+            seen.add(path)
+        for reason in reasons:
+            by_reason.setdefault(reason, []).append(stored)
+    out = ["{}: {}".format(reason, shown(names)) for reason, names in by_reason.items()]
+    if not any(p.startswith(NAVMESH_SUBDIR + "/") and not navdata_path_problem(p) for p in seen):
+        out.append("no navmesh file: the archive holds nothing in NavMesh/ for the server to load")
+    return out
+
+
+def navdata_list_problems(text, files):
+    """Why the archive's own md5 list does not prove its files -- [] when it does: it names every file with that
+    file's md5 (the md5 of its content), and no file the archive does not hold. `files` = {path: (size, md5)}."""
+    named = {}
+    for md5, path, _ in list_entries(text):
+        named.setdefault(path, set()).add(md5)
+    out = []
+    for path in sorted(files, key=lambda p: p.encode("utf-8")):
+        md5 = files[path][1]
+        md5s = named.get(path)
+        if not md5s:
+            out.append("{}: the archive's {} does not name it".format(path, NAVDATA_LIST))
+        elif md5s != {md5}:
+            out.append("{}: the archive's {} names it with {}, the file's md5 is {}".format(
+                path, NAVDATA_LIST, " and ".join(sorted(md5s - {md5})), md5))
+    absent = sorted((p for p in named if p not in files and p != NAVDATA_LIST), key=lambda p: p.encode("utf-8"))
+    if absent:
+        out.append("the archive's {} names {} the archive does not hold: {}".format(
+            NAVDATA_LIST, plural(len(absent), "file"), shown(absent)))
+    return out
+
+
+def remove_tree(path):
+    """Remove a folder this tool made. Windows deletes no read-only file, and 7-Zip restores the attribute a member
+    was packed with: such a file is made writable first. Says so when something stays."""
+    shutil.rmtree(path, ignore_errors=True)
+    if os.path.exists(path):
+        for folder, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    os.chmod(os.path.join(folder, name), stat.S_IREAD | stat.S_IWRITE)
+                except OSError:
+                    pass
+        shutil.rmtree(path, ignore_errors=True)
+    if os.path.exists(path):
+        print("WARNING: the temporary folder {} could not be removed -- delete it by hand".format(path), file=sys.stderr)
+
+
+@contextlib.contextmanager
+def unpacked_7z(sp, tool, archive, need):
+    """The archive unpacked by the 7-Zip tool into a new temporary folder (where TMPDIR points, else the system's
+    own), which is removed on every way out: a refusal, an error, an interrupted run."""
+    tmp = tempfile.mkdtemp(prefix="navdata-")
+    try:
+        free = shutil.disk_usage(tmp).free
+        if free < need + NAVDATA_SPARE:
+            raise ArchiveUnreadable("{} has {:,} bytes free and the archive unpacks to {:,}: point TMPDIR at a folder with "
+                                    "room".format(os.path.dirname(tmp), free, need))
+        if sys.stderr.isatty():
+            print("unpacking {} ({:,} bytes) into {} ...".format(archive, need, tmp), file=sys.stderr)
+        try:
+            r = sp.run_7zip(tool, "x", ["-o" + tmp, "-y", "-bd"], archive, timeout=SEVENZIP_UNPACK_TIMEOUT)
+        except sp.PackageError as e:
+            raise ArchiveUnreadable(str(e))
+        if r.returncode != 0:
+            raise ArchiveRefused(["{} does not unpack ({} exit {}: {})".format(
+                archive, os.path.basename(tool), r.returncode, sp.sevenzip_said(r))])
+        yield tmp
+    finally:
+        remove_tree(tmp)
+
+
+def tree_files(root):
+    """Every file below root, as a member path (`/`)."""
+    out = set()
+    for folder, _dirs, files in os.walk(root):
+        for name in files:
+            out.add(os.path.relpath(os.path.join(folder, name), root).replace(os.sep, "/"))
+    return out
+
+
+def read_navdata(archive, vendor=None):
+    """What a pathfinding data archive's catalogue says of it: {"format", "size", "md5", "extractedSize", "files",
+    "members", "listed"} -- files sorted by the path's UTF-8 bytes, each {path, size, md5, vendor}; extractedSize the
+    bytes of every file it unpacks to, its md5 list's included; listed = it holds an md5 list. `vendor` = the (md5,
+    path) pairs of the vendor's md5 list, None = every file counts as the vendor's. The listing is judged before
+    anything is unpacked, every file's bytes after. Raises ArchiveRefused with every reason, ArchiveUnreadable when
+    this box cannot read the archive."""
+    sp = package_tool()
+    kind = archive_format(archive)
+    files, problems, kept = {}, [], {}
+
+    def take(path, size, data):
+        if len(data) != size:
+            problems.append("{}: {:,} bytes unpacked, the listing says {:,}".format(path, len(data), size))
+        if path == NAVDATA_LIST:
+            kept["list"] = data
+            return
+        problem = navdata_content_problem(path, data)
+        if problem:
+            problems.append("{}: {}".format(path, problem))
+        files[path] = (len(data), hashlib.md5(data).hexdigest())
+
+    if kind == "zip":
+        try:
+            zf = zipfile.ZipFile(archive)
+        except (zipfile.BadZipFile, ValueError, EOFError, NotImplementedError) as e:
+            raise ArchiveRefused(["{} cannot be read as a zip ({})".format(archive, e)])
+        with zf:
+            members = zip_navdata_members(sp, zf)
+            listing = navdata_listing_problems(sp, members)
+            if listing:
+                raise ArchiveRefused(listing)
+            md5 = sp.md5_file(archive)
+            for _stored, path, size, is_dir, info, _own in members:
+                if is_dir:
+                    continue
+                try:
+                    data = sp.zip_member(zf, info)
+                except sp.MemberUnreadable as e:
+                    problems.append("{}: does not unpack ({})".format(path, e))
+                    continue
+                take(path, size, data)
+    else:
+        tool = sp.find_7zip()
+        if tool is None:
+            raise ArchiveUnreadable("{} is a .7z and no 7-Zip command-line tool was found ({} on PATH, or 7-Zip in its own "
+                                    "folder on Windows): install 7-Zip, then run this again"
+                                    .format(archive, ", ".join(sp.SEVENZIP_NAMES)))
+        members = sevenzip_navdata_members(sp, tool, archive)
+        listing = navdata_listing_problems(sp, members)
+        if listing:
+            raise ArchiveRefused(listing)
+        md5 = sp.md5_file(archive)
+        wanted = {path: size for _stored, path, size, is_dir, _ref, _own in members if not is_dir}
+        with unpacked_7z(sp, tool, archive, sum(wanted.values())) as root:
+            found = tree_files(root)
+            for path in sorted(found - set(wanted)):
+                problems.append("{}: unpacked, but the listing does not name it".format(path))
+            for path, size in wanted.items():
+                if path not in found:
+                    problems.append("{}: listed, but not unpacked".format(path))
+                    continue
+                take(path, size, read_bytes(os.path.join(root, *path.split("/"))))
+    if "list" in kept:
+        problems.extend(navdata_list_problems(decode_list(kept["list"]), files))
+    if problems:
+        raise ArchiveRefused(problems)
+    entries = [{"path": path, "size": size, "md5": file_md5, "vendor": vendor is None or (file_md5, path) in vendor}
+               for path, (size, file_md5) in files.items()]
+    return {"format": kind, "size": os.path.getsize(archive), "md5": md5,
+            "extractedSize": sum(size for _stored, _path, size, is_dir, _ref, _own in members if not is_dir),
+            "files": sorted(entries, key=lambda e: e["path"].encode("utf-8")),
+            "members": len(members), "listed": "list" in kept}
+
+
+def refused(problems):
+    sys.stdout.flush()      # what was printed so far stays in front of the verdict when both go to one place
+    for p in problems:
+        print("REFUSED: {}".format(p), file=sys.stderr)
+    return 1
+
+
+def vendor_notes(files, vendor):
+    """What the vendor list says of an archive beside its flags: the files that carry a vendor name with another md5
+    (they replace the vendor's file), and the vendor files the archive does not hold."""
+    named = {path for _md5, path in vendor}
+    have = {e["path"] for e in files}
+    out = []
+    other = [e["path"] for e in files if not e["vendor"] and e["path"] in named]
+    if other:
+        out.append("{} under a name of the vendor list, with another md5 (vendor: false): {}".format(
+            plural(len(other), "file"), shown(other)))
+    lacking = sorted((p for p in named if p not in have), key=lambda p: p.encode("utf-8"))
+    if lacking:
+        out.append("the vendor list names {} the archive does not hold: {}".format(plural(len(lacking), "file"), shown(lacking)))
+    return out
+
+
+def cmd_navdata(args):
+    if not GAME_VERSION_RE.match(args.version):
+        print("--version must be a game version (<digits>.<digits>), not {!r}".format(args.version), file=sys.stderr)
+        return 2
+    if not os.path.isfile(args.archive):
+        print("not a file: {}".format(args.archive), file=sys.stderr)
+        return 2
+    problem = navdata_url_problem(args.url)
+    if problem:
+        return refused(["--url {} ({})".format(problem, args.url)])
+    try:
+        kind = archive_format(args.archive)
+        if navdata_url_format(args.url) != kind:
+            raise ArchiveRefused(["--url names a .{} but {} is a {} archive: the extension of the address names the "
+                                  "format".format(navdata_url_format(args.url), args.archive, kind)])
+        vendor = read_vendor_list(args.vendor_list) if args.vendor_list else None
+        facts = read_navdata(args.archive, vendor)
+    except ArchiveRefused as e:
+        return refused(e.problems)
+    except (ArchiveUnreadable, NavmeshError) as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    cat = {"version": args.version, "label": args.label}
+    if args.note:
+        cat["_note"] = args.note
+    cat.update({"url": args.url, "size": facts["size"], "md5": facts["md5"], "extractedSize": facts["extractedSize"],
+                "files": facts["files"]})
+    problems = navdata_catalog_problems(cat)
+    if problems:
+        return refused(["the catalogue of this archive: {}".format(p) for p in problems])
+    files = facts["files"]
+    print("{}: a {} of {}, {:,} bytes unpacked; {} for the catalogue, {}; {}".format(
+        args.archive, facts["format"], plural(facts["members"], "member"), facts["extractedSize"], plural(len(files), "file"),
+        "{} of them the vendor's".format(sum(1 for e in files if e["vendor"])) if vendor is not None else
+        "every one counted as the vendor's (no --vendor-list)",
+        "its {} names every one with its md5".format(NAVDATA_LIST) if facts["listed"] else "it holds no " + NAVDATA_LIST),
+        file=sys.stderr)
+    for note in (vendor_notes(files, vendor) if vendor is not None else ()):
+        print("note: " + note, file=sys.stderr)
+    if sys.stdout.isatty():
+        print(json.dumps(cat, indent=1, ensure_ascii=False))
+    else:
+        # as bytes, so that a redirect gives the file itself whatever the console's line ends and code page
+        sys.stdout.flush()
+        sys.stdout.buffer.write(navdata_bytes(cat))
+        sys.stdout.buffer.flush()
+    return 0
+
+
+def cmd_navdata_check(args):
+    # The catalogue is read up to a bound and looked at before it is parsed: an archive given in its place (the
+    # arguments in the other order) is told by its first bytes whatever its size.
+    with open(args.catalogue, "rb") as f:
+        raw = f.read(NAVDATA_MAX + 1)
+    not_one = ("an archive" if raw.startswith(ARCHIVE_MAGIC) else
+               "more than {:,} bytes".format(NAVDATA_MAX) if len(raw) > NAVDATA_MAX else None)
+    if not_one:
+        print("{} is not a catalogue ({}): the catalogue comes first -- navdata-check <navdata.json> <archive>".format(
+            args.catalogue, not_one), file=sys.stderr)
+        return 2
+    if not os.path.isfile(args.archive):
+        print("not a file: {}".format(args.archive), file=sys.stderr)
+        return 2
+    try:
+        cat = json.loads(raw.decode("utf-8-sig"))
+    except ValueError as e:
+        return refused(["{} is not JSON ({})".format(args.catalogue, e)])
+    problems = navdata_catalog_problems(cat)
+    if problems:
+        return refused(["{}: {}".format(args.catalogue, p) for p in problems])
+    try:
+        vendor = read_vendor_list(args.vendor_list) if args.vendor_list else None
+        facts = read_navdata(args.archive, vendor)
+    except ArchiveRefused as e:
+        return refused(e.problems)
+    except (ArchiveUnreadable, NavmeshError) as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    print("{}  <->  {}".format(args.catalogue, args.archive))
+    if vendor is None:
+        print("  note: no --vendor-list -- every file of the archive counts as the vendor's (vendor: true)")
+    differs = 0
+
+    def report(what, ok, text, details=()):
+        nonlocal differs
+        print("  {:<14} {:<8} {}".format(what, "ok" if ok else "DIFFERS", text))
+        for d in details:
+            print("  {:<14} {:<8} - {}".format("", "", d))
+        if not ok:
+            differs += len(details) or 1
+
+    def compare(what, want, got, show=str):
+        report(what, want == got, show(got) if want == got else "catalogue {}, archive {}".format(show(want), show(got)))
+
+    # Neither the version nor the address is in the archive: the version is held to the payload folder the catalogue
+    # lies in (agent/payloads/<ver>/navdata.json) when it lies in one, the address to the archive's format.
+    folder = os.path.basename(os.path.dirname(os.path.abspath(args.catalogue)))
+    if GAME_VERSION_RE.match(folder):
+        report("version", cat["version"] == folder, "{}, the catalogue lies in the {} payload folder".format(cat["version"], folder))
+    else:
+        report("version", True, "{} (a game version; the catalogue lies in no version's payload folder)".format(cat["version"]))
+    url_kind = navdata_url_format(cat["url"])
+    report("url", url_kind == facts["format"], "names a .{}, the archive is a {}".format(url_kind, facts["format"]))
+    compare("size", cat["size"], facts["size"], "{:,}".format)
+    compare("md5", cat["md5"], facts["md5"])
+    compare("extractedSize", cat["extractedSize"], facts["extractedSize"], "{:,}".format)
+    want = {e["path"]: e for e in cat["files"]}
+    got = {e["path"]: e for e in facts["files"]}
+    details = []
+    for path in sorted(set(want) | set(got), key=lambda p: p.encode("utf-8")):
+        w, g = want.get(path), got.get(path)
+        if g is None:
+            details.append("{}: only in the catalogue".format(path))
+        elif w is None:
+            details.append("{}: only in the archive".format(path))
+        else:
+            details.extend("{}: {} catalogue {}, archive {}".format(path, k, json.dumps(w[k]), json.dumps(g[k]))
+                           for k in ("size", "md5", "vendor") if w[k] != g[k])
+    own = sum(1 for e in facts["files"] if e["vendor"])
+    report("files", not details, "{}, {} of them the vendor's".format(plural(len(got), "file"), own) if not details else
+           "catalogue {}, archive {} ({} of them the vendor's)".format(plural(len(want), "file"), plural(len(got), "file"), own),
+           details)
+    if not differs:
+        # Every value agrees: the bytes are then the ones navdata writes for it, or the file was written another way.
+        written = raw == navdata_bytes(navdata_ordered(cat))
+        report("written", written, "byte for byte as navdata writes it" if written else
+               "not as navdata writes it (the keys in their order, one-space indent, the characters as they are, LF, one "
+               "after the closing brace)")
+    if differs:
+        sys.stdout.flush()
+        print("ERROR: {} does not agree with {}: {} (above)".format(args.catalogue, args.archive,
+                                                                 plural(differs, "difference")), file=sys.stderr)
+        return 1
+    print("OK: {} agrees with {}".format(args.catalogue, args.archive))
+    return 0
+
+
 # ------------------------------------------------------------------------------------------------ main
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="navmesh_tool.py",
                                  description="Inspect, inventory, pack and verify the navmesh files of the GIO pathfindingserver "
                                              "(docs/NAVMESH.md). A bundle holds only the files that add to or replace the "
-                                             "vendor's set, never the whole set.")
+                                             "vendor's set, never the whole set; a pathfinding data archive holds the whole "
+                                             "set, for a stack without it (navdata).")
     sub = ap.add_subparsers(dest="cmd", metavar="command")
     sub.required = True
 
@@ -1712,7 +2327,7 @@ def main(argv=None):
     p.set_defaults(fn=cmd_inventory)
 
     p = sub.add_parser("pack", help="build <out>/<ver>/navmesh.json + NavMesh/ from a folder of .navmesh files")
-    p.add_argument("version", help="1.6 or 2.8")
+    p.add_argument("version", help="the game version the bundle is for, e.g. 2.8")
     p.add_argument("source", help="a folder of .navmesh files (or one holding a NavMesh/ subfolder)")
     p.add_argument("--out", default=DEFAULT_OUT, help="bundle root (default: <repo>/_bundled_navmesh)")
     p.add_argument("--vendor-list", help="the stack's server_res_version_md5_list.txt, or the stack folder: files identical "
@@ -1759,6 +2374,27 @@ def main(argv=None):
     p = sub.add_parser("regions", help="recompute the region ids of a vendor .navmesh file and compare them with the file's")
     p.add_argument("file")
     p.set_defaults(fn=cmd_regions)
+
+    vendor_help = ("the vendor's server_res_version_md5_list.txt, or a stack folder holding it: a file it names with the "
+                   "same md5 is the vendor's (vendor: true); without it every file counts as the vendor's")
+    p = sub.add_parser("navdata", help="print the catalogue of a pathfinding data archive, agent/payloads/<ver>/navdata.json "
+                                       "(nothing is written)")
+    p.add_argument("archive", help="the .7z or .zip: the content of a stack's server/res (NavMesh/, server_res_version.txt, "
+                                   "the md5 list), without a top folder")
+    p.add_argument("--version", required=True, help="the game version of the stacks it is for, e.g. 2.8")
+    p.add_argument("--url", required=True, help="where the archive is published (https://<host>/<path>, ending in the "
+                                                "extension of its format)")
+    p.add_argument("--vendor-list", help=vendor_help)
+    p.add_argument("--label", default=NAVDATA_LABEL, help="the name of the place it is published (default: {})".format(NAVDATA_LABEL))
+    p.add_argument("--note", help="free text stored as _note")
+    p.set_defaults(fn=cmd_navdata)
+
+    p = sub.add_parser("navdata-check", help="derive a navdata.json again from its archive and compare every key but _note "
+                                             "and label")
+    p.add_argument("catalogue", metavar="navdata.json")
+    p.add_argument("archive", help="a local copy of the archive the catalogue names")
+    p.add_argument("--vendor-list", help=vendor_help)
+    p.set_defaults(fn=cmd_navdata_check)
 
     args = ap.parse_args(argv)
     try:

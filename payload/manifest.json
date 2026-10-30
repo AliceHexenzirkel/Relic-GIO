@@ -2,6 +2,15 @@
   "_note": "Files Relic copies INTO the game folder after an install/import and re-checks before every launch. 'common' applies to every version; 'versions' only to that id. 'sha256' is verified: if the file in the game folder already has this hash it is not rewritten. 'backup': keeps the original as <name>.relic-orig the first time.",
   "_note_bin": "The injector sources carry a .bin suffix, not .exe/.dll: 'dotnet publish' drops exactly those two from the output (a plain build copies them), so the ship build mirrors payload/ explicitly in publish.ps1 — and the suffix keeps antivirus away from the copy in {app}. The real names are restored at the destination ('dst').",
   "_note_inject": "'inject': true marks an entry as an extra DLL for launcher.exe: when the 'In-game enhancements' setting is on (RelicSettings.Enhancements, default on) the entry is copied like any other and, at launch, handed to launcher.exe AFTER mhynot2.dll (launcher.exe <GameDir> <mhynot2.dll> <dst...>) on Windows 10 and 11 alike — the real mhyprot2 driver must never load under the mod. With the setting off the entry is neither copied nor verified nor deleted, and the launch is the plain per-OS one. Always 'required': false — a missing inject file costs the menu, never the launch. Such entries live under 'versions' (per game build) as '<ver>/ee/CLibrary.dll.bin' -> 'ayy/anime/ee/CLibrary.dll' (never a folder named 'bin'); their default hotkey F1 is what Relic's strings tell the player; publish.ps1 prints the size per inject entry and warns above 80 MB. Entries are added by entertainment_experience/tools/build_ee.ps1 once the DLLs exist.",
+  "_note_bytepatch": "'kind': 'bytepatch' marks an entry that ships no file of the game, only the bytes that differ: 'src' holds 'length' bytes, written at 'offset' of the 'dst' the player's game folder already has ('size' bytes long, before and after). They are written only into the unmodified file of the game build (whole-file hash 'sha256Before'), and the result must hash to 'sha256'. 'spanSha256' is the hash of 'src', which is also the hash of that span of a patched file; 'spanSha256Before' is the hash of the same span of the unmodified file. A destination that is neither the original nor the result is refused with a request for the original and never written into. The bytes go into a copy (<dst>.relic-tmp) that is verified and then renamed over the destination, so a file under the destination's name is never anything but one of the two and no .relic-orig is kept; a destination that is missing while its verified copy lies beside it (a rename a power cut ended halfway, on a file system without a journal) gets that copy at the next run. Before a launch only the length and the span are read; an install and an import hash the whole file. A 'kind' other than absent, empty or 'bytepatch' makes the whole manifest unusable. publish.ps1 checks the span file, the bounds and the form of the four hashes without any game file; entertainment_experience/tools/payload_manifest.py --prove <game dir> proves all four hashes of an entry on an unmodified copy of the game.",
+  "_note_clients": "'clients' names the game builds Relic recognises: one row per build ('build' is its name, printed when a folder is refused), where 'file' is a file of the game whose line in the folder's own pkg_version ('md5' and 'size', the list's fileSize) is different in every build. A version may have several rows. A folder whose pkg_version names a build of ANOTHER version is refused at import and never receives the asked version's files; a build no row names is accepted, unless every row of that version carries 'exact': true (nothing but those builds works). A folder without pkg_version is not judged. The 'size' of a bytepatch entry is the 'size' of a row of its version.",
+  "_note_launch": "'launch' says, per version, what is known of how its client starts through Relic's launch path on an OS. 'windows11': 'unsupported' = the version's client is not known to start on Windows 11 that way: on a Windows 11 PC, PLAY (and the desktop shortcut) asks first, with a warning whose default answer is to cancel, and the install wizard says so before the download; 'Play anyway' goes on with the normal launch for that OS. An absent version, an absent or malformed 'launch' and any other value ask nothing.",
+  "launch": {},
+  "clients": [
+    {"version": "1.6", "build": "1.6.1", "file": "GenshinImpact_Data/Native/UserAssembly.dll", "md5": "f64a5284b27bc313e81883cedca3fb17", "size": 161263208},
+    {"version": "2.8", "build": "2.8.0", "file": "GenshinImpact_Data/Native/UserAssembly.dll", "md5": "2001734e2a7ba8bfa59e2f0daf6cb139", "size": 172337920},
+    {"version": "3.2", "build": "3.2.0", "file": "GenshinImpact_Data/Native/UserAssembly.dll", "md5": "a1db328df8d382d2c5cdb350947f53e1", "size": 221325328, "exact": true}
+  ],
   "common": [
     {
       "src": "common/ayy/anime/build/launcher.exe.bin",
@@ -25,7 +34,7 @@
       {
         "src": "1.6/ee/CLibrary.dll.bin",
         "dst": "ayy/anime/ee/CLibrary.dll",
-        "sha256": "96f6b7fcb7f5cf1cdd785ec3f69b3c23d57113113d0f3cf4645a6ef6b37a3547",
+        "sha256": "d83b019ac0dda482e4ffbe9932656844b1322ecde6ad42440e5689ce51865b4d",
         "inject": true,
         "reason": "In-game enhancements menu (F1) for 1.6 — handed to launcher.exe after mhynot2.dll when Settings > In-game enhancements is on. Optional: the game runs without it.",
         "credit": "Akebi GC — NctimeAza/AnimeGame-Cheat-3.3 v1.2.3 (Apache-2.0), backported to 1.6 from entertainment_experience/ (modified; see entertainment_experience/VENDOR.md)",
@@ -52,7 +61,45 @@
         "credit": "Akebi GC — NctimeAza/AnimeGame-Cheat-3.3 v1.2.3 (Apache-2.0), built for 2.8 from entertainment_experience/ (modified; see entertainment_experience/VENDOR.md)",
         "source": "https://github.com/NctimeAza/AnimeGame-Cheat-3.3"
       }
+    ],
+    "3.2": [
+      {
+        "kind": "bytepatch",
+        "src": "3.2/UserAssembly.span.bin",
+        "dst": "GenshinImpact_Data/Native/UserAssembly.dll",
+        "size": 221325328,
+        "offset": 96467003,
+        "length": 687,
+        "sha256Before": "1fc0b73988228fa96c51b76a34a8ea9aced7eb60e9defc85fa6b9d02301ff5aa",
+        "sha256": "e896b16630f7b273193cf60ade75410b7c832ec32201d6a97ee4a1d5fea63db5",
+        "spanSha256Before": "20b09a6abef63e50ca25fe1dee5176d98052aabace88093fbb0654f68dceee17",
+        "spanSha256": "f1354b8d11945640c404e615aeb4cb2a75017a1548514a8d5e776763dbc920a9",
+        "required": true,
+        "reason": "Without these bytes the 3.2 client cannot log in to a private server.",
+        "credit": "community login patch (author unknown)",
+        "source": "unknown"
+      },
+      {
+        "src": "3.2/mhypbase.dll.bin",
+        "dst": "mhypbase.dll",
+        "sha256": "fb8247341fd557434d3d7b92cef8ee492d90ab5cad5c878914497d1adc18e008",
+        "sha256Before": "3cfb083b080c68af69bf8a9ab45b4491a3f951f09c348d5dc9982b46ef5de3e3",
+        "backup": true,
+        "required": true,
+        "reason": "Replaces the original mhypbase.dll so the 3.2 client can start on Windows 10 and Windows 11.",
+        "credit": "34736384/RSAPatch",
+        "source": "https://github.com/34736384/RSAPatch"
+      },
+      {
+        "src": "3.2/ee/CLibrary.dll.bin",
+        "dst": "ayy/anime/ee/CLibrary.dll",
+        "sha256": "3b157e0c6479bc18f1b511c4857706bc77528dee8a3ac1b25bffa044dcabfb20",
+        "inject": true,
+        "reason": "In-game enhancements menu (F1) for 3.2 — handed to launcher.exe after mhynot2.dll when Settings > In-game enhancements is on. Optional: the game runs without it.",
+        "credit": "Akebi GC — NctimeAza/AnimeGame-Cheat-3.3 v1.2.3 (Apache-2.0), built for 3.2 from entertainment_experience/ with the 3.2 data of upstream commit ee9258a (modified; see entertainment_experience/VENDOR.md)",
+        "source": "https://github.com/NctimeAza/AnimeGame-Cheat-3.3"
+      }
     ]
   },
-  "_credits": "Third-party components: mhynot2 by khang06 (https://github.com/khang06/mhynot2) — launcher.exe + mhynot2.dll are built from it (the launcher as a console-subsystem executable, both with the static C runtime: no Visual C++ redistributable needed); the 2.8 global-metadata.dat is a community patch (source: TODO). See README.md 'Credits'."
+  "_credits": "Third-party components: mhynot2 by khang06 (https://github.com/khang06/mhynot2) — launcher.exe + mhynot2.dll are built from it (the launcher as a console-subsystem executable, both with the static C runtime: no Visual C++ redistributable needed); the 2.8 global-metadata.dat is a community patch (source: TODO); the bytes the 3.2 client logs in to a private server with are a community patch whose author is not known (Relic writes them into the player's own UserAssembly.dll); the 3.2 mhypbase.dll is RSAPatch by 34736384 (https://github.com/34736384/RSAPatch), built from the git submodule rsapatch/RSAPatch with the dynamic C runtime. See README.md 'Credits'."
 }

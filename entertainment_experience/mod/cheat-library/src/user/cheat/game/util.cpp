@@ -197,6 +197,7 @@ namespace cheat::game
 		return true;
     }
 
+#if RELIC_GAME_VERSION != 32   // the 3.2 data has neither these UI helpers nor their enums (util.h)
     void ShowInGameNormalMessage(std::string content, app::Color bgColor, bool showBackground)
     {
 		auto uiManager = GET_SINGLETON(MoleMole_UIManager);
@@ -248,5 +249,6 @@ namespace cheat::game
     {
         app::MoleMole_UIUtil_TryShowSimpleGeneralDialog_1(string_to_il2cppi(title), string_to_il2cppi(content), nullptr, nullptr);
     }
+#endif
 
 }

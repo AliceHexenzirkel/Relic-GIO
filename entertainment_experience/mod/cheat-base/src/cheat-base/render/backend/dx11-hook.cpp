@@ -100,7 +100,7 @@ static void DrawOverlay(IDXGISwapChain* pChain)
 	if (g_bInitialised)
 	{
 		InstallVTableHook(pChain);
-		backend::DX11Events::RenderEvent(pContext);
+		RELIC_RENDER_EVENT(pChain, pContext);   // RenderEvent; a DevTest build fires DevPresentEvent around it (dx11-hook.h)
 	}
 }
 
@@ -116,7 +116,7 @@ struct PresentDepth
 
 static HRESULT __stdcall Present_VTable_Hook(IDXGISwapChain* pChain, UINT SyncInterval, UINT Flags)
 {
-	RELIC_DIAG_TICK(PRESENT_VT);
+	RELIC_DIAG_TICK(PRESENT_VT); RELIC_DEV_PRESENT_FLAGS(Flags);   // DevTest: a test present shows nothing (dx11-hook.h)
 	// The depth is held across the chained call, not released before it: the address below is still the
 	// Detours-patched dxgi Present while the code patch is in place, so releasing first would let Present_Hook draw
 	// the overlay a second time for every presented frame.
@@ -131,7 +131,7 @@ static HRESULT __stdcall Present_VTable_Hook(IDXGISwapChain* pChain, UINT SyncIn
 
 static HRESULT __stdcall Present_Hook(IDXGISwapChain* pChain, const UINT SyncInterval, const UINT Flags)
 {
-	RELIC_DIAG_TICK(PRESENT);
+	RELIC_DIAG_TICK(PRESENT); RELIC_DEV_PRESENT_FLAGS(Flags);   // DevTest: a test present shows nothing (dx11-hook.h)
 	PresentDepth depth;
 	if (depth.outermost())
 		DrawOverlay(pChain);
@@ -142,7 +142,7 @@ static HRESULT __stdcall Present_Hook(IDXGISwapChain* pChain, const UINT SyncInt
 static HRESULT __stdcall Present1_Hook(IDXGISwapChain1* pChain, const UINT SyncInterval, const UINT Flags,
 	const DXGI_PRESENT_PARAMETERS* pPresentParameters)
 {
-	RELIC_DIAG_TICK(PRESENT1);
+	RELIC_DIAG_TICK(PRESENT1); RELIC_DEV_PRESENT_FLAGS(Flags);   // DevTest: a test present shows nothing (dx11-hook.h)
 	PresentDepth depth;
 	if (depth.outermost())
 		DrawOverlay(pChain);

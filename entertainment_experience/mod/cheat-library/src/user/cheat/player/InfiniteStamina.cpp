@@ -20,7 +20,9 @@ namespace cheat::feature
 #endif
 	{
 		INSTALL_HOOK(app::MoleMole_DataItem_HandleNormalProp, DataItem_HandleNormalProp_Hook);
+#if RELIC_GAME_VERSION != 32   // the Wanderer's stamina hook: 3.3 content, not in the 3.2 data
 		INSTALL_HOOK(app::VCHumanoidMove_MNKKEGMDFFO, VCHumanoidMove_MNKKEGMDFFO_Hook);
+#endif
 		events::MoveSyncEvent += MY_METHOD_HANDLER(InfiniteStamina::OnMoveSync);
 	}
 

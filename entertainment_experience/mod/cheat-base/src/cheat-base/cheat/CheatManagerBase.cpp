@@ -543,6 +543,15 @@ namespace cheat
 			if (s_IsMenuShowed)
 				ToggleMenuShow();
 		}
+#if RELIC_DEVTEST
+		// A test asked for the menu to open (RequestShowMenu), served here like the request above.
+		if (s_ShowMenuWanted)
+		{
+			s_ShowMenuWanted = false;
+			if (!s_IsMenuShowed)
+				ToggleMenuShow();
+		}
+#endif
 
 		DrawExternal();
 		RELIC_DIAG_TICK(EXTERNAL_OUT);
@@ -669,8 +678,19 @@ namespace cheat
 
 	void CheatManagerBase::RequestHideMenu()
 	{
+#if RELIC_DEVTEST
+		s_ShowMenuWanted = false;   // the later of the two requests wins
+#endif
 		s_HideMenuWanted = true;
 	}
+#if RELIC_DEVTEST
+
+	void CheatManagerBase::RequestShowMenu()
+	{
+		s_HideMenuWanted = false;   // the later of the two requests wins
+		s_ShowMenuWanted = true;
+	}
+#endif
 
 	void CheatManagerBase::PushFeature(Feature* feature)
 	{

@@ -9,9 +9,23 @@ namespace Relic.Core.Server;
 /// not find out", NOT "stopped" — the two must never be conflated in the text shown to the player.</summary>
 public sealed record ServerProbeResult(bool? Up, string Degraded)
 {
-    /// <summary>The server is running AND every critical service is up — the only case in which the
-    /// game starts without asking anything.</summary>
-    public bool AllGood => Up == true && Degraded.Length == 0;
+    /// <summary>The server is running, every critical service is up AND the game server has finished
+    /// loading — the only case in which the game starts without asking anything.</summary>
+    public bool AllGood => Up == true && Degraded.Length == 0 && !Loading;
+
+    /// <summary>Every service runs, but the game server is still loading its data and turns every client
+    /// away until it is done (<c>loading: true</c> of the version's entry). Only an answered <c>true</c>
+    /// sets it: <c>false</c>, <c>null</c> and an agent that does not send the key all read as "not
+    /// loading", and the SDK probe cannot tell.</summary>
+    public bool Loading { get; init; }
+
+    /// <summary>The agent answered with the versions it knows and this one is not among them: it cannot
+    /// say whether a server for it runs, and it could not start one. <see cref="Up"/> is null then —
+    /// "stopped" would promise a start this agent cannot make. Never set for an answer that lists no
+    /// version at all or that could not ask docker: those say nothing about the list. Nor for one that
+    /// names the version with an entry nothing can be read from: that answer is broken, not a list
+    /// without the version.</summary>
+    public bool Unlisted { get; init; }
 
     /// <summary>Which path answered: "agent" (token /status), "public" (/public/status), "sdk" (game
     /// port probe), "none" (nothing configured).</summary>
@@ -21,7 +35,8 @@ public sealed record ServerProbeResult(bool? Up, string Degraded)
     /// <c>present: false</c> (no stack on the box — "stopped" would promise a start that cannot happen;
     /// it can be transient while an admin extracts a stack, so the text stays neutral). true = listed
     /// and not marked absent (an older agent without the key counts as present). null = unknown: a
-    /// version the agent does not list, or the SDK probe, which cannot tell versions apart.</summary>
+    /// version the agent does not list (<see cref="Unlisted"/>), or the SDK probe, which cannot tell
+    /// versions apart.</summary>
     public bool? Hosted { get; init; }
 
     /// <summary>Comma-joined ids of the versions the agent lists as present (<c>present != false</c>) —
@@ -79,7 +94,7 @@ public static class ServerProbe
                 {
                     Log.Info($"server probe {versionId}: up={got.Up?.ToString() ?? "unknown"} " +
                              $"hosted={got.Hosted?.ToString() ?? "unknown"} " +
-                             $"servicesDown='{got.Degraded}' ({attempt} attempts, {sw.ElapsedMilliseconds} ms)");
+                             $"servicesDown='{got.Degraded}'{Flags(got)} ({attempt} attempts, {sw.ElapsedMilliseconds} ms)");
                     return got;
                 }
                 why = $"no answer within {perAttempt.TotalSeconds:0.#} s";
@@ -135,11 +150,13 @@ public static class ServerProbe
         bool admin = string.Equals(s.Mode, "admin", StringComparison.OrdinalIgnoreCase);
         // The same derivation the app uses for every admin call: the CONFIGURED host, with the token
         // stored for it (or the baked one) — never the host remembered inside server.json.
-        var cfg = ServerConfig.Effective(ServerConfigStore.Load(), s.ServerHost, s.AgentPort);
+        var cfg = ServerConfig.Effective(ServerConfigStore.LoadFor(s.ServerHost), s.ServerHost, s.AgentPort);
         if (admin && cfg is not null)
         {
             var r = await CheckAsync(cfg, versionId, status);
-            if (r.Up is not null) return r with { Source = "agent" };
+            // An agent that does not list the version has answered: the SDK port below could only say
+            // that SOME version's server runs, which would read as this one's.
+            if (r.Up is not null || r.Unlisted) return r with { Source = "agent" };
         }
         if (string.IsNullOrWhiteSpace(s.ServerHost))
         {
@@ -154,7 +171,7 @@ public static class ServerProbe
             var st = await pub.StatusAsync();
             var r = ParsePublic(st, versionId);
             Log.Info($"server probe {versionId} (public): up={r.Up?.ToString() ?? "unknown"} hosted={r.Hosted?.ToString() ?? "unknown"} " +
-                     $"degraded='{r.Degraded}' ({sw.ElapsedMilliseconds} ms)");
+                     $"degraded='{r.Degraded}'{Flags(r)} ({sw.ElapsedMilliseconds} ms)");
             return r;
         }
         catch (Exception ex)
@@ -168,24 +185,27 @@ public static class ServerProbe
 
     /// <summary>Read a /public/status answer for one version (same shape rules as <see cref="Parse"/>).
     /// A version the snapshot does not list is unknown, never absent: only an explicit
-    /// <c>present: false</c> says the server does not have it. <c>statusUnknown</c> (docker
+    /// <c>present: false</c> says the server does not have it — and it is <see cref="ServerProbeResult.Unlisted"/>
+    /// when the snapshot names other versions, not this one, and could ask docker. <c>statusUnknown</c> (docker
     /// could not answer on the box) makes every <c>up: false</c> in the snapshot fabricated, so nothing
     /// is asserted about running — but <c>present</c> is a filesystem fact on the agent, independent of
     /// docker, so it is read first (the same order as <see cref="Parse"/>).</summary>
     public static ServerProbeResult ParsePublic(JsonElement st, string versionId)
     {
         string hosted = HostedList(st);
+        bool fog = st.ValueKind == JsonValueKind.Object
+            && st.TryGetProperty("statusUnknown", out var su) && su.ValueKind == JsonValueKind.True;
         if (!TryVersion(st, versionId, out var v))
-            return new ServerProbeResult(null, "") { Source = "public", HostedVersions = hosted };
+            return new ServerProbeResult(null, "") { Source = "public", HostedVersions = hosted, Unlisted = !fog && LacksVersion(st, versionId) };
         if (IsAbsent(v))
             return new ServerProbeResult(false, "") { Source = "public", Hosted = false, HostedVersions = hosted };
-        if (st.TryGetProperty("statusUnknown", out var su) && su.ValueKind == JsonValueKind.True)
+        if (fog)
             return new ServerProbeResult(null, "") { Source = "public", Hosted = true, HostedVersions = hosted };
         bool up = v.TryGetProperty("up", out var u) && u.ValueKind == JsonValueKind.True;
         if (!up) return new ServerProbeResult(false, "") { Source = "public", Hosted = true, HostedVersions = hosted };
         bool healthy = !v.TryGetProperty("healthy", out var h) || h.ValueKind != JsonValueKind.False;
         return new ServerProbeResult(true, healthy ? "" : "services")
-            { Source = "public", Hosted = true, HostedVersions = hosted, DegradedUnlisted = !healthy };
+            { Source = "public", Hosted = true, HostedVersions = hosted, DegradedUnlisted = !healthy, Loading = IsLoading(v) };
     }
 
     /// <summary>versions[versionId] as an object, when the answer lists it.</summary>
@@ -197,9 +217,26 @@ public static class ServerProbe
             && vs.TryGetProperty(versionId, out v) && v.ValueKind == JsonValueKind.Object;
     }
 
+    /// <summary>Does the answer name versions, and not this one? Only that means "the agent does not know
+    /// this version". An answer without a version list — none, an empty one — says nothing about it, and
+    /// one that names the version with an entry <see cref="TryVersion"/> cannot read is a broken answer
+    /// about a version it does name.</summary>
+    private static bool LacksVersion(JsonElement st, string versionId) =>
+        st.ValueKind == JsonValueKind.Object
+        && st.TryGetProperty("versions", out var vs) && vs.ValueKind == JsonValueKind.Object
+        && vs.EnumerateObject().Any() && !vs.TryGetProperty(versionId, out _);
+
     /// <summary>Only a JSON <c>false</c> is absent — an older agent sends no <c>present</c> at all.</summary>
     private static bool IsAbsent(JsonElement v) =>
         v.TryGetProperty("present", out var p) && p.ValueKind == JsonValueKind.False;
+
+    /// <summary>Only a JSON <c>true</c> is loading: the admin answer also says <c>false</c> and
+    /// <c>null</c> (its log cannot tell), the public one leaves the key out in both cases.</summary>
+    private static bool IsLoading(JsonElement v) =>
+        v.TryGetProperty("loading", out var l) && l.ValueKind == JsonValueKind.True;
+
+    /// <summary>The two facts beside up / hosted, for the probe's log line.</summary>
+    private static string Flags(ServerProbeResult r) => (r.Loading ? " loading" : "") + (r.Unlisted ? " unlisted" : "");
 
     /// <summary>The ids the answer lists as present, comma-joined in the agent's order.</summary>
     private static string HostedList(JsonElement st)
@@ -223,7 +260,7 @@ public static class ServerProbe
         string h = host.Contains(':') && !host.StartsWith('[') ? "[" + host + "]" : host;
         try
         {
-            using var http = new HttpClient(new SocketsHttpHandler { UseProxy = false, ConnectTimeout = timeout }) { Timeout = timeout };
+            using var http = new HttpClient(new SocketsHttpHandler { UseProxy = false, ConnectTimeout = timeout, AllowAutoRedirect = false }) { Timeout = timeout };
             using var resp = await http.GetAsync($"http://{h}:{port}/query_region_list?version=OSRELWin1.6.0&lang=2&platform=3&binary=1&time=0", ct);
             string body = await resp.Content.ReadAsStringAsync(ct);
             if (resp.IsSuccessStatusCode) return new SdkProbe(body.Trim().Length > 0, body.Trim().Length > 0 ? "ok" : "empty");
@@ -254,7 +291,12 @@ public static class ServerProbe
         // it being true, so nothing can be asserted. The agent did answer, though — not worth a retry.
         if (st.ValueKind == JsonValueKind.Object && st.TryGetProperty("error", out var err) && err.ValueKind == JsonValueKind.String)
             return new ServerProbeResult(null, "") { Hosted = hostedHere, HostedVersions = hosted };
-        if (!(listed && v.TryGetProperty("up", out var u) && u.ValueKind == JsonValueKind.True))
+        // A version the answer holds no entry for is never "stopped": the agent names other versions and
+        // not this one (unlisted), or the answer has no list to look in, or names the version with an
+        // entry nothing can be read from (unknown).
+        if (!listed)
+            return new ServerProbeResult(null, "") { HostedVersions = hosted, Unlisted = LacksVersion(st, versionId) };
+        if (!(v.TryGetProperty("up", out var u) && u.ValueKind == JsonValueKind.True))
             return new ServerProbeResult(false, "") { Hosted = hostedHere, HostedVersions = hosted };
         // "up" with fallen services is exactly the white-screen scenario — the client
         // connects, but the dead gameserver leaves it on an empty screen. The agent's watchdog revives
@@ -264,6 +306,6 @@ public static class ServerProbe
             dead = string.Join(", ", sd.EnumerateArray()
                 .Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() : null)
                 .Where(s => !string.IsNullOrEmpty(s)));
-        return new ServerProbeResult(true, dead) { Hosted = true, HostedVersions = hosted };
+        return new ServerProbeResult(true, dead) { Hosted = true, HostedVersions = hosted, Loading = IsLoading(v) };
     }
 }

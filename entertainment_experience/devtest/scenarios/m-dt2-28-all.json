@@ -1,0 +1,17 @@
+{
+  "name": "m-dt2-28-all",
+  "version": "2.8",
+  "description": "M-DT2 on 2.8 in one session: the steps of the teleport, camera, entities and UI scenarios one after the other.",
+  "server": {"expectHost": "${RELIC_DEVTEST_HOST}", "agent": "${RELIC_DEVTEST_AGENT}", "tokenEnv": "RELIC_DEVTEST_TOKEN"},
+  "runner": {"window": "1600x900", "ownFiles": "keep"},
+  "config": {"Debug": {"DevTest": {"Enabled": true}}, "General": {"Logging": {"FileLogging": true}}},
+  "session": {"noFaults": true, "maxPresentStall": 2.0},
+  "steps": [
+    {"label": "in the world", "op": "wait", "until": {"inGame": true, "sceneNot": 0}, "timeout": 900},
+    {"include": "steps/teleport.json"},
+    {"include": "steps/camera.json"},
+    {"include": "steps/entities.json"},
+    {"include": "steps/ui.json"},
+    {"label": "quit", "op": "quit"}
+  ]
+}

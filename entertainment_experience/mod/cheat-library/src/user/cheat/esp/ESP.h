@@ -36,12 +36,19 @@ namespace cheat::feature
             uint32_t entityId = 0;
             uint32_t gadgetId = 0;
             uint32_t ownerEntityId = 0;
+#if RELIC_GAME_VERSION == 32
+            // Filled by the SceneEntityAppear / GadgetState hooks, which the 3.2 data lacks: there the map stays empty,
+            // and the fields whose types it lacks too (born type, gadget type, content case, the proto) are left out.
+            app::GadgetState__Enum gadgetState = app::GadgetState__Enum::Default;
+            bool isEnableInteract = false;
+#else
             app::Proto_GadgetBornType__Enum bornType = app::Proto_GadgetBornType__Enum::GadgetBornNone;
             app::GadgetState__Enum gadgetState = app::GadgetState__Enum::Default;
             app::GadgetType_Enum gadgetType = app::GadgetType_Enum::GADGET_NONE;
             bool isEnableInteract = false;
             app::Proto_SceneGadgetInfo_ContentOneofCase__Enum contentCase = app::Proto_SceneGadgetInfo_ContentOneofCase__Enum::None;
             app::Proto_SceneGadgetInfo* data = nullptr;
+#endif
         };
 
         std::unordered_map<uint32_t, GadgetInfo> m_Gadgets = {};
@@ -140,4 +147,14 @@ namespace cheat::feature
 		ESP();
 	};
 }
+
+// The condition under which the default branch of ESP::DrawExternal leaves a finished puzzle out. Only the
+// SceneEntityAppear / GadgetState hooks fill m_Gadgets, and the 3.2 build has neither: there no puzzle reads as
+// finished, whatever a configuration file says of f_HideCompleted (its option is not drawn), and CheckPuzzleFinished,
+// which adds an entry for every entity it is asked about, is not asked.
+#if RELIC_GAME_VERSION == 32
+#define RELIC_ESP_HIDES_FINISHED(entity) false
+#else
+#define RELIC_ESP_HIDES_FINISHED(entity) (f_HideCompleted && ESP::CheckPuzzleFinished(entity))
+#endif
 

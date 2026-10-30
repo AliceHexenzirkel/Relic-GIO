@@ -32,3 +32,8 @@ namespace cheat::feature
 	};
 }
 
+#if RELIC_DEVTEST
+// The dev-only test bed lives in this tab; cheat.cpp registers it next to the other features.
+#include <cheat/misc/DevTest.h>
+#endif
+

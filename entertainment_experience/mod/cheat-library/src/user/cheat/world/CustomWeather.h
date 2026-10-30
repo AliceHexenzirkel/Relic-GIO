@@ -4,6 +4,13 @@
 #include <cheat-base/cheat/Feature.h>
 #include <cheat-base/config/config.h>
 
+// The raw EnviroSky / EnviroWeatherPreset offsets CustomWeather.cpp reads are known for the builds that have a
+// metadata dump, 1.6 and 2.8. The 3.2 build (like the 3.3 reference build) knows none and compiles the logs that
+// read them out. Any other game version decides here first - never the 2.8 values by default.
+#if RELIC_GAME_VERSION > 16 && RELIC_GAME_VERSION != 28 && RELIC_GAME_VERSION != 32 && RELIC_GAME_VERSION != 33
+#error "CustomWeather: no EnviroSky offsets are known for this game version (see CustomWeather.cpp)"
+#endif
+
 namespace cheat::feature
 {
 	class CustomWeather : public Feature

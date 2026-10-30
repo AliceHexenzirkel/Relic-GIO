@@ -5,7 +5,7 @@
 #include <helpers.h>
 #include <cheat/events.h>
 #include <cheat/game/EntityManager.h>
-
+#if RELIC_GAME_VERSION <= 16 || RELIC_GAME_VERSION == 28   // the builds whose PostProcessLayer RVAs are known
 namespace cheat::feature
 {
 	// Relic: the game's own "Render Resolution" slider stops at 1.5. That ceiling is not a property of the
@@ -218,3 +218,4 @@ namespace cheat::feature
 		s_WasScale = scale;
 	}
 }
+#endif

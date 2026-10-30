@@ -82,13 +82,13 @@ namespace cheat::feature
 		InstallCustomFilters();
 
 		m_FontContrastColor = ImGui::CalcContrastColor(f_GlobalFontColor);
-
+#if RELIC_GAME_VERSION != 32   // not in the 3.2 data: the finished-puzzle states and the Skin / Flycloak swaps live here
         INSTALL_HOOK(app::MoleMole_GadgetModule_DoOnGadgetStateNotify, MoleMole_GadgetModule_DoOnGadgetStateNotify_Hook);
         INSTALL_HOOK(app::MoleMole_LevelModule_OnSceneEntityAppear, MoleMole_LevelModule_OnSceneEntityAppear_Hook);
         INSTALL_HOOK(app::MoleMole_LevelModule_OnSceneEntityAppearAsync, MoleMole_LevelModule_OnSceneEntityAppearAsync_Hook);
+#endif
 		::events::KeyUpEvent += MY_METHOD_HANDLER(ESP::OnKeyUp);
 	}
-
 
 	const FeatureGUIInfo& ESP::GetGUIInfo() const
 	{
@@ -141,8 +141,9 @@ namespace cheat::feature
 			ImGui::Spacing();
 			ConfigWidget(_TR("Draw Health"), f_DrawHealth, _TR("Draw health of object."));
 			ImGui::Spacing();
+#if RELIC_GAME_VERSION != 32   // it reads the gadget states the 3.2 build cannot see (no GadgetState hook)
 			ConfigWidget(_TR("Hide completed puzzles"), f_HideCompleted, _TR("Hide completed puzzles (Elemental monuments, Bloatty Floatty, Electro Seelie)"));
-
+#endif
 			ImGui::Spacing();
 			ConfigWidget(_TR("Font Size"), f_FontSize, 1, 1, 100, _TR("Font size of name or distance."));
 			ConfigWidget("## Font outline enabled", f_FontOutline); ImGui::SameLine();
@@ -268,7 +269,6 @@ namespace cheat::feature
 		auto& gadgetState = m_Gadgets[entity->runtimeID()].gadgetState;
 		return gadgetState == app::GadgetState__Enum::GearStart || gadgetState == app::GadgetState__Enum::GearStop || gadgetState == app::GadgetState__Enum::GearAction1;
 	}
-
 
     bool ESP::isBuriedChest(game::Entity* entity)
     {
@@ -766,7 +766,7 @@ namespace cheat::feature
                         break;
 
                     default:
-                        if (f_HideCompleted && ESP::CheckPuzzleFinished(entity))
+                        if (RELIC_ESP_HIDES_FINISHED(entity))
                             break;
                         esp::render::DrawEntity(entry.m_Name, Translator::RuntimeTranslate(entry.m_Name), entity, entry.m_Color, entry.m_ContrastColor);
                         break;
@@ -950,7 +950,7 @@ namespace cheat::feature
 
 		return;
 	}
-
+#if RELIC_GAME_VERSION != 32   // the 3.2 data has no SceneEntityAppear / GadgetState hooks and none of their proto types
 	// fk error 2712
 	static void GadgetAppend(ESP::GadgetInfo info)
 	{
@@ -1034,7 +1034,7 @@ namespace cheat::feature
         CALL_ORIGIN(MoleMole_LevelModule_OnSceneEntityAppearAsync_Hook, __this, notify, JOODHPBLPMA, method);
 		ProcessNotify(notify);
     }
-
+#endif
 #define ADD_FILTER_FIELD(section, name) AddFilter(util::MakeCapital(#section), util::SplitWords(#name), &game::filters::##section##::##name##)
 	void ESP::InstallFilters()
 	{

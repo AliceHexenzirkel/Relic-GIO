@@ -1,0 +1,14 @@
+{
+  "name": "m-dt2-28-camera",
+  "version": "2.8",
+  "description": "M-DT2 on 2.8: the free camera set, moved, along a path of three keys and released, with a shot of each pose.",
+  "server": {"expectHost": "${RELIC_DEVTEST_HOST}", "agent": "${RELIC_DEVTEST_AGENT}", "tokenEnv": "RELIC_DEVTEST_TOKEN"},
+  "runner": {"window": "1600x900", "ownFiles": "keep"},
+  "config": {"Debug": {"DevTest": {"Enabled": true}}, "General": {"Logging": {"FileLogging": true}}},
+  "session": {"noFaults": true, "maxPresentStall": 2.0},
+  "steps": [
+    {"label": "in the world", "op": "wait", "until": {"inGame": true, "sceneNot": 0}, "timeout": 900},
+    {"include": "steps/camera.json"},
+    {"label": "quit", "op": "quit"}
+  ]
+}

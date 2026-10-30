@@ -1,8 +1,9 @@
 {
-  "_comment": "The content catalogue for the GM commands, extracted from the real ExcelBinOutput of versions 1.6 and 2.8 (not from memory). It holds the characters, the 4★ and 5★ weapons and the 4★ and 5★ artifact sets. \"since\" = the first supported version in which the item exists in the game data; the UI shows only what is available for the selected version, and the \"NEW\" badge marks what was added in that very version. Names and aliases are normalised (lower case) when searching, but you can always type the numeric id directly — it passes through untouched, whatever the version. The pieces of a set are exactly in the order flower, plume, sands, goblet, circlet, and the chosen id is the variant that drops with the maximum number of sub-stats. Artifacts are sent either as \"item add <piece> 1\" (they land in the inventory, unequipped) or as \"equip add <piece> <level>\" (equipped directly on the character controlled in game) — the server has no command for a whole set.",
+  "_comment": "The content catalogue for the GM commands, extracted from the real ExcelBinOutput of the supported versions (versionOrder; build/make_catalog.py writes config/gamedata.generated.json, merged into this file by hand) — not from memory. It holds the characters, the 4★ and 5★ weapons and the 4★ and 5★ artifact sets. \"since\" = the first supported version in which the item exists in the game data; the UI shows only what is available for the selected version, and the \"NEW\" badge marks what was added in that very version. Names and aliases are normalised (lower case) when searching, but you can always type the numeric id directly — it passes through untouched, whatever the version. The pieces of a set are exactly in the order flower, plume, sands, goblet, circlet, and the chosen id is the variant that drops with the slot's own main-stat pool and the maximum number of sub-stats. Artifacts are sent either as \"item add <piece> 1\" (they land in the inventory, unequipped) or as \"equip add <piece> <level>\" (equipped directly on the character controlled in game) — the server has no command for a whole set.",
   "versionOrder": [
     "1.6",
-    "2.8"
+    "2.8",
+    "3.2"
   ],
   "avatars": [
     {
@@ -520,6 +521,78 @@
       "weapon": "Sword",
       "since": "2.8",
       "splash": "10000066.webp"
+    },
+    {
+      "id": 10000067,
+      "name": "Collei",
+      "rarity": 4,
+      "element": "Dendro",
+      "weapon": "Bow",
+      "since": "3.2",
+      "splash": "10000067.webp"
+    },
+    {
+      "id": 10000068,
+      "name": "Dori",
+      "rarity": 4,
+      "element": "Electro",
+      "weapon": "Claymore",
+      "since": "3.2",
+      "splash": "10000068.webp"
+    },
+    {
+      "id": 10000069,
+      "name": "Tighnari",
+      "rarity": 5,
+      "element": "Dendro",
+      "weapon": "Bow",
+      "since": "3.2",
+      "splash": "10000069.webp"
+    },
+    {
+      "id": 10000070,
+      "name": "Nilou",
+      "rarity": 5,
+      "element": "Hydro",
+      "weapon": "Sword",
+      "since": "3.2",
+      "splash": "10000070.webp"
+    },
+    {
+      "id": 10000071,
+      "name": "Cyno",
+      "rarity": 5,
+      "element": "Electro",
+      "weapon": "Polearm",
+      "since": "3.2",
+      "splash": "10000071.webp"
+    },
+    {
+      "id": 10000072,
+      "name": "Candace",
+      "rarity": 4,
+      "element": "Hydro",
+      "weapon": "Polearm",
+      "since": "3.2",
+      "splash": "10000072.webp"
+    },
+    {
+      "id": 10000073,
+      "name": "Nahida",
+      "rarity": 5,
+      "element": "Dendro",
+      "weapon": "Catalyst",
+      "since": "3.2",
+      "splash": "10000073.webp"
+    },
+    {
+      "id": 10000074,
+      "name": "Layla",
+      "rarity": 4,
+      "element": "Cryo",
+      "weapon": "Sword",
+      "since": "3.2",
+      "splash": "10000074.webp"
     }
   ],
   "weapons": [
@@ -671,6 +744,22 @@
       "icon": "UI_EquipIcon_Sword_Youtou"
     },
     {
+      "id": 11417,
+      "name": "Sapwood Blade",
+      "rarity": 4,
+      "type": "Sword",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Sword_Arakalari"
+    },
+    {
+      "id": 11418,
+      "name": "Xiphos' Moonlight",
+      "rarity": 4,
+      "type": "Sword",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Sword_Pleroma"
+    },
+    {
       "id": 11501,
       "name": "Aquila Favonia",
       "rarity": 5,
@@ -737,6 +826,14 @@
       "type": "Sword",
       "since": "2.8",
       "icon": "UI_EquipIcon_Sword_Amenoma"
+    },
+    {
+      "id": 11511,
+      "name": "Key of Khaj-Nisut",
+      "rarity": 5,
+      "type": "Sword",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Sword_Deshret"
     },
     {
       "id": 12401,
@@ -864,12 +961,28 @@
       "icon": "UI_EquipIcon_Claymore_Bakufu"
     },
     {
+      "id": 12415,
+      "name": "Makhaira Aquamarine",
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Claymore_Pleroma"
+    },
+    {
       "id": 12416,
       "name": "Akuoumaru",
       "rarity": 4,
       "type": "Claymore",
       "since": "2.8",
       "icon": "UI_EquipIcon_Claymore_Maria"
+    },
+    {
+      "id": 12417,
+      "name": "Forest Regalia",
+      "rarity": 4,
+      "type": "Claymore",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Claymore_Arakalari"
     },
     {
       "id": 12501,
@@ -1036,6 +1149,22 @@
       "icon": "UI_EquipIcon_Pole_Maria"
     },
     {
+      "id": 13417,
+      "name": "Moonpiercer",
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Pole_Arakalari"
+    },
+    {
+      "id": 13419,
+      "name": "Missive Windspear",
+      "rarity": 4,
+      "type": "Polearm",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Pole_Windvane"
+    },
+    {
       "id": 13501,
       "name": "Staff of Homa",
       "aliases": [
@@ -1094,6 +1223,14 @@
       "type": "Polearm",
       "since": "2.8",
       "icon": "UI_EquipIcon_Pole_Narukami"
+    },
+    {
+      "id": 13511,
+      "name": "Staff of the Scarlet Sands",
+      "rarity": 5,
+      "type": "Polearm",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Pole_Deshret"
     },
     {
       "id": 14401,
@@ -1227,6 +1364,22 @@
       "icon": "UI_EquipIcon_Catalyst_Jyanome"
     },
     {
+      "id": 14416,
+      "name": "Wandering Evenstar",
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Catalyst_Pleroma"
+    },
+    {
+      "id": 14417,
+      "name": "Fruit of Fulfillment",
+      "rarity": 4,
+      "type": "Catalyst",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Catalyst_Arakalari"
+    },
+    {
       "id": 14501,
       "name": "Skyward Atlas",
       "rarity": 5,
@@ -1271,6 +1424,14 @@
       "type": "Catalyst",
       "since": "2.8",
       "icon": "UI_EquipIcon_Catalyst_Narukami"
+    },
+    {
+      "id": 14511,
+      "name": "A Thousand Floating Dreams",
+      "rarity": 5,
+      "type": "Catalyst",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Catalyst_Ayus"
     },
     {
       "id": 15401,
@@ -1422,6 +1583,22 @@
       "icon": "UI_EquipIcon_Bow_Maria"
     },
     {
+      "id": 15417,
+      "name": "King's Squire",
+      "rarity": 4,
+      "type": "Bow",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Bow_Arakalari"
+    },
+    {
+      "id": 15418,
+      "name": "End of the Line",
+      "rarity": 4,
+      "type": "Bow",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Bow_Fin"
+    },
+    {
       "id": 15501,
       "name": "Skyward Harp",
       "rarity": 5,
@@ -1478,6 +1655,14 @@
       "type": "Bow",
       "since": "2.8",
       "icon": "UI_EquipIcon_Bow_Narukami"
+    },
+    {
+      "id": 15511,
+      "name": "Hunter's Path",
+      "rarity": 5,
+      "type": "Bow",
+      "since": "3.2",
+      "icon": "UI_EquipIcon_Bow_Ayus"
     }
   ],
   "artifactSets": [
@@ -2256,6 +2441,72 @@
           "slot": "circlet",
           "id": 98534,
           "icon": "UI_RelicIcon_15024_3"
+        }
+      ]
+    },
+    {
+      "setId": 15025,
+      "name": "Deepwood Memories",
+      "rarity": 5,
+      "since": "3.2",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 23624,
+          "icon": "UI_RelicIcon_15025_4"
+        },
+        {
+          "slot": "plume",
+          "id": 23622,
+          "icon": "UI_RelicIcon_15025_2"
+        },
+        {
+          "slot": "sands",
+          "id": 20554,
+          "icon": "UI_RelicIcon_15025_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 20514,
+          "icon": "UI_RelicIcon_15025_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 20534,
+          "icon": "UI_RelicIcon_15025_3"
+        }
+      ]
+    },
+    {
+      "setId": 15026,
+      "name": "Gilded Dreams",
+      "rarity": 5,
+      "since": "3.2",
+      "pieces": [
+        {
+          "slot": "flower",
+          "id": 23634,
+          "icon": "UI_RelicIcon_15026_4"
+        },
+        {
+          "slot": "plume",
+          "id": 23632,
+          "icon": "UI_RelicIcon_15026_2"
+        },
+        {
+          "slot": "sands",
+          "id": 21554,
+          "icon": "UI_RelicIcon_15026_5"
+        },
+        {
+          "slot": "goblet",
+          "id": 21514,
+          "icon": "UI_RelicIcon_15026_1"
+        },
+        {
+          "slot": "circlet",
+          "id": 21534,
+          "icon": "UI_RelicIcon_15026_3"
         }
       ]
     },

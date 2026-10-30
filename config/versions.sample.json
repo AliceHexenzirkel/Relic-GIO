@@ -1,7 +1,7 @@
 {
   "_comment": "Copy to versions.json (gitignored) and adjust. The app loads versions.json; if absent it falls back to this sample. Every host carries its own byte count: a mirror is not necessarily the same build, and the length check runs against the host actually used.",
-  "_comment_account": "\"account\" = the account name used to log in IN GAME (the server does not verify the password unless the admin enabled it). OPTIONAL: the app reads it from agent/payloads/<server>/manifest.json (the file describing the save actually imported on the server) and uses this value only when the payloads are missing from the build.",
-  "_comment_mirrors": "\"mirrors\" = alternative hosts for the SAME archive, each with ITS OWN \"size\". \"id\" is the key saved in Settings (download source) and must be identical across versions that carry that mirror; a version without it falls back to the CDN.",
+  "_comment_account": "\"account\" = the account name used to log in IN GAME (the server does not verify the password unless the admin enabled it). OPTIONAL: the app reads it from agent/payloads/<server>/manifest.json (the file describing the save actually imported on the server) and uses this value only when the payloads are missing from the build. Empty (\"\") for a version whose payload ships no save: there is no pre-made account to show.",
+  "_comment_mirrors": "\"mirrors\" = alternative hosts for the SAME archive, each with ITS OWN \"size\". \"id\" is the key saved in Settings (download source) and must be identical across versions that carry that mirror; a version without it starts from the first host it has. A version may name no CDN (\"cdnUrl\": \"\" on its client and on every pack): its mirrors are then its only hosts, and the pack-level \"size\" is still what the wizard and the disk check quote.",
   "_comment_drive": "\"driveId\" = the Google Drive file id (from https://drive.google.com/file/d/<ID>/view). Leave it empty to hide the Drive source entirely (the card is not shown and the download chain skips it). Drive ids belong in your private versions.json — publish.ps1 strips them from the shipped build unless you pass --drive.",
   "_comment_voices": "\"voices\" = one archive per spoken language, keyed exactly as the game names the folder (English(US), Chinese, Japanese, Korean). An 'audio' key is read as voices.English(US). Every pack carries its own size per host.",
   "_comment_navmesh": "\"navmesh\" = the navmesh archive of the version for the server's pathfindingserver (the release asset relic-navmesh-2.8.zip: a zip whose root holds <ver>/navmesh.json + <ver>/NavMesh/*.navmesh). Fill in the download \"url\" (https), the \"sha256\" of the zip (64 hex) and its \"size\" in bytes; the Pathfinding server card then offers the download to an agent that ships no navmesh, and the agent verifies the file against the digest and size. All three must be filled or the entry is ignored. THIS COMMITTED FILE IS THE ONE PLACE TO FILL IT (public values, nothing private): a version whose entry is empty in the private versions.json inherits the sample's at load, both on the dev PC and in a shipped build (every config/*.json ships next to the exe), and CI reads the same three values from this file to attach the archive to a release and build the installer that bundles it. A filled-in entry in the private file wins over the sample's.",
@@ -91,7 +91,7 @@
       "title": "Version 2.8",
       "desc": "Relive the summer of '22. Uncover the past of your closest friends, and be Fischl's faithful retainers in search of Immernachtreich's revival on the Mysterious Archipelago.",
       "server": "2.8",
-      "account": "Aetherr",
+      "account": "aetherr",
       "navmesh": { "url": "https://github.com/AliceHexenzirkel/Relic-GIO/releases/download/v0.1/relic-navmesh-2.8-v5.zip", "sha256": "c8f3c607d6406758bb19df61b13e5636abbde5efa793c6699bc6037941661a8c", "size": 127650863 },
       "client": {
         "cdnUrl": "https://autopatchhk.yuanshen.com/client_app/download/pc_zip/20220625012443_r2qBGYstD0u3Q9xK/GenshinImpact_2.8.0.zip",
@@ -117,7 +117,7 @@
               "id": "archive",
               "label": "Internet Archive",
               "note": "Lower download speeds.",
-              "url": "https://archive.org/download/GenshinImpact2.8.0/Audio_English%28US%29_2.8.0.zip",
+              "url": "https://archive.org/download/GenshinImpact2.8.0/hotpatches/Audio_English%28US%29_2.8.0.zip",
               "size": 8575243551
             }
           ]
@@ -131,7 +131,7 @@
               "id": "archive",
               "label": "Internet Archive",
               "note": "Lower download speeds.",
-              "url": "https://archive.org/download/GenshinImpact2.8.0/Audio_Chinese_2.8.0.zip",
+              "url": "https://archive.org/download/GenshinImpact2.8.0/hotpatches/Audio_Chinese_2.8.0.zip",
               "size": 7441982887
             }
           ]
@@ -145,7 +145,7 @@
               "id": "archive",
               "label": "Internet Archive",
               "note": "Lower download speeds.",
-              "url": "https://archive.org/download/GenshinImpact2.8.0/Audio_Japanese_2.8.0.zip",
+              "url": "https://archive.org/download/GenshinImpact2.8.0/hotpatches/Audio_Japanese_2.8.0.zip",
               "size": 9363410719
             }
           ]
@@ -161,6 +161,86 @@
               "note": "Lower download speeds.",
               "url": "https://archive.org/download/GenshinImpact2.8.0/Audio_Korean_2.8.0.zip",
               "size": 7279819313
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "3.2",
+      "title": "Version 3.2",
+      "desc": "Newly Added",
+      "server": "3.2",
+      "account": "",
+      "navmesh": { "url": "", "sha256": "", "size": 0 },
+      "client": {
+        "cdnUrl": "",
+        "driveId": "",
+        "size": 43486495057,
+        "mirrors": [
+          {
+            "id": "archive",
+            "label": "Internet Archive",
+            "note": "Lower download speeds.",
+            "url": "https://archive.org/download/genshin-impact-3.2.0/GenshinImpact_3.2.0.zip",
+            "size": 43486495057
+          }
+        ]
+      },
+      "voices": {
+        "English(US)": {
+          "cdnUrl": "",
+          "driveId": "",
+          "size": 8636049015,
+          "mirrors": [
+            {
+              "id": "archive",
+              "label": "Internet Archive",
+              "note": "Lower download speeds.",
+              "url": "https://archive.org/download/genshin-impact-3.2.0/Audio_English%28US%29_3.2.0.zip",
+              "size": 8636049015
+            }
+          ]
+        },
+        "Chinese": {
+          "cdnUrl": "",
+          "driveId": "",
+          "size": 7563404448,
+          "mirrors": [
+            {
+              "id": "archive",
+              "label": "Internet Archive",
+              "note": "Lower download speeds.",
+              "url": "https://archive.org/download/genshin-impact-3.2.0/Audio_Chinese_3.2.0.zip",
+              "size": 7563404448
+            }
+          ]
+        },
+        "Japanese": {
+          "cdnUrl": "",
+          "driveId": "",
+          "size": 9600817791,
+          "mirrors": [
+            {
+              "id": "archive",
+              "label": "Internet Archive",
+              "note": "Lower download speeds.",
+              "url": "https://archive.org/download/genshin-impact-3.2.0/Audio_Japanese_3.2.0.zip",
+              "size": 9600817791
+            }
+          ]
+        },
+        "Korean": {
+          "cdnUrl": "",
+          "driveId": "",
+          "size": 7416460811,
+          "mirrors": [
+            {
+              "id": "archive",
+              "label": "Internet Archive",
+              "note": "Lower download speeds.",
+              "url": "https://archive.org/download/genshin-impact-3.2.0/Audio_Korean_3.2.0.zip",
+              "size": 7416460811
             }
           ]
         }

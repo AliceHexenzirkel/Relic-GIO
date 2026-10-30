@@ -31,7 +31,7 @@
     "md5": "3ba38f7fdc75e4f893a743a32a13e48e"
    },
    "Korean": {
-    "url": "https://archive.org/download/GenshinImpact2.8.0/2.8_voice_Korean.7z",
+    "url": "https://archive.org/download/GenshinImpact2.8.0/hotpatches/2.8_voice_Korean.7z",
     "size": 6132507437,
     "md5": "f41f5915751d1f8142ff5d466a02556d"
    }
@@ -54,8 +54,9 @@
   "revision": 8812249,
   "suffix": "af39852a33"
  },
- "_voiceNote": "Voice packs of the BASE output (res.base) per language: what a client whose voice language has no pack on disk downloads at login (isPatch:false lines of release_res_versions_external). Display totals only -- the agent authorises and verifies every pack from the mirrored index itself (POST /server/hotpatch/voice).",
+ "_voiceNote": "Voice packs of the BASE output (res.base) per language: what a client whose voice language has no pack on disk downloads at login (isPatch:false lines of release_res_versions_external). Display totals only -- the agent authorises and verifies every pack from the mirrored index itself (POST /server/hotpatch/voice). `shortWait`: mirror a language before players need it -- this version's game waits only briefly for one file, so a pack fetched only when a player's game asks for it does not arrive in time.",
  "voice": {
+  "shortWait": true,
   "Chinese": {
    "files": 111,
    "bytes": 7441931288

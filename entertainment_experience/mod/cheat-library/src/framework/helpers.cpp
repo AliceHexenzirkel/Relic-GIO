@@ -92,9 +92,11 @@ app::String* string_to_il2cppi(std::string input) {
     return app::Marshal_PtrToStringAnsi((void*)input.c_str(), nullptr);
 }
 
+#if RELIC_GAME_VERSION != 32   // Marshal.PtrToStringUni is not in the 3.2 data
 app::String* string_to_il2cppi(std::wstring input) {
     return app::Marshal_PtrToStringUni((void*)input.c_str(), nullptr);
 }
+#endif
 
 std::string to_hex_string(app::Byte__Array* barray, int length) {
     if (barray == nullptr)

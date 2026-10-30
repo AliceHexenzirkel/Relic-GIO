@@ -11,7 +11,7 @@
 ; Romanian texts under the same names and is NOT included by default — see its header.
 
 #define AppName "Relic"
-#define AppVersion "1.0.0"
+#define AppVersion "1.2.0"
 #define AppExe "Relic.exe"
 ; The installer file name: RelicSetup.exe, or whatever /DOutputName=<name> passes on the iscc command
 ; line (the build with the navmesh bundle inside is compiled as RelicSetup-navmesh).

@@ -5,9 +5,10 @@ namespace Relic.Core.Install;
 
 /// <summary>
 /// The account the player logs in with IN THE GAME (the client's login screen) — unrelated to any
-/// Relic account or to the Windows account. Each version ships with a pre-made save in
-/// <c>agent/payloads/&lt;version&gt;/</c>, and that save's account is written in its manifest
-/// ("aether" on 1.6, "Aetherr" on 2.8). The password is NOT verified by the server (see
+/// Relic account or to the Windows account. A version whose payload (<c>agent/payloads/&lt;version&gt;/</c>)
+/// ships a pre-made save names that save's account in its manifest ("aether" on 1.6, "aetherr" on 2.8);
+/// a version whose payload ships no save names none, and neither does its catalogue entry — the answer
+/// is then empty and nothing shows a login. The password is NOT verified by the server (see
 /// docs/SERVER-DEPLOY.md), so it is only ever shown as an EXAMPLE, never as a required value.
 ///
 /// The manifest takes precedence over the catalogue: it is the very file that describes the save
